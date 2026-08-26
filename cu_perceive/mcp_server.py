@@ -145,18 +145,20 @@ def serve(host: str = "127.0.0.1", port: int = 8771) -> None:
         hover: bool = False,
         go: bool = False,
         hold: float = 0,
+        hold_key: str = "",
     ):
         """Plan/run against a stamp. go default false. Prefer norm (map 0-1000) or xy.
         Empty string = omitted. drag_norm / drag = one left-hold polyline. step_px default 4.
         ids need a prior ocr perceive. text=paste+restore (CLI flag is --type or --text). key like ctrl+c.
-        scroll: 3, -3, down:3, or up:3 (negative/down = wheel down). hold>0 with xy/norm/ids = press, sleep, release. key may be comma-separated."""
+        scroll: 3, -3, down:3, or up:3 (negative/down = wheel down). hold>0 with xy/norm/ids = press, sleep, release. key may be comma-separated.
+        hold_key=ctrl|control|shift|alt holds that modifier across the chain (Ctrl+click multi-select). Not hold (mouse long-press)."""
         specs = parse_steps(
             ids=_nz_str(ids), xy=_nz_str(xy), norm=_nz_str(norm), text=_nz_str(text),
             key=_nz_str(key), drag=_nz_str(drag), drag_norm=_nz_str(drag_norm),
             scroll=_nz_str(scroll), button=button, hover=hover, step_px=step_px, hold=hold,
         )
         frame, path = load_frame(stamp=_nz_str(stamp))
-        out = run_chain(frame, specs, dry_run=not go)
+        out = run_chain(frame, specs, dry_run=not go, hold_key=_nz_str(hold_key))
         out["json"] = str(path) if path else None
         return out
 

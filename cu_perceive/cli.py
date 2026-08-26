@@ -76,6 +76,7 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--button", default="left", help="left|right|middle")
     a.add_argument("--hover", action="store_true", help="move onto target, do not click")
     a.add_argument("--hold", type=float, default=0, help="seconds to hold click before release; with xy/norm/ids = long-press")
+    a.add_argument("--hold-key", dest="hold_key", choices=["ctrl", "control", "shift", "alt"], default=None, help="hold modifier across the chain (ctrl/control/shift/alt); not --hold mouse long-press")
     a.add_argument("--wait", help="seconds to wait at end of chain")
     a.add_argument("--gap", type=float, default=0.12)
 
@@ -148,7 +149,7 @@ def main(argv: list[str] | None = None) -> int:
         if not specs:
             raise SystemExit("act needs a click, --type/--text, --key, --drag, or --scroll")
         frame, path = load_frame(stamp=args.stamp, json_path=args.json)
-        out = run_chain(frame, specs, dry_run=not args.go, double=args.double, gap=args.gap)
+        out = run_chain(frame, specs, dry_run=not args.go, double=args.double, gap=args.gap, hold_key=args.hold_key)
         out["json"] = str(path)
         print(json.dumps(out, ensure_ascii=False))
         return 0

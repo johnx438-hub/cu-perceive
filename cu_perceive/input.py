@@ -34,6 +34,7 @@ VK = {
     "space": 0x20,
     "delete": 0x2E,
     "ctrl": 0x11,
+    "control": 0x11,
     "alt": 0x12,
     "shift": 0x10,
     "v": 0x56,
@@ -140,6 +141,22 @@ def tap_key(name: str) -> dict:
     _send(down)
     _send(up)
     return {"ok": True, "key": name.lower()}
+
+
+def key_down(name: str) -> dict:
+    vk = VK.get(name.lower())
+    if vk is None:
+        raise KeyError(f"unknown key {name}")
+    _vk_down(vk)
+    return {"ok": True, "key": name.lower(), "down": True}
+
+
+def key_up(name: str) -> dict:
+    vk = VK.get(name.lower())
+    if vk is None:
+        raise KeyError(f"unknown key {name}")
+    _vk_up(vk)
+    return {"ok": True, "key": name.lower(), "up": True}
 
 
 def _densify(points: list[tuple[int, int]], step_px: int = 4) -> list[tuple[int, int]]:

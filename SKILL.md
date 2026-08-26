@@ -41,6 +41,8 @@ C:\Users\jawn\miniconda3\python.exe -m cu_perceive <cmd>
 4. **可选 OCR / YOLO** — 有字的框用 `--ocr`。没字的图标/按钮加 `--yolo`（ScreenParser，类名当 text，可用 `--ids`）。默认都关。浏览器跳网址仍可先 OCR 地址栏。
 5. **动手** — `act --stamp …`。先 dry-run，Shawn 说了再 `--go`。
    - 点：`--norm 177,752` 或 `--xy 183,542`。长按加 `--hold 1.8`（按下、睡、松开；MCP 字段 `hold`）
+   - 链修饰键：`--hold-key ctrl`（MCP `hold_key`，接受 `ctrl`/`control`/`shift`/`alt`）在整条链的 click/hover 前按下，链结束（含失败）再松开。不是 `--hold`（那是鼠标长按）。Explorer/Office/列表多选：`--hold-key ctrl` + 多个 `--norm`/`--ids`，界面要落稳再加 `--gap`。Shift+click 头尾可以两次点击、不设 hold_key；需要时再用 `--hold-key shift`。
+   - 会动的选中（动画/弹起）用 `--gap 0.4`；按钮、丝带、浏览器标签保持默认 0.12，不要全局加大。
    - 键：`--type` / `--text` 剪贴板+Ctrl+V 并还原（MCP 字段是 `text`）；`--key` 可写多次并按出现顺序执行，也可 `ctrl+a,enter`
    - **已有字的输入框先 ctrl+a 再 type。** click+type 一次做完会插到原文中间（实测 about:blank 变成 aboubilibili.comblank）。拆两次 act：先 ids + key=ctrl+a，再单独 text + key=enter。
    - `--button right`；`--hover`；`--scroll -3` / `down:3` / `up:3`
@@ -61,6 +63,7 @@ C:\Users\jawn\miniconda3\python.exe -m cu_perceive <cmd>
 | 拖 | `--drag-norm` `--drag` `--step-px` | `drag_norm` `drag` `step_px` |
 | 滚 | `--scroll -3` / `down:3` | `scroll`: `-3` / `down:3` / `up:3` |
 | 长按 | `--hold 1.8` | `hold`（秒，配合 xy/norm/ids） |
+| 链修饰键 | `--hold-key ctrl` | `hold_key`（`ctrl`/`control`/`shift`/`alt`，不是鼠标长按） |
 | 打字 | `--type` / `--text` | `text` |
 | 读哪张图 | `map` | `map`（默认 jpeg-1280 内联，`map_inline=false` 只路径） |
 | 出图目录 | `--out` | `out_dir`。写进 WSL workspace 用 UNC `\\wsl.localhost\Ubuntu\home\archer\...`，不要 `/home/archer`（会落到 `C:\home\archer`）。`/mnt/c/...` 仍可用。另有 `map_wsl` |

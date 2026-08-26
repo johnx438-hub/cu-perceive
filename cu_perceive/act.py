@@ -262,8 +262,21 @@ def plan_steps(frame: dict, specs: list[dict]) -> list[dict]:
     return steps
 
 
-def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: bool = False, gap: float = 0.12) -> dict:
+HOLD_KEYS = {"ctrl": "ctrl", "control": "ctrl", "shift": "shift", "alt": "alt"}
+
+
+def normalize_hold_key(hold_key: str | None) -> str | None:
+    if hold_key in (None, ""):
+        return None
+    key = HOLD_KEYS.get(str(hold_key).strip().lower())
+    if key is None:
+        raise ValueError("hold_key must be ctrl, control, shift, or alt")
+    return key
+
+
+def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: bool = False, gap: float = 0.12, hold_key: str | None = None) -> dict:
     steps = plan_steps(frame or {}, specs)
+    hold = normalize_hold_key(hold_key)
     out = {
         "ok": True,
         "dry_run": bool(dry_run),
@@ -273,38 +286,46 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
         "origin": (frame or {}).get("origin"),
         "steps": steps,
     }
+    if hold:
+        out["hold_key"] = hold
     if dry_run:
         return out
-    from .input import click_xy, drag_path, enter_text, hover_xy, scroll_xy, tap_key
-    for n, step in enumerate(steps):
-        via = step["via"]
-        if via == "hover":
-            hover_xy(step["screen"][0], step["screen"][1])
-            step["hovered"] = True
-        elif via in ("id", "xy", "norm"):
-            click_xy(step["screen"][0], step["screen"][1], double=double, button=step.get("button") or "left", hold=float(step.get("hold") or 0))
-            step["clicked"] = True
-        elif via == "wait":
-            time.sleep(float(step["sec"]))
-            step["waited"] = True
-        elif via == "drag":
-            info = drag_path(step["screen_points"], step_px=int(step.get("step_px") or 4))
-            step["dragged"] = True
-            step["samples"] = info.get("samples")
-        elif via == "scroll":
-            xy = step.get("screen")
-            if xy:
-                scroll_xy(step["notches"], xy[0], xy[1])
-            else:
-                scroll_xy(step["notches"])
-            step["scrolled"] = True
-        elif via == "type":
-            enter_text(step["text"], via=step.get("input_via") or "paste")
-            step["typed"] = True
-            step["input_via"] = step.get("input_via") or "paste"
-        elif via == "key":
-            tap_key(step["key"])
-            step["tapped"] = True
-        if n + 1 < len(steps):
-            time.sleep(gap)
-    return out
+    from .input import click_xy, drag_path, enter_text, hover_xy, key_down, key_up, scroll_xy, tap_key
+    try:
+        if hold:
+            key_down(hold)
+        for n, step in enumerate(steps):
+            via = step["via"]
+            if via == "hover":
+                hover_xy(step["screen"][0], step["screen"][1])
+                step["hovered"] = True
+            elif via in ("id", "xy", "norm"):
+                click_xy(step["screen"][0], step["screen"][1], double=double, button=step.get("button") or "left", hold=float(step.get("hold") or 0))
+                step["clicked"] = True
+            elif via == "wait":
+                time.sleep(float(step["sec"]))
+                step["waited"] = True
+            elif via == "drag":
+                info = drag_path(step["screen_points"], step_px=int(step.get("step_px") or 4))
+                step["dragged"] = True
+                step["samples"] = info.get("samples")
+            elif via == "scroll":
+                xy = step.get("screen")
+                if xy:
+                    scroll_xy(step["notches"], xy[0], xy[1])
+                else:
+                    scroll_xy(step["notches"])
+                step["scrolled"] = True
+            elif via == "type":
+                enter_text(step["text"], via=step.get("input_via") or "paste")
+                step["typed"] = True
+                step["input_via"] = step.get("input_via") or "paste"
+            elif via == "key":
+                tap_key(step["key"])
+                step["tapped"] = True
+            if n + 1 < len(steps):
+                time.sleep(gap)
+        return out
+    finally:
+        if hold:
+            key_up(hold)
