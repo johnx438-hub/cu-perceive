@@ -21,7 +21,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771) -> None:
     from mcp.server.transport_security import TransportSecuritySettings
     from PIL import Image as PILImage
 
-    from .act import load_frame, parse_steps, run_chain
+    from .act import coerce_ids, load_frame, parse_steps, run_chain
     from .core import perceive
     from .launch import launch, list_apps
     from .windows import find_window, list_windows, windows_map
@@ -132,7 +132,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771) -> None:
     @app.tool()
     def act(
         stamp: str = "",
-        ids: str = "",
+        ids: str | int | list = "",
         xy: str = "",
         norm: str = "",
         text: str = "",
@@ -149,11 +149,11 @@ def serve(host: str = "127.0.0.1", port: int = 8771) -> None:
     ):
         """Plan/run against a stamp. go default false. Prefer norm (map 0-1000) or xy.
         Empty string = omitted. drag_norm / drag = one left-hold polyline. step_px default 4.
-        ids need a prior ocr perceive. text=paste+restore (CLI flag is --type or --text). key like ctrl+c.
-        scroll: 3, -3, down:3, or up:3 (negative/down = wheel down). hold>0 with xy/norm/ids = press, sleep, release. key may be comma-separated.
+        ids: comma string, a single int, or a list (5 / '5' / [5,9] / '14,9,16'); needs a prior ocr perceive. text=paste+restore (CLI flag is --type or --text). key like ctrl+c.
+        scroll: 3, -3, down:3, or up:3 (negative/down = wheel down). scroll + xy/norm/ids hovers then wheels (no left-click). hold>0 with xy/norm/ids = press, sleep, release. key may be comma-separated.
         hold_key=ctrl|control|shift|alt holds that modifier across the chain (Ctrl+click multi-select). Not hold (mouse long-press)."""
         specs = parse_steps(
-            ids=_nz_str(ids), xy=_nz_str(xy), norm=_nz_str(norm), text=_nz_str(text),
+            ids=coerce_ids(ids), xy=_nz_str(xy), norm=_nz_str(norm), text=_nz_str(text),
             key=_nz_str(key), drag=_nz_str(drag), drag_norm=_nz_str(drag_norm),
             scroll=_nz_str(scroll), button=button, hover=hover, step_px=step_px, hold=hold,
         )

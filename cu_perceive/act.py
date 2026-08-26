@@ -101,9 +101,32 @@ def parse_scroll(raw: str) -> int:
     except ValueError as e:
         raise ValueError("scroll wants 3, -3, down:3, or up:3 (negative/down = wheel down)") from e
 
+
+def coerce_ids(ids) -> str | None:
+    """Accept str, int, or list. Return a comma-string or None.
+
+    5 -> "5"; [5, 9] -> "5,9"; "14,9,16" is unchanged. Empty/None -> None.
+    """
+    if ids is None:
+        return None
+    if isinstance(ids, bool):
+        return None
+    if isinstance(ids, int):
+        return str(ids)
+    if isinstance(ids, (list, tuple)):
+        parts: list[str] = []
+        for x in ids:
+            s = coerce_ids(x)
+            if s:
+                parts.append(s)
+        return ",".join(parts) if parts else None
+    s = str(ids).strip()
+    return s or None
+
+
 def parse_steps(
     steps: str | None = None,
-    ids: str | None = None,
+    ids: str | int | list | None = None,
     xy: str | None = None,
     norm: str | None = None,
     text: str | None = None,
@@ -138,6 +161,7 @@ def parse_steps(
             else:
                 out.append({"kind": "id", "id": int(raw)})
     else:
+        ids = coerce_ids(ids)
         if ids:
             for x in ids.replace(" ", "").split(","):
                 if x:
@@ -176,7 +200,12 @@ def parse_steps(
         for s in out:
             if s.get("kind") in ("id", "xy", "norm"):
                 s["hold"] = float(hold)
-    if hover:
+    has_scroll = any(s.get("kind") == "scroll" for s in out)
+    has_pos = any(s.get("kind") in ("id", "xy", "norm") for s in out)
+    # scroll + xy/norm/ids => hover (move, do not click) unless an explicit
+    # click was asked for (hold>0 long-press). hover=True still wins.
+    click_intent = float(hold or 0) > 0
+    if hover or (has_scroll and has_pos and not click_intent):
         for s in out:
             if s.get("kind") in ("id", "xy", "norm"):
                 s["hover"] = True

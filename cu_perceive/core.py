@@ -147,11 +147,18 @@ def perceive(
         win = find_window(hwnd=int(hwnd))
     bgr, w, h = _grab(src, hwnd=None if src else hwnd, activate=focus)
     if src is None and hwnd is not None:
-        from .windows import is_sentinel_origin, refresh_geom
+        from .windows import capture_looks_implausible, is_sentinel_origin, refresh_geom
         origin, win2 = refresh_geom(int(hwnd))
         if win2:
             win = win2
         if is_sentinel_origin(origin):
+            origin, win2 = refresh_geom(int(hwnd))
+            if win2:
+                win = win2
+        # Iconic restore already settled inside capture_hwnd. Recapture here
+        # only if the frame is still implausible; no extra delay if not iconic.
+        if capture_looks_implausible(bgr, origin):
+            bgr, w, h = _grab(None, hwnd=int(hwnd), activate=False)
             origin, win2 = refresh_geom(int(hwnd))
             if win2:
                 win = win2

@@ -140,16 +140,56 @@ def is_sentinel_origin(origin: dict | None) -> bool:
     return False
 
 
+RESTORE_SETTLE_S = 0.30
+
+
+def desktop_capture_sizes() -> set[tuple[int, int]]:
+    """Virtual-screen and primary-monitor sizes; a hwnd grab matching these is implausible."""
+    sizes: set[tuple[int, int]] = set()
+    try:
+        _l, _t, vw, vh = virtual_screen()
+        if vw > 0 and vh > 0:
+            sizes.add((int(vw), int(vh)))
+    except Exception:
+        pass
+    try:
+        import win32api
+        pw, ph = int(win32api.GetSystemMetrics(0)), int(win32api.GetSystemMetrics(1))
+        if pw > 0 and ph > 0:
+            sizes.add((pw, ph))
+    except Exception:
+        pass
+    return sizes
+
+
+def capture_looks_implausible(arr, origin: dict | None = None) -> bool:
+    """True if a hwnd grab is still sentinel, stub-sized (~144x20), or a full-desktop fallback."""
+    if arr is None:
+        return True
+    try:
+        h, w = arr.shape[:2]
+    except Exception:
+        return True
+    if is_sentinel_origin(origin):
+        return True
+    if w < 80 or h < 80:
+        return True
+    if (int(w), int(h)) in desktop_capture_sizes():
+        return True
+    return False
+
+
 def refresh_geom(hwnd: int) -> tuple[dict | None, dict | None]:
     """Client origin + window row after restore. Call AFTER capture, not before."""
     import time
     import win32gui
     hwnd = int(hwnd)
     origin = client_origin(hwnd)
-    if win32gui.IsIconic(hwnd) or is_sentinel_origin(origin):
+    was_iconic = bool(win32gui.IsIconic(hwnd))
+    if was_iconic or is_sentinel_origin(origin):
         from enikk.game.window import WindowService
         WindowService().force_foreground(hwnd)
-        time.sleep(0.15)
+        time.sleep(RESTORE_SETTLE_S if was_iconic else 0.15)
         origin = client_origin(hwnd)
     return origin, find_window(hwnd=hwnd)
 
@@ -169,11 +209,24 @@ def client_origin(hwnd: int) -> dict | None:
 
 def capture_hwnd(hwnd: int, activate: bool = False):
     from enikk.game.capture import CaptureService
+    import time
     import win32gui
     hwnd = int(hwnd)
-    if win32gui.IsIconic(hwnd) or activate:
-        return CaptureService().capture(hwnd, activate=True)
-    return CaptureService().capture(hwnd, activate=False)
+    was_iconic = bool(win32gui.IsIconic(hwnd))
+    if was_iconic or activate:
+        arr = CaptureService().capture(hwnd, activate=True)
+    else:
+        return CaptureService().capture(hwnd, activate=False)
+    if not was_iconic:
+        return arr
+    # Restore animation can yield wallpaper / sentinel on the first frame.
+    time.sleep(RESTORE_SETTLE_S)
+    origin = client_origin(hwnd)
+    if capture_looks_implausible(arr, origin):
+        again = CaptureService().capture(hwnd, activate=is_sentinel_origin(origin))
+        if again is not None:
+            return again
+    return arr
 
 
 def virtual_screen() -> tuple[int, int, int, int]:
