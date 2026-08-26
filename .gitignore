@@ -1,0 +1,26 @@
+# model weights (download separately; see weights/README.md)
+weights/**/*.pt
+weights/**/*.onnx
+weights/**/*.onnx.bad
+weights/**/*.bin
+
+# python
+__pycache__/
+.venv/
+venv/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+
+# local runtime / env
+shots/
+.cache/
+.env
+.env.*
+!.env.example
+*.local

@@ -1,0 +1,18 @@
+[
+  {
+    "name": "steam",
+    "exe": "D:\\steamValve\\steam.exe"
+  },
+  {
+    "name": "doubao",
+    "exe": "C:\\Users\\jawn\\AppData\\Local\\Doubao\\Application\\Doubao.exe"
+  },
+  {
+    "name": "chrome",
+    "exe": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+  },
+  {
+    "name": "edge",
+    "exe": "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"
+  }
+]
