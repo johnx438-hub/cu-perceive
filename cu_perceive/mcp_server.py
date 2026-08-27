@@ -106,7 +106,12 @@ def serve(host: str = "127.0.0.1", port: int = 8771) -> None:
         hwnd 0 and empty title/exe = primary screen. Returns JSON plus a compressed map (0-1000 still valid; clicks use stamp width/height).
         map_inline=false = JSON/path only. ocr=true only for text ids. yolo=true runs ScreenParser (class names as item text). Default both off. No click.
         out_dir optional: Windows path or /mnt/c/... ; response also has map_wsl / png_wsl (lowercase drive)."""
-        out = perceive(image=_nz_str(image), hwnd=_nz_int(hwnd), title=_nz_str(title), exe=_nz_str(exe), ocr=ocr, yolo=yolo, out_dir=_nz_str(out_dir))
+        hwnd_n = _nz_int(hwnd)
+        title_n = _nz_str(title)
+        exe_n = _nz_str(exe)
+        # Pin then look: hwnd/title/exe always activate so capture_hwnd double-shots.
+        pin = bool(hwnd_n or title_n or exe_n)
+        out = perceive(image=_nz_str(image), hwnd=hwnd_n, title=title_n, exe=exe_n, focus=pin, ocr=ocr, yolo=yolo, out_dir=_nz_str(out_dir))
         payload = {
             "stamp": out["stamp"],
             "count": len(out["items"]),

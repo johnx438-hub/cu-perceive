@@ -37,7 +37,7 @@ C:\Users\jawn\miniconda3\python.exe -m cu_perceive <cmd>
 
 1. **选窗** — `windows`（MCP 同名）。默认出桌面标尺图：格子 + `#id hwnd`。看 `map` 选。`--title` / `--exe` / `--hwnd` 只要一行。`--no-map` / `map=false` 只出 JSON。
 2. **钉住再看** — `perceive --hwnd N`（MCP：`perceive_window`）。默认原图 + `.grid.png`，字段 `map`。不要默认开 OCR。
-   **最小化窗**：perceive 会把 IsIconic 最小化窗拉起来再截，不要再 launch。第一帧若像桌面/哨兵（`origin.left <= -10000` 或客户区 144×20），丢掉 stamp 再 perceive 一次（代码也会 settle ~0.3s 后必要时重截）。已在前台的窗不加延迟。
+   **restore / 钉窗后固定双拍，第一张丢掉**（壁纸 / 上面那层 Chrome / CEF PrintWindow 空帧）。settle 0.3s 后取第二帧。未 restore 且未 activate 的静默截图仍单拍。不要再 launch。
 3. **读 `map`** — 没标上的点（图标、牌面、空白画布）看格子，不要看 `.anno.png`。
 4. **可选 OCR / YOLO** — 有字的框用 `--ocr`。没字的图标/按钮加 `--yolo`（ScreenParser，类名当 text，可用 `--ids`）。默认都关。浏览器跳网址仍可先 OCR 地址栏。
 5. **动手** — `act --stamp …`。先 dry-run，Shawn 说了再 `--go`。

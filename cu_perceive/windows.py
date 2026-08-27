@@ -213,20 +213,15 @@ def capture_hwnd(hwnd: int, activate: bool = False):
     import win32gui
     hwnd = int(hwnd)
     was_iconic = bool(win32gui.IsIconic(hwnd))
-    if was_iconic or activate:
-        arr = CaptureService().capture(hwnd, activate=True)
-    else:
+    if not (was_iconic or activate):
         return CaptureService().capture(hwnd, activate=False)
-    if not was_iconic:
-        return arr
-    # Restore animation can yield wallpaper / sentinel on the first frame.
+    # Restore / pin-to-front: first frame can be wallpaper, the window
+    # sitting on top (e.g. Chrome over Steam CEF), or a PrintWindow empty.
+    # Always discard it. Do not gate on capture_looks_implausible.
+    CaptureService().capture(hwnd, activate=True)
     time.sleep(RESTORE_SETTLE_S)
-    origin = client_origin(hwnd)
-    if capture_looks_implausible(arr, origin):
-        again = CaptureService().capture(hwnd, activate=is_sentinel_origin(origin))
-        if again is not None:
-            return again
-    return arr
+    again = CaptureService().capture(hwnd, activate=False)
+    return again
 
 
 def virtual_screen() -> tuple[int, int, int, int]:
