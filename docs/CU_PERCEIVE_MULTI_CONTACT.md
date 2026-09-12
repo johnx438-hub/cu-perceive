@@ -33,11 +33,11 @@
 | 记事本 / 资源管理器 / 标准对话框 | 格子（可加粗 UIA 节点叠 id） | **`method=uia`** 或 `post` | `input` 若无控件 |
 | Office / 重 UIA 套件 | 同上 | **`uia`** | `post` → `input` |
 | Paint 画布 / 设计工具客户区 | 格子 + 可选 ROI | **`input`**（点/拖）· path 用 B | `post` 多半无效 |
-| Chrome / Edge / 内嵌 CEF | 格子；**不要**指望 post | **`input`** 或浏览器专用通道 | UIA 仅地址栏/壳按钮偶发可用 |
+| Chrome / Edge / 内嵌 CEF | 格子为主；**不要**指望 post | 默认 **`input`**；页面 a11y 好时可 `perceive --uia` 点有名节点 | 壳按钮常见；**正文 UIA 取决于页面**（非保证） |
 | Electron 壳 | 格子 | **`input`** | 壳上菜单偶发 UIA |
 | 游戏 / DirectX | 格子（够切）；YOLO 谨慎 | **`input`** + 人工 `--go` | 非侵入基本放弃 |
 
-「浏览器最佳」不成立；「系统原声」≈ **UIA 友好控件**，不是凡是微软图标都灵。
+「浏览器最佳」不成立；「系统原声」≈ **UIA 友好控件**，不是凡是微软图标都灵。Chrome **正文**偶有完整 a11y 树（可 Invoke/Select），仍按页碰运气，别当默认。
 
 ## 4. 统一 act 合同（草案）
 
@@ -145,7 +145,7 @@ agent 侧 skill 写死：
 
 ## 9. 结论
 
-cu-perceive 保持「眼睛=格子、手=可插拔」。**post/uia/auto 单点已落地**，path 与画布继续真鼠标；浏览器别硬吃非侵入。**S4 `perceive --uia` 已落地**；下一步若开工：S5 path 真鼠标 / 可选 UIA id→act。
+cu-perceive 保持「眼睛=格子、手=可插拔」。**post/uia/auto 单点已落地**，path 与画布继续真鼠标；浏览器别硬吃非侵入（默认 `input`）。**S4 `perceive --uia` 已落地**——页面暴露有名节点时可用，未命中回 `input`；下一步若开工：S5 path 真鼠标 / 可选 UIA id→act。
 
 ## S5 (doc)
 
