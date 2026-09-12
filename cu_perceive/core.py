@@ -118,6 +118,102 @@ def _grid(img: np.ndarray) -> np.ndarray:
     return draw_grid(img)
 
 
+def _parse_roi_parts(roi) -> list[int]:
+    """Parse roi as L,T,W,H (list/tuple or comma string) -> 4 ints."""
+    if isinstance(roi, str):
+        parts = [p.strip() for p in roi.replace(" ", ",").split(",") if p.strip() != ""]
+        if len(parts) != 4:
+            raise ValueError(f"roi must be L,T,W,H (4 ints), got {roi!r}")
+        try:
+            return [int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3])]
+        except ValueError as e:
+            raise ValueError(f"roi must be integers L,T,W,H: {roi!r}") from e
+    if isinstance(roi, (list, tuple)) and len(roi) == 4:
+        try:
+            return [int(roi[0]), int(roi[1]), int(roi[2]), int(roi[3])]
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"roi must be integers L,T,W,H: {roi!r}") from e
+    raise ValueError(f"roi must be L,T,W,H (4 ints), got {roi!r}")
+
+
+def clamp_roi(roi, img_w: int, img_h: int) -> list[int]:
+    """Parse L,T,W,H and clamp to image bounds. Fail if empty after clamp."""
+    L0, T0, W0, H0 = _parse_roi_parts(roi)
+    if W0 <= 0 or H0 <= 0:
+        raise ValueError(f"roi empty/non-positive size: [{L0},{T0},{W0},{H0}]")
+    L = max(0, L0)
+    T = max(0, T0)
+    R = min(int(img_w), L0 + W0)
+    B = min(int(img_h), T0 + H0)
+    W = R - L
+    H = B - T
+    if W <= 0 or H <= 0:
+        raise ValueError(
+            f"roi empty after clamp: [{L0},{T0},{W0},{H0}] vs image {img_w}x{img_h}"
+        )
+    return [L, T, W, H]
+
+
+def roi_norm_to_pixel(roi_norm, full_w: int, full_h: int, default_half: int = 150):
+    """Convert [cx,cy] or [cx,cy,half] in full-window 0-1000 -> clamped pixel ROI + normalized triple.
+
+    half is in 0-1000 units on both axes (square in norm space). Default half=150.
+    """
+    if isinstance(roi_norm, str):
+        parts = [p.strip() for p in roi_norm.replace(" ", ",").split(",") if p.strip() != ""]
+        try:
+            nums = [int(p) for p in parts]
+        except ValueError as e:
+            raise ValueError(f"roi_norm must be CX,CY[,HALF] ints, got {roi_norm!r}") from e
+    elif isinstance(roi_norm, (list, tuple)):
+        try:
+            nums = [int(x) for x in roi_norm]
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"roi_norm must be CX,CY[,HALF] ints, got {roi_norm!r}") from e
+    else:
+        raise ValueError(f"roi_norm must be CX,CY[,HALF], got {roi_norm!r}")
+    if len(nums) not in (2, 3):
+        raise ValueError(f"roi_norm must be CX,CY[,HALF] (2 or 3 ints), got {roi_norm!r}")
+    cx, cy = nums[0], nums[1]
+    half = int(nums[2]) if len(nums) == 3 else int(default_half)
+    if half <= 0:
+        raise ValueError(f"roi_norm half must be > 0, got {half}")
+    cx_px = cx / 1000.0 * full_w
+    cy_px = cy / 1000.0 * full_h
+    half_w = half / 1000.0 * full_w
+    half_h = half / 1000.0 * full_h
+    L0 = int(round(cx_px - half_w))
+    T0 = int(round(cy_px - half_h))
+    W0 = int(round(2 * half_w))
+    H0 = int(round(2 * half_h))
+    if W0 < 1:
+        W0 = 1
+    if H0 < 1:
+        H0 = 1
+    roi_px = clamp_roi([L0, T0, W0, H0], full_w, full_h)
+    return roi_px, [cx, cy, half]
+
+
+def resolve_perceive_roi(roi=None, roi_norm=None, *, full_w: int, full_h: int):
+    """Resolve optional roi / roi_norm into (pixel_roi, roi_norm_triple). Mutually exclusive."""
+    if roi is not None and roi_norm is not None:
+        raise ValueError("roi and roi_norm are mutually exclusive")
+    if roi is None and roi_norm is None:
+        return None, None
+    if roi_norm is not None:
+        return roi_norm_to_pixel(roi_norm, full_w, full_h)
+    roi_px = clamp_roi(roi, full_w, full_h)
+    L, T, W, H = roi_px
+    cx = int(round((L + W / 2.0) / max(full_w, 1) * 1000))
+    cy = int(round((T + H / 2.0) / max(full_h, 1) * 1000))
+    half_x = (W / 2.0) / max(full_w, 1) * 1000
+    half_y = (H / 2.0) / max(full_h, 1) * 1000
+    half = int(round(max(half_x, half_y)))
+    if half < 1:
+        half = 1
+    return roi_px, [cx, cy, half]
+
+
 def perceive(
     image: str | None = None,
     out_dir: str | None = None,
@@ -127,6 +223,9 @@ def perceive(
     focus: bool = False,
     ocr: bool = False,
     yolo: bool = False,
+    uia: bool = False,
+    roi=None,
+    roi_norm=None,
 ) -> dict:
     from .paths import attach_wsl, coerce_out_dir
     out_dir = coerce_out_dir(out_dir)
@@ -165,9 +264,27 @@ def perceive(
             origin, win2 = refresh_geom(int(hwnd))
             if win2:
                 win = win2
+    full_w, full_h = int(w), int(h)
+    # E2 light verify: optional ROI crop. Map grid 0-1000 is relative to the ROI
+    # crop (local verify space). For next act clicks prefer a fresh full perceive
+    # unless converting ROI-local norms back to full-window coordinates.
+    roi_px, roi_norm_out = resolve_perceive_roi(roi, roi_norm, full_w=full_w, full_h=full_h)
+    verify_light = roi_px is not None
+    if verify_light:
+        L, T, Wcrop, Hcrop = roi_px
+        bgr = bgr[T : T + Hcrop, L : L + Wcrop]
+        if bgr.size == 0:
+            raise ValueError(f"roi crop empty: {roi_px} vs {full_w}x{full_h}")
+        w, h = int(bgr.shape[1]), int(bgr.shape[0])
+
     items: list[dict] = []
+    ocr_ms = None
     if ocr:
+        import time as _time
+
+        _t_ocr = _time.perf_counter()
         raw = _parser().parse(bgr)
+        ocr_ms = int(round((_time.perf_counter() - _t_ocr) * 1000))
         items.extend(_to_items(raw, w, h))
     if yolo:
         from .yolo import detect as yolo_detect
@@ -207,6 +324,45 @@ def perceive(
     win_slim = None
     if win:
         win_slim = {k: win[k] for k in ("hwnd", "title", "exe", "pid", "exe_path", "rect") if k in win}
+    # S4: optional compact UIA nodes (additive; fail-closed when requested).
+    uia_nodes: list = []
+    uia_meta: dict = {}
+    uia_ok = True
+    uia_error = None
+    if uia:
+        from .uia import collect_uia_nodes
+        if verify_light:
+            uia_ok = False
+            uia_error = (
+                "perceive --uia is full-window only for E2; omit --roi/--roi-norm when using --uia"
+            )
+        elif hwnd is None:
+            uia_ok = False
+            uia_error = "perceive --uia requires a pinned window hwnd (use --hwnd/--title/--exe)"
+        else:
+            import time as _time
+
+            ol = float((origin or {}).get("left") or 0)
+            ot = float((origin or {}).get("top") or 0)
+            _t_uia = _time.perf_counter()
+            uia_res = collect_uia_nodes(
+                int(hwnd),
+                width=int(w),
+                height=int(h),
+                origin_left=ol,
+                origin_top=ot,
+            )
+            uia_ms = int(round((_time.perf_counter() - _t_uia) * 1000))
+            uia_ok = bool(uia_res.get("ok"))
+            uia_error = uia_res.get("error")
+            uia_nodes = list(uia_res.get("uia_nodes") or [])
+            uia_meta = {
+                k: uia_res[k]
+                for k in ("uia_count", "uia_visited", "uia_truncated", "caps")
+                if k in uia_res
+            }
+            uia_meta["uia_ms"] = uia_ms
+
     payload = {
         "stamp": stamp,
         "width": w,
@@ -219,12 +375,28 @@ def perceive(
         "items": items,
         "ocr": bool(ocr),
         "yolo": bool(yolo),
+        "uia": bool(uia),
         "png": str(png),
         "map": str(gridp),
         "grid": str(gridp),
         "anno": str(anno) if anno else None,
         "json": str(js),
     }
+    if verify_light:
+        payload["roi"] = list(roi_px)
+        payload["full_width"] = full_w
+        payload["full_height"] = full_h
+        payload["verify_light"] = True
+        payload["roi_norm"] = list(roi_norm_out) if roi_norm_out is not None else None
+    if ocr_ms is not None:
+        payload["ocr_ms"] = ocr_ms
+    if uia:
+        payload["uia_nodes"] = uia_nodes
+        payload["uia_count"] = len(uia_nodes)
+        payload.update(uia_meta)
+        payload["ok"] = bool(uia_ok)
+        if uia_error:
+            payload["error"] = uia_error
     attach_wsl(payload, 'png', 'map', 'grid', 'anno', 'json')
     js.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return payload

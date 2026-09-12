@@ -5,7 +5,7 @@ import ctypes
 import time
 from ctypes import wintypes
 
-user32 = ctypes.windll.user32
+user32 = ctypes.WinDLL("user32", use_last_error=True)
 try:
     user32.SetProcessDPIAware()
 except Exception:
@@ -23,6 +23,18 @@ MOUSEEVENTF_ABSOLUTE = 0x8000
 MOUSEEVENTF_VIRTUALDESK = 0x4000
 WHEEL_DELTA = 120
 ULONG_PTR = ctypes.c_ulonglong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_ulong
+
+# HWND PostMessage mouse (S1 method=post). No SetCursorPos / SendInput.
+WM_MOUSEMOVE = 0x0200
+WM_LBUTTONDOWN = 0x0201
+WM_LBUTTONUP = 0x0202
+WM_RBUTTONDOWN = 0x0204
+WM_RBUTTONUP = 0x0205
+WM_MBUTTONDOWN = 0x0207
+WM_MBUTTONUP = 0x0208
+MK_LBUTTON = 0x0001
+MK_RBUTTON = 0x0002
+MK_MBUTTON = 0x0010
 
 VK = {
     "enter": 0x0D,
@@ -78,6 +90,10 @@ class INPUT(ctypes.Structure):
     _fields_ = (("type", wintypes.DWORD), ("union", INPUT_UNION))
 
 
+class POINT(ctypes.Structure):
+    _fields_ = (("x", wintypes.LONG), ("y", wintypes.LONG))
+
+
 def _send(inp: INPUT) -> None:
     user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
 
@@ -112,7 +128,109 @@ def move(x: int, y: int) -> None:
     _mouse(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, int(x), int(y))
 
 
+def pack_lparam(cx: int, cy: int) -> int:
+    """Pack client coords into WM_* mouse lParam (low word = x, high word = y)."""
+    return ((int(cy) & 0xFFFF) << 16) | (int(cx) & 0xFFFF)
 
+
+def screen_to_client(hwnd: int, sx: int, sy: int) -> tuple[int, int]:
+    """Screen pixels -> client-relative for hwnd. Raises on failure."""
+    hwnd = int(hwnd)
+    if not user32.IsWindow(hwnd):
+        raise OSError(f"hwnd {hwnd} is not a window")
+    pt = POINT(int(sx), int(sy))
+    ok = user32.ScreenToClient(hwnd, ctypes.byref(pt))
+    if not ok:
+        raise OSError(f"ScreenToClient failed for hwnd={hwnd} screen=({sx},{sy})")
+    return int(pt.x), int(pt.y)
+
+
+def _post_msg(hwnd: int, msg: int, wparam: int, lparam: int) -> None:
+    """PostMessageW; fail-closed (no SendInput fallback)."""
+    hwnd = int(hwnd)
+    if not user32.IsWindow(hwnd):
+        raise OSError(f"hwnd {hwnd} is not a window")
+    # BOOL PostMessageW(HWND, UINT, WPARAM, LPARAM)
+    user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    user32.PostMessageW.restype = wintypes.BOOL
+    ctypes.set_last_error(0)
+    ok = user32.PostMessageW(hwnd, int(msg), int(wparam), int(lparam))
+    if not ok:
+        err = ctypes.get_last_error()
+        raise OSError(f"PostMessage failed hwnd={hwnd} msg=0x{msg:04x} last_error={err}")
+
+
+def _button_msgs(button: str) -> tuple[int, int, int]:
+    btn = (button or "left").lower()
+    if btn == "right":
+        return WM_RBUTTONDOWN, WM_RBUTTONUP, MK_RBUTTON
+    if btn == "middle":
+        return WM_MBUTTONDOWN, WM_MBUTTONUP, MK_MBUTTON
+    if btn != "left":
+        raise ValueError(f"post click button must be left|right|middle, got {button!r}")
+    return WM_LBUTTONDOWN, WM_LBUTTONUP, MK_LBUTTON
+
+
+def post_click_messages(cx: int, cy: int, button: str = "left", double: bool = False) -> list[dict]:
+    """Describe the PostMessage sequence (for dry-run / tests). Client coords."""
+    down_msg, up_msg, down_flag = _button_msgs(button)
+    lp = pack_lparam(cx, cy)
+    seq = [
+        {"msg": "WM_MOUSEMOVE", "msg_id": WM_MOUSEMOVE, "wparam": 0, "lparam": lp, "client": [int(cx), int(cy)]},
+        {"msg": "DOWN", "msg_id": down_msg, "wparam": down_flag, "lparam": lp, "client": [int(cx), int(cy)]},
+        {"msg": "UP", "msg_id": up_msg, "wparam": 0, "lparam": lp, "client": [int(cx), int(cy)]},
+    ]
+    if double and (button or "left").lower() == "left":
+        seq.extend([
+            {"msg": "DOWN", "msg_id": down_msg, "wparam": down_flag, "lparam": lp, "client": [int(cx), int(cy)]},
+            {"msg": "UP", "msg_id": up_msg, "wparam": 0, "lparam": lp, "client": [int(cx), int(cy)]},
+        ])
+    return seq
+
+
+def post_click_xy(
+    hwnd: int,
+    x: int,
+    y: int,
+    *,
+    button: str = "left",
+    double: bool = False,
+    screen: bool = True,
+) -> dict:
+    """Non-invasive click via HWND PostMessage.
+
+    If screen=True (default), (x,y) are screen pixels and converted with ScreenToClient.
+    If screen=False, (x,y) are already client-relative.
+    Does NOT SetCursorPos or SendInput. Fail-closed on PostMessage error.
+    """
+    hwnd = int(hwnd)
+    if screen:
+        cx, cy = screen_to_client(hwnd, int(x), int(y))
+        sx, sy = int(x), int(y)
+    else:
+        cx, cy = int(x), int(y)
+        sx, sy = None, None
+    down_msg, up_msg, down_flag = _button_msgs(button)
+    lp = pack_lparam(cx, cy)
+    count = 2 if (double and (button or "left").lower() == "left") else 1
+    for _ in range(count):
+        _post_msg(hwnd, WM_MOUSEMOVE, 0, lp)
+        _post_msg(hwnd, down_msg, down_flag, lp)
+        time.sleep(0.035)
+        _post_msg(hwnd, up_msg, 0, lp)
+        time.sleep(0.050)
+    out = {
+        "ok": True,
+        "method": "post",
+        "hwnd": hwnd,
+        "client": [cx, cy],
+        "lparam": lp,
+        "button": (button or "left").lower(),
+        "double": bool(double),
+    }
+    if sx is not None:
+        out["screen"] = [sx, sy]
+    return out
 
 
 def type_text(text: str, gap: float = 0.012) -> dict:
@@ -224,6 +342,7 @@ def scroll_xy(notches: int, x: int | None = None, y: int | None = None) -> dict:
     wheel = INPUT(type=INPUT_MOUSE, union=INPUT_UNION(mi=MOUSEINPUT(0, 0, data_u, MOUSEEVENTF_WHEEL, 0, 0)))
     _send(wheel)
     return {"ok": True, "notches": int(notches), "xy": [x, y] if x is not None else None}
+
 
 def _vk_down(vk: int) -> None:
     _send(INPUT(type=INPUT_KEYBOARD, union=INPUT_UNION(ki=KEYBDINPUT(vk, 0, 0, 0, 0))))

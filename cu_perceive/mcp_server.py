@@ -24,7 +24,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771) -> None:
     from .act import coerce_ids, load_frame, parse_steps, run_chain
     from .core import perceive
     from .launch import launch, list_apps
-    from .windows import find_window, list_windows, windows_map
+    from .windows import PICK_RULE, find_windows, list_windows, windows_map
 
     def _thumb_image(map_path: str) -> Image:
         im = PILImage.open(map_path)
@@ -39,6 +39,10 @@ def serve(host: str = "127.0.0.1", port: int = 8771) -> None:
         return Image(data=buf.getvalue(), format="jpeg")
 
     def _with_map(payload: dict, map_path, map_inline: bool = True):
+        # FastMCP turns [str, Image] into separate content blocks:
+        #   TextContent(JSON) + ImageContent(type=image, data=base64, mimeType=...)
+        # Do NOT concat blocks into one string and JSON.parse — that blows up at the join.
+        # Clients must: parse text blocks as JSON; treat type=image blocks as the map.
         text = json.dumps(payload, ensure_ascii=False)
         if not map_inline:
             return text
@@ -69,12 +73,29 @@ def serve(host: str = "127.0.0.1", port: int = 8771) -> None:
     @app.tool()
     def windows(title: str = "", exe: str = "", hwnd: int = 0, map: bool = True, map_inline: bool = True):
         """Desktop window list + ruler map (0-1000, screen space). Read the image to pick hwnd.
-        Returns JSON plus a compressed map image (full PNG still on disk). hwnd 0 / empty title+exe = all windows.
-        map_inline=false = JSON only. title/exe/hwnd set = one row, no image. Does not click."""
+        hwnd 0 / empty title+exe = all windows (+ optional map). map_inline=false = JSON only.
+        title and/or exe set (no hwnd): returns windows[] of ALL matches (browser multi-window safe),
+        plus window=picked by pick_rule (non-minimized, then EnumWindows z-top, then area — not guaranteed foreground).
+        hwnd set: one row in windows[] / window. Does not click."""
         hwnd_n = _nz_int(hwnd)
         if hwnd_n or title or exe:
-            one = find_window(title=title or "", exe=exe or "", hwnd=hwnd_n)
-            return {"window": one}
+            if hwnd_n:
+                rows = find_windows(hwnd=hwnd_n)
+            else:
+                rows = find_windows(title=title or "", exe=exe or "")
+            slim = [
+                {k: w.get(k) for k in ("hwnd", "title", "exe", "pid", "minimized", "rect", "class")}
+                for w in rows
+                if w
+            ]
+            picked = slim[0] if slim else None
+            return {
+                "windows": slim,
+                "window": picked,
+                "count": len(slim),
+                "pick_rule": PICK_RULE,
+            }
+
         if not map:
             rows = list_windows()
             slim = [{k: w.get(k) for k in ("hwnd", "title", "exe", "pid", "minimized", "rect")} for w in rows]
@@ -99,28 +120,52 @@ def serve(host: str = "127.0.0.1", port: int = 8771) -> None:
         image: str = "",
         ocr: bool = False,
         yolo: bool = False,
+        uia: bool = False,
         map_inline: bool = True,
         out_dir: str = "",
+        roi: str = "",
+        roi_norm: str = "",
     ):
         """Pin one window (or primary screen). Writes raw + 0-1000 map. Default ocr=false.
         hwnd 0 and empty title/exe = primary screen. Returns JSON plus a compressed map (0-1000 still valid; clicks use stamp width/height).
-        map_inline=false = JSON/path only. ocr=true only for text ids. yolo=true runs ScreenParser (class names as item text). Default both off. No click.
+        map_inline=false = JSON/path only. ocr=true only for text ids. yolo=true runs ScreenParser (class names as item text).
+        uia=true (S4) walks UIA under pinned hwnd; additive uia_nodes with 0-1000 norm (same as grid). Default all off. No click.
+        E2 light verify: roi="L,T,W,H" or roi_norm="CX,CY[,HALF]" (mutually exclusive) crops after full grab; map 0-1000 is ROI-local.
         out_dir optional: Windows path or /mnt/c/... ; response also has map_wsl / png_wsl (lowercase drive)."""
         hwnd_n = _nz_int(hwnd)
         title_n = _nz_str(title)
         exe_n = _nz_str(exe)
+        roi_n = _nz_str(roi)
+        roi_norm_n = _nz_str(roi_norm)
+        if roi_n and roi_norm_n:
+            return {"ok": False, "error": "roi and roi_norm are mutually exclusive"}
         # Pin then look: hwnd/title/exe always activate so capture_hwnd double-shots.
         pin = bool(hwnd_n or title_n or exe_n)
-        out = perceive(image=_nz_str(image), hwnd=hwnd_n, title=title_n, exe=exe_n, focus=pin, ocr=ocr, yolo=yolo, out_dir=_nz_str(out_dir))
+        out = perceive(
+            image=_nz_str(image),
+            hwnd=hwnd_n,
+            title=title_n,
+            exe=exe_n,
+            focus=pin,
+            ocr=ocr,
+            yolo=yolo,
+            uia=uia,
+            out_dir=_nz_str(out_dir),
+            roi=roi_n or None,
+            roi_norm=roi_norm_n or None,
+        )
         payload = {
             "stamp": out["stamp"],
             "count": len(out["items"]),
             "ocr": out.get("ocr"),
             "yolo": out.get("yolo"),
+            "uia": out.get("uia"),
             "source": out["source"],
             "coord_space": out["coord_space"],
             "hwnd": out["hwnd"],
             "origin": out.get("origin"),
+            "width": out.get("width"),
+            "height": out.get("height"),
             "items": out["items"],
             "map": out.get("map") or out.get("grid"),
             "grid": out.get("grid"),
@@ -132,6 +177,26 @@ def serve(host: str = "127.0.0.1", port: int = 8771) -> None:
             "json_wsl": out.get("json_wsl"),
             "inline": "jpeg-1280" if map_inline else False,
         }
+        if out.get("verify_light"):
+            payload["verify_light"] = True
+            payload["roi"] = out.get("roi")
+            payload["roi_norm"] = out.get("roi_norm")
+            payload["full_width"] = out.get("full_width")
+            payload["full_height"] = out.get("full_height")
+        if out.get("ocr_ms") is not None:
+            payload["ocr_ms"] = out["ocr_ms"]
+        if out.get("uia"):
+            payload["uia_nodes"] = out.get("uia_nodes") or []
+            payload["uia_count"] = out.get("uia_count", len(payload["uia_nodes"]))
+            if "uia_ms" in out:
+                payload["uia_ms"] = out["uia_ms"]
+            if "caps" in out:
+                payload["caps"] = out["caps"]
+            if "uia_truncated" in out:
+                payload["uia_truncated"] = out["uia_truncated"]
+            payload["ok"] = out.get("ok", True)
+            if out.get("error"):
+                payload["error"] = out["error"]
         return _with_map(payload, payload["map"], map_inline)
 
     @app.tool()
@@ -151,19 +216,50 @@ def serve(host: str = "127.0.0.1", port: int = 8771) -> None:
         go: bool = False,
         hold: float = 0,
         hold_key: str = "",
+        method: str = "input",
+        max_age_sec: float | None = None,
+        strict_stamp: bool = False,
+        uia_name: str = "",
     ):
-        """Plan/run against a stamp. go default false. Prefer norm (map 0-1000) or xy.
-        Empty string = omitted. drag_norm / drag = one left-hold polyline. step_px default 4.
-        ids: comma string, a single int, or a list (5 / '5' / [5,9] / '14,9,16'); needs a prior ocr perceive. text=paste+restore (CLI flag is --type or --text). key like ctrl+c.
-        scroll: 3, -3, down:3, or up:3 (negative/down = wheel down). scroll + xy/norm/ids hovers then wheels (no left-click). hold>0 with xy/norm/ids = press, sleep, release. key may be comma-separated.
-        hold_key=ctrl|control|shift|alt holds that modifier across the chain (Ctrl+click multi-select). Not hold (mouse long-press)."""
+        """
+        Plan/run against a stamp. go default false. Prefer norm (map 0-1000) or xy.
+
+        FLAT STRING FIELDS ONLY (not a JSON steps array). Examples:
+          click:  act(norm="935,69", go=true)
+          chain:  act(stamp="...", ids="3", key="ctrl+a", text="hi", go=true)
+          scroll: act(norm="500,500", scroll="down:3")  # hover then wheel, no click
+
+        norm/xy: "x,y" or "x:y"; multi with ";" e.g. "177,752;500,200".
+        ids: comma string / int / list; needs prior ocr/yolo perceive.
+        text=paste+restore. key like ctrl+c (comma-separated ok).
+        ids+text in ONE call: ids are real clicks first, then text - NOT a silent focus flag.
+        If field already has text, pass key=ctrl+a (or split acts).
+        scroll+xy/norm/ids => hover then wheel (NO left-click) - will not focus an input.
+        hold>0 = long-press. hold_key=ctrl|shift|alt across the chain (not mouse hold).
+        method=input (default SendInput) | post (S1) | uia (S2) | auto (S3).
+        post/uia/auto: single left clicks only (norm/xy/ids); reject drag/path/scroll/type/hold.
+        uia: Invoke|Toggle|Expand|Select; no silent fallback. auto: probe UIA → chosen_method=uia|input (never post); go runs chosen only.
+        Unknown args (e.g. steps=[{action:click}]) are dropped by MCP - if nothing remains, ok=false.
+        E3 same-stamp: multi norm with ";" or repeated clicks on one stamp; max_age_sec / strict_stamp
+        pass through to stamp_check (ROI/moved stamps fail on go or when strict_stamp).
+        """
         specs = parse_steps(
             ids=coerce_ids(ids), xy=_nz_str(xy), norm=_nz_str(norm), text=_nz_str(text),
             key=_nz_str(key), drag=_nz_str(drag), drag_norm=_nz_str(drag_norm),
             scroll=_nz_str(scroll), button=button, hover=hover, step_px=step_px, hold=hold,
+            uia_name=_nz_str(uia_name) or None,
         )
         frame, path = load_frame(stamp=_nz_str(stamp))
-        out = run_chain(frame, specs, dry_run=not go, hold_key=_nz_str(hold_key))
+        out = run_chain(
+            frame,
+            specs,
+            dry_run=not go,
+            hold_key=_nz_str(hold_key),
+            method=_nz_str(method) or "input",
+            max_age_sec=max_age_sec,
+            strict_stamp=bool(strict_stamp),
+            stamp_json_path=str(path) if path else None,
+        )
         out["json"] = str(path) if path else None
         return out
 

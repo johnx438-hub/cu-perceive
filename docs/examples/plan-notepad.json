@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "goal": "type one line into Notepad then assert window still alive",
+  "defaults": { "gap": 0.12, "on_error": "stop" },
+  "steps": [
+    { "op": "perceive", "exe": "notepad", "focus": true, "as": "pad" },
+    {
+      "op": "act",
+      "stamp_ref": "pad",
+      "actions": [
+        { "kind": "norm", "norm": [500, 500] },
+        { "kind": "type", "text": "cu-perceive plan v1 smoke", "input_via": "paste" }
+      ]
+    },
+    { "op": "assert", "stamp_ref": "pad", "hwnd_alive": true, "title_contains": "Notepad" }
+  ]
+}

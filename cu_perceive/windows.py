@@ -75,8 +75,66 @@ def list_windows(include_minimized: bool = True) -> list[dict]:
     return rows
 
 
+PICK_RULE = (
+    "When title/exe match multiple windows: prefer non-minimized, then EnumWindows "
+    "z-order (topmost first), then larger area. Not guaranteed to be GetForegroundWindow. "
+    "Pass hwnd to pin one. Callers should use the windows[] array when several match."
+)
+
+
+def _match_windows(title: str = "", exe: str = "") -> list[dict]:
+    """All list_windows rows matching title/exe (AND if both set). Preserves EnumWindows order."""
+    title_l = (title or "").lower()
+    exe_l = (exe or "").lower()
+    if not title_l and not exe_l:
+        return []
+    matches: list[dict] = []
+    for w in list_windows(include_minimized=True):
+        if title_l and title_l not in (w.get("title") or "").lower():
+            continue
+        exe_hay = ((w.get("exe") or "") + " " + (w.get("exe_path") or "")).lower()
+        if exe_l and exe_l not in exe_hay:
+            continue
+        matches.append(w)
+    return matches
+
+
+def _score_match(w: dict, title_l: str, exe_l: str, z_index: int) -> tuple:
+    """Higher is better. z_index: 0 = topmost in EnumWindows among matches."""
+    t = (w.get("title") or "").lower()
+    exact = 1 if title_l and t == title_l else 0
+    title_hit = 1 if title_l and title_l in t else 0
+    exe_in_title = 1 if exe_l and exe_l in t else 0
+    left, top, right, bottom = w["rect"]
+    area = max(0, right - left) * max(0, bottom - top)
+    if w.get("minimized"):
+        area = 0
+    return (exact, title_hit, exe_in_title, 0 if w.get("minimized") else 1, -int(z_index), area)
+
+
+def find_windows(title: str = "", exe: str = "", hwnd: int | None = None) -> list[dict]:
+    """All matches for title/exe, sorted best-first by PICK_RULE. hwnd => 0 or 1 row."""
+    if hwnd is not None:
+        one = find_window(hwnd=hwnd)
+        return [one] if one else []
+    title_l = (title or "").lower()
+    exe_l = (exe or "").lower()
+    matches = _match_windows(title=title, exe=exe)
+    ranked = sorted(
+        enumerate(matches),
+        key=lambda pair: _score_match(pair[1], title_l, exe_l, pair[0]),
+        reverse=True,
+    )
+    return [w for _, w in ranked]
+
+
 def find_window(title: str = "", exe: str = "", hwnd: int | None = None) -> dict | None:
-    """Find one window. hwnd wins. title and exe are AND if both set."""
+    """Find one window. hwnd wins. title and exe are AND if both set.
+
+    Multi-match pick rule (see PICK_RULE): non-minimized, then EnumWindows z-top,
+    then larger area — NOT foreground-window guaranteed. Prefer find_windows() /
+    windows[] when several share an exe (browser).
+    """
     wins = list_windows(include_minimized=True)
     if hwnd is not None:
         hwnd = int(hwnd)
@@ -88,37 +146,14 @@ def find_window(title: str = "", exe: str = "", hwnd: int | None = None) -> dict
             return {
                 "hwnd": hwnd, "title": "", "exe": "", "pid": 0,
                 "exe_path": "", "rect": [0, 0, 0, 0], "minimized": False,
+                "minimized_unknown": True,
             }
         return None
 
-    title_l = (title or "").lower()
-    exe_l = (exe or "").lower()
-    if not title_l and not exe_l:
-        return None
+    ranked = find_windows(title=title, exe=exe)
+    return ranked[0] if ranked else None
 
-    matches = []
-    for w in wins:
-        if title_l and title_l not in (w.get("title") or "").lower():
-            continue
-        exe_hay = ((w.get("exe") or "") + " " + (w.get("exe_path") or "")).lower()
-        if exe_l and exe_l not in exe_hay:
-            continue
-        matches.append(w)
-    if not matches:
-        return None
 
-    def score(w):
-        t = (w.get("title") or "").lower()
-        exact = 1 if title_l and t == title_l else 0
-        title_hit = 1 if title_l and title_l in t else 0
-        exe_in_title = 1 if exe_l and exe_l in t else 0
-        left, top, right, bottom = w["rect"]
-        area = max(0, right - left) * max(0, bottom - top)
-        if w.get("minimized"):
-            area = 0
-        return (exact, title_hit, exe_in_title, 0 if w.get("minimized") else 1, area)
-
-    return max(matches, key=score)
 
 
 

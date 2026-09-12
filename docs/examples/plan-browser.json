@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "goal": "focus Edge address bar and prepare example.com (dry-run first)",
+  "defaults": { "gap": 0.15, "on_error": "stop" },
+  "steps": [
+    { "op": "perceive", "exe": "msedge", "focus": true, "as": "edge" },
+    {
+      "op": "act",
+      "stamp_ref": "edge",
+      "actions": [
+        { "kind": "norm", "norm": [400, 40] },
+        { "kind": "key", "key": "ctrl+a" },
+        { "kind": "type", "text": "https://example.com", "input_via": "paste" },
+        { "kind": "wait", "sec": 0.2 }
+      ]
+    },
+    { "op": "assert", "stamp_ref": "edge", "hwnd_alive": true }
+  ]
+}
