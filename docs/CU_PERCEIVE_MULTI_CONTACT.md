@@ -118,9 +118,9 @@ default = "allow"  # or deny
 ### S3 落地笔记（2026-09-06）
 
 - CLI `--method auto` / MCP `method=auto`：仅单点 **left** click（`norm`/`xy`/`ids`）。drag/path/scroll/type/hold/right → fail-closed，提示 `method=input`。
-- 选择（v0）：UIA hit-test 计划屏幕点 → 若 element 在 stamp hwnd 下（同 S2 top-level 检查）且有 preferred action（Invoke/Toggle/Expand/Select）→ **`chosen_method=uia`**；否则 **`input`**。**永不选 `post`**。
+- 选择（v0）：UIA hit-test 计划屏幕点 → 若 element 在 stamp hwnd 下（同 S2 top-level 检查）且有 preferred action（Invoke/Toggle/Expand/Select）→ **`chosen_method=uia`**；否则 **`input`**。**永不选 `post`**。软 miss（有 element 无 preferred pattern，如 Document/Group）→ **同点再探一次**再决（dry-run 报 `uia_reprobe` / `uia_first`）；hwnd mismatch 不重探。
 - dry-run：`method=auto` + `chosen_method=uia|input` + 相关 `uia{...}` 探针字段。`--go` 只执行所选路径；若已选 uia 且 Invoke 失败 → `ok:false`（**不**中途退 input）。
-- 实现：`uia.choose_auto_method` / `probe_at_screen` + `act.enrich_auto_steps` / `run_chain`。
+- 实现：`uia.choose_auto_method` / `probe_at_screen` / `probe_at_screen_with_reprobe` + `act.enrich_auto_steps` / `run_chain`。
 
 
 

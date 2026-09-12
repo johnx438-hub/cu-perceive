@@ -618,8 +618,16 @@ def enrich_uia_steps(frame: dict, steps: list[dict], *, double: bool = False) ->
 
 
 def enrich_auto_steps(frame: dict, steps: list[dict], *, double: bool = False) -> list[dict]:
-    """S3: probe UIA at each planned point; set chosen_method=uia|input (never post)."""
-    from .uia import choose_auto_method, probe_at_screen, public_element_info
+    """S3: probe UIA at each planned point; set chosen_method=uia|input (never post).
+
+    Soft miss (element, no preferred pattern): one same-point reprobe, then choose.
+    Never silent: dry-run exposes uia_reprobe / uia_first / uia_probe_attempts.
+    """
+    from .uia import (
+        choose_auto_method,
+        probe_at_screen_with_reprobe,
+        public_element_info,
+    )
 
     if double:
         raise MethodError(
@@ -637,7 +645,7 @@ def enrich_auto_steps(frame: dict, steps: list[dict], *, double: bool = False) -
                 f"method=auto is left-click only in S3 (got button={btn!r})"
             )
         sx, sy = int(step["screen"][0]), int(step["screen"][1])
-        info = probe_at_screen(sx, sy, expect_hwnd=expect)
+        info, meta = probe_at_screen_with_reprobe(sx, sy, expect_hwnd=expect)
         chosen = choose_auto_method(
             preferred_action=info.get("preferred_action"),
             top_hwnd=info.get("top_hwnd"),
@@ -646,6 +654,21 @@ def enrich_auto_steps(frame: dict, steps: list[dict], *, double: bool = False) -
         step["method"] = "auto"
         step["chosen_method"] = chosen
         step["uia"] = public_element_info(info, frame)
+        if meta.get("reprobed"):
+            step["uia_reprobe"] = True
+            step["uia_probe_attempts"] = 2
+            first = {
+                k: meta.get(fk)
+                for k, fk in (
+                    ("control_type", "first_control_type"),
+                    ("name", "first_name"),
+                    ("error", "first_error"),
+                )
+                if meta.get(fk) is not None
+            }
+            step["uia_first"] = first
+        else:
+            step["uia_probe_attempts"] = 1
         if chosen == "uia":
             if info.get("_control") is not None:
                 step["_uia_control"] = info["_control"]

@@ -54,7 +54,7 @@ C:\Users\jawn\miniconda3\python.exe -m cu_perceive <cmd>
      - **ROI / `verify_light` stamp 只用于点后复验，不能拿来多步规划**（须全窗 stamp）。
      - CLI：`act --max-age SEC`（可选）、`act --strict-stamp`。MCP：`max_age_sec` / `strict_stamp` 已透传。
 
-   - **实验 `method=post|uia|auto`**：`post`=HWND PostMessage 单点；`uia`=UIA Invoke/Toggle/Expand/Select（无 pattern 则 fail-closed，不退 post/input）；`auto`=命中 stamp 上可 Invoke 等 → uia，否则 input（永不选 post；dry-run 报 `chosen_method` + `foreground_used` / `foreground_click_count`）。均仅 left 单点 norm/xy/ids；drag/path 等请显式 `method=input`。
+   - **实验 `method=post|uia|auto`**：`post`=HWND PostMessage 单点；`uia`=UIA Invoke/Toggle/Expand/Select（无 pattern 则 fail-closed，不退 post/input）；`auto`=命中 stamp 上可 Invoke 等 → uia，否则 input（永不选 post；软 miss 同点再探一次；dry-run 报 `chosen_method` + `uia_reprobe`/`uia_first` + `foreground_used` / `foreground_click_count`）。均仅 left 单点 norm/xy/ids；drag/path 等请显式 `method=input`。
    - 链修饰键：`--hold-key ctrl`（MCP `hold_key`，接受 `ctrl`/`control`/`shift`/`alt`）在整条链的 click/hover 前按下，链结束（含失败）再松开。不是 `--hold`（那是鼠标长按）。Explorer/Office/列表多选：`--hold-key ctrl` + 多个 `--norm`/`--ids`，界面要落稳再加 `--gap`。Shift+click 头尾可以两次点击、不设 hold_key；需要时再用 `--hold-key shift`。
    - 会动的选中（动画/弹起）用 `--gap 0.4`；按钮、丝带、浏览器标签保持默认 0.12，不要全局加大。
    - 键：`--type` / `--text` 剪贴板+Ctrl+V 并还原（MCP 字段是 `text`）；`--key` 可写多次并按出现顺序执行，也可 `ctrl+a,enter`

@@ -2,6 +2,7 @@
 
 Non-invasive: no SetCursorPos / SendInput / PostMessage. Fail-closed if no pattern.
 S3: choose_auto_method / probe_at_screen — uia iff under stamp + preferred pattern, else input.
+Soft-miss (no preferred pattern on a real element): one same-point reprobe, then choose uia|input.
 """
 from __future__ import annotations
 
@@ -219,6 +220,59 @@ def probe_at_screen(
             "preferred_action": None,
             "patterns": [],
         }
+
+
+
+def is_soft_uia_miss(info: dict[str, Any]) -> bool:
+    """True when hit-test found an element but no preferred Invoke/Toggle/Expand/Select.
+
+    Typical: DocumentControl / GroupControl / parent container. Empty patterns with an
+    element count the same. Not a soft miss: preferred_action present, hwnd mismatch,
+    or ControlFromPoint / probe failure with no element.
+    """
+    if info.get("preferred_action"):
+        return False
+    err = str(info.get("error") or "")
+    # Do not reprobe on hwnd mismatch (resolve returns early with this error).
+    if "stamp hwnd" in err and "top_hwnd=" in err:
+        return False
+    if info.get("_control") is not None:
+        return True
+    if info.get("control_type"):
+        return True
+    # Element-ish describe payload with empty patterns, no preferred.
+    if "patterns" in info and ("name" in info or "control_type" in info):
+        return True
+    return False
+
+
+def probe_at_screen_with_reprobe(
+    sx: int,
+    sy: int,
+    *,
+    expect_hwnd: int | None = None,
+    sleep_ms: int = 50,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Probe once; on soft miss, sleep briefly and re-probe the same screen point once.
+
+    Returns (info, meta). meta keys:
+    - reprobed: bool — True when a second probe ran
+    - first_control_type / first_name / first_error — first-hit snapshot when reprobed
+    """
+    import time
+
+    first = probe_at_screen(sx, sy, expect_hwnd=expect_hwnd)
+    meta: dict[str, Any] = {"reprobed": False}
+    if not is_soft_uia_miss(first):
+        return first, meta
+    meta["reprobed"] = True
+    meta["first_control_type"] = first.get("control_type")
+    meta["first_name"] = first.get("name")
+    meta["first_error"] = first.get("error")
+    if sleep_ms and int(sleep_ms) > 0:
+        time.sleep(int(sleep_ms) / 1000.0)
+    second = probe_at_screen(sx, sy, expect_hwnd=expect_hwnd)
+    return second, meta
 
 
 def invoke_control(control, *, action: str | None = None) -> dict[str, Any]:

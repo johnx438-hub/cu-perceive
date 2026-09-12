@@ -149,13 +149,16 @@ class TestRunChainAutoDry(unittest.TestCase):
         self.assertEqual(step["uia"]["name"], "File")
         self.assertEqual(step["uia"]["preferred_action"], "Invoke")
         self.assertNotIn("_uia_control", step)
+        self.assertNotIn("uia_reprobe", step)
+        self.assertEqual(step.get("uia_probe_attempts"), 1)
         self.assertFalse(step["foreground_used"])
         self.assertFalse(out["foreground_used"])
         self.assertEqual(out["foreground_click_count"], 0)
-        probe.assert_called()
+        self.assertEqual(probe.call_count, 1)
 
+    @mock.patch("time.sleep")
     @mock.patch("cu_perceive.uia.probe_at_screen")
-    def test_dry_run_chooses_input_no_pattern(self, probe):
+    def test_dry_run_chooses_input_no_pattern(self, probe, _sleep):
         probe.return_value = {
             "ok": False,
             "error": "no Invoke/Toggle/ExpandCollapse/Select pattern on element",
@@ -177,6 +180,10 @@ class TestRunChainAutoDry(unittest.TestCase):
         self.assertEqual(step["chosen_method"], "input")
         self.assertEqual(step["uia"]["control_type"], "DocumentControl")
         self.assertIn("uia_skip_reason", step)
+        self.assertTrue(step.get("uia_reprobe"))
+        self.assertEqual(step.get("uia_probe_attempts"), 2)
+        self.assertEqual(step["uia_first"]["control_type"], "DocumentControl")
+        self.assertEqual(probe.call_count, 2)
         self.assertTrue(step["foreground_used"])
         self.assertTrue(out["foreground_used"])
         self.assertGreaterEqual(out["foreground_click_count"], 1)
@@ -199,6 +206,10 @@ class TestRunChainAutoDry(unittest.TestCase):
         out = run_chain(self.frame, specs, dry_run=True, method="auto")
         self.assertTrue(out["ok"], out)
         self.assertEqual(out["chosen_method"], "input")
+        step = out["steps"][0]
+        self.assertNotIn("uia_reprobe", step)
+        self.assertEqual(step.get("uia_probe_attempts"), 1)
+        self.assertEqual(probe.call_count, 1)
 
     @mock.patch("cu_perceive.act.check_stamp", return_value={"ok": True, "stamp": "test-auto", "hwnd": 1})
     @mock.patch("cu_perceive.act.invoke_control", create=True)
@@ -236,6 +247,170 @@ class TestRunChainAutoDry(unittest.TestCase):
         self.assertTrue(out["foreground_used"])
         self.assertGreaterEqual(out["foreground_click_count"], 1)
 
+
+
+class TestSoftMissReprobe(unittest.TestCase):
+    def setUp(self):
+        self.frame = {
+            "stamp": "test-auto",
+            "hwnd": 1,
+            "coord_space": "window",
+            "origin": {"left": 10, "top": 20, "width": 800, "height": 600},
+            "width": 800,
+            "height": 600,
+            "items": [],
+        }
+
+    @mock.patch("time.sleep")
+    @mock.patch("cu_perceive.uia.probe_at_screen")
+    def test_soft_miss_then_uia_on_reprobe(self, probe, _sleep):
+        soft = {
+            "ok": False,
+            "error": "no Invoke/Toggle/ExpandCollapse/Select pattern on element "
+            "'DocumentControl' name=''",
+            "method": "uia",
+            "screen": [410, 320],
+            "name": "",
+            "control_type": "DocumentControl",
+            "patterns": [],
+            "preferred_action": None,
+            "top_hwnd": 1,
+            "_control": object(),
+        }
+        win = {
+            "ok": True,
+            "method": "uia",
+            "screen": [410, 320],
+            "name": "科技",
+            "control_type": "TabItemControl",
+            "patterns": ["Select"],
+            "preferred_action": "Select",
+            "top_hwnd": 1,
+            "_control": object(),
+        }
+        probe.side_effect = [soft, win]
+        specs = parse_steps(norm="500,500")
+        out = run_chain(self.frame, specs, dry_run=True, method="auto")
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["chosen_method"], "uia")
+        step = out["steps"][0]
+        self.assertEqual(step["chosen_method"], "uia")
+        self.assertTrue(step.get("uia_reprobe"))
+        self.assertEqual(step.get("uia_probe_attempts"), 2)
+        self.assertEqual(step["uia"]["control_type"], "TabItemControl")
+        self.assertEqual(step["uia"]["preferred_action"], "Select")
+        self.assertEqual(step["uia_first"]["control_type"], "DocumentControl")
+        self.assertEqual(probe.call_count, 2)
+        _sleep.assert_called()
+
+    @mock.patch("time.sleep")
+    @mock.patch("cu_perceive.uia.probe_at_screen")
+    def test_soft_miss_twice_chooses_input(self, probe, _sleep):
+        soft = {
+            "ok": False,
+            "error": "no Invoke/Toggle/ExpandCollapse/Select pattern on element "
+            "'DocumentControl' name=''",
+            "method": "uia",
+            "screen": [410, 320],
+            "name": "",
+            "control_type": "DocumentControl",
+            "patterns": [],
+            "preferred_action": None,
+            "top_hwnd": 1,
+            "_control": object(),
+        }
+        probe.side_effect = [soft, soft]
+        specs = parse_steps(norm="500,500")
+        out = run_chain(self.frame, specs, dry_run=True, method="auto")
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["chosen_method"], "input")
+        step = out["steps"][0]
+        self.assertEqual(step["chosen_method"], "input")
+        self.assertTrue(step.get("uia_reprobe"))
+        self.assertEqual(step.get("uia_probe_attempts"), 2)
+        self.assertIn("uia_skip_reason", step)
+        self.assertEqual(step["uia_first"]["control_type"], "DocumentControl")
+        self.assertEqual(probe.call_count, 2)
+
+    @mock.patch("time.sleep")
+    @mock.patch("cu_perceive.uia.probe_at_screen")
+    def test_hwnd_mismatch_no_reprobe(self, probe, _sleep):
+        probe.return_value = {
+            "ok": False,
+            "error": "UIA hit top_hwnd=99 != stamp hwnd=1 "
+            "(element may be covered / wrong window)",
+            "method": "uia",
+            "screen": [410, 320],
+            "name": "Other",
+            "control_type": "ButtonControl",
+            "patterns": ["Invoke"],
+            "preferred_action": "Invoke",
+            "top_hwnd": 99,
+            "_control": object(),
+        }
+        specs = parse_steps(norm="500,500")
+        out = run_chain(self.frame, specs, dry_run=True, method="auto")
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["chosen_method"], "input")
+        step = out["steps"][0]
+        self.assertNotIn("uia_reprobe", step)
+        self.assertEqual(step.get("uia_probe_attempts"), 1)
+        self.assertEqual(probe.call_count, 1)
+        _sleep.assert_not_called()
+
+
+class TestIsSoftUiaMiss(unittest.TestCase):
+    def test_soft_document(self):
+        from cu_perceive.uia import is_soft_uia_miss
+
+        self.assertTrue(
+            is_soft_uia_miss(
+                {
+                    "preferred_action": None,
+                    "control_type": "DocumentControl",
+                    "name": "",
+                    "patterns": [],
+                    "error": "no Invoke/Toggle/...",
+                    "_control": object(),
+                }
+            )
+        )
+
+    def test_not_soft_when_preferred(self):
+        from cu_perceive.uia import is_soft_uia_miss
+
+        self.assertFalse(
+            is_soft_uia_miss(
+                {"preferred_action": "Invoke", "control_type": "ButtonControl"}
+            )
+        )
+
+    def test_not_soft_hwnd_mismatch(self):
+        from cu_perceive.uia import is_soft_uia_miss
+
+        self.assertFalse(
+            is_soft_uia_miss(
+                {
+                    "preferred_action": None,
+                    "control_type": "GroupControl",
+                    "patterns": [],
+                    "error": "UIA hit top_hwnd=99 != stamp hwnd=1 (element may be covered / wrong window)",
+                }
+            )
+        )
+
+    def test_not_soft_probe_failure(self):
+        from cu_perceive.uia import is_soft_uia_miss
+
+        self.assertFalse(
+            is_soft_uia_miss(
+                {
+                    "preferred_action": None,
+                    "error": "ControlFromPoint(1,2) failed: boom",
+                    "patterns": [],
+                }
+            )
+        )
 
 if __name__ == "__main__":
     unittest.main()
