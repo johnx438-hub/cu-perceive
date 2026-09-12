@@ -18,6 +18,8 @@ def load_frame(stamp: str | None = None, json_path: str | None = None) -> tuple[
         if not cands:
             return {}, None
         path = max(cands, key=lambda p: p.stat().st_mtime)
+    if not path.is_file():
+        raise FileNotFoundError(f"stamp json not found: {path}")
     return json.loads(path.read_text(encoding="utf-8")), path
 
 
@@ -602,7 +604,7 @@ def enrich_uia_steps(frame: dict, steps: list[dict], *, double: bool = False) ->
         sx, sy = int(step["screen"][0]), int(step["screen"][1])
         info = resolve_at_screen(sx, sy, expect_hwnd=expect)
         step["method"] = "uia"
-        step["uia"] = public_element_info(info)
+        step["uia"] = public_element_info(info, frame)
         # keep live control for --go path
         if info.get("_control") is not None:
             step["_uia_control"] = info["_control"]
@@ -643,7 +645,7 @@ def enrich_auto_steps(frame: dict, steps: list[dict], *, double: bool = False) -
         )
         step["method"] = "auto"
         step["chosen_method"] = chosen
-        step["uia"] = public_element_info(info)
+        step["uia"] = public_element_info(info, frame)
         if chosen == "uia":
             if info.get("_control") is not None:
                 step["_uia_control"] = info["_control"]

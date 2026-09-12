@@ -33,7 +33,8 @@ C:\Users\jawn\miniconda3\python.exe -m cu_perceive <cmd>
 - `xy`：窗口客户区像素（`coord_space=window`）
 - 桌面标尺图的 `norm` / `xy` 是整桌（`coord_space=screen`），用来选窗或拖窗口
 - `id`：只有 `--ocr` / `ocr=true` 才有
-- 规划用 id / window xy / norm。执行时才加 origin 变屏幕点
+- 规划用 id / stamp xy / norm。执行时才加 origin 变屏幕点
+- `uia.bbox` 是 **screen** 像素；点击优先用 `norm` / `screen` 字段；有 `bbox_window` 时那是客户区
 
 ## 步骤
 

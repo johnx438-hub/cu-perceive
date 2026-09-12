@@ -8,6 +8,7 @@ from cu_perceive.uia import (
     PATTERN_PREFERENCE,
     pick_preferred_action,
     public_element_info,
+    screen_bbox_to_window,
 )
 from cu_perceive.act import (
     MethodError,
@@ -47,6 +48,76 @@ class TestPatternPreference(unittest.TestCase):
         pub = public_element_info(info)
         self.assertNotIn("_control", pub)
         self.assertEqual(pub["name"], "File")
+
+    def test_public_bbox_coord_space_screen(self):
+        info = {
+            "ok": True,
+            "name": "File",
+            "bbox": {
+                "left": 100,
+                "top": 200,
+                "right": 180,
+                "bottom": 240,
+                "width": 80,
+                "height": 40,
+                "coord_space": "screen",
+            },
+            "bbox_coord_space": "screen",
+            "_control": object(),
+        }
+        pub = public_element_info(info)
+        self.assertEqual(pub["bbox"]["coord_space"], "screen")
+        self.assertEqual(pub["bbox_coord_space"], "screen")
+        self.assertNotIn("bbox_window", pub)
+
+    def test_public_bbox_window_from_frame_origin(self):
+        info = {
+            "ok": True,
+            "bbox": {
+                "left": 110,
+                "top": 220,
+                "right": 190,
+                "bottom": 260,
+                "width": 80,
+                "height": 40,
+                "coord_space": "screen",
+            },
+            "bbox_coord_space": "screen",
+        }
+        frame = {
+            "coord_space": "window",
+            "origin": {"left": 10, "top": 20},
+        }
+        pub = public_element_info(info, frame)
+        self.assertEqual(pub["bbox"]["coord_space"], "screen")
+        self.assertEqual(pub["bbox_window"]["coord_space"], "window")
+        self.assertEqual(pub["bbox_window"]["left"], 100)
+        self.assertEqual(pub["bbox_window"]["top"], 200)
+        self.assertEqual(pub["bbox_window"]["right"], 180)
+        self.assertEqual(pub["bbox_window"]["bottom"], 240)
+        self.assertEqual(pub["bbox_window"]["width"], 80)
+        self.assertEqual(pub["bbox_window"]["height"], 40)
+
+
+class TestScreenBboxToWindow(unittest.TestCase):
+    def test_math(self):
+        bbox = {
+            "left": 500,
+            "top": 400,
+            "right": 580,
+            "bottom": 440,
+            "width": 80,
+            "height": 40,
+            "coord_space": "screen",
+        }
+        win = screen_bbox_to_window(bbox, origin_left=100, origin_top=50)
+        self.assertEqual(win["left"], 400)
+        self.assertEqual(win["top"], 350)
+        self.assertEqual(win["right"], 480)
+        self.assertEqual(win["bottom"], 390)
+        self.assertEqual(win["width"], 80)
+        self.assertEqual(win["height"], 40)
+        self.assertEqual(win["coord_space"], "window")
 
 
 class TestMethodNormalizeUia(unittest.TestCase):
@@ -125,6 +196,16 @@ class TestRunChainUiaDry(unittest.TestCase):
             "patterns": ["Invoke", "ExpandCollapse"],
             "preferred_action": "Invoke",
             "top_hwnd": 1,
+            "bbox": {
+                "left": 110,
+                "top": 220,
+                "right": 190,
+                "bottom": 260,
+                "width": 80,
+                "height": 40,
+                "coord_space": "screen",
+            },
+            "bbox_coord_space": "screen",
             "_control": object(),
         }
         specs = parse_steps(norm="500,500")
@@ -138,6 +219,10 @@ class TestRunChainUiaDry(unittest.TestCase):
         self.assertEqual(step["uia"]["control_type"], "MenuItemControl")
         self.assertIn("Invoke", step["uia"]["patterns"])
         self.assertEqual(step["uia"]["preferred_action"], "Invoke")
+        self.assertEqual(step["uia"]["bbox"]["coord_space"], "screen")
+        self.assertEqual(step["uia"]["bbox_window"]["left"], 100)
+        self.assertEqual(step["uia"]["bbox_window"]["top"], 200)
+        self.assertEqual(step["uia"]["bbox_window"]["coord_space"], "window")
         self.assertNotIn("_uia_control", step)
         self.assertNotIn("_control", step["uia"])
         resolve.assert_called()

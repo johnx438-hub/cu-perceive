@@ -249,7 +249,10 @@ def serve(host: str = "127.0.0.1", port: int = 8771) -> None:
             scroll=_nz_str(scroll), button=button, hover=hover, step_px=step_px, hold=hold,
             uia_name=_nz_str(uia_name) or None,
         )
-        frame, path = load_frame(stamp=_nz_str(stamp))
+        try:
+            frame, path = load_frame(stamp=_nz_str(stamp))
+        except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError) as e:
+            return {"ok": False, "error": str(e), "dry_run": not go}
         out = run_chain(
             frame,
             specs,

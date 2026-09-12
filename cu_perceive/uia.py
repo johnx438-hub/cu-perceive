@@ -113,6 +113,7 @@ def describe_control(control) -> dict[str, Any]:
                 "bottom": int(r.bottom),
                 "width": int(r.width()),
                 "height": int(r.height()),
+                "coord_space": "screen",
             }
     except Exception:
         bbox = None
@@ -133,6 +134,7 @@ def describe_control(control) -> dict[str, Any]:
     }
     if bbox is not None:
         out["bbox"] = bbox
+        out["bbox_coord_space"] = "screen"
     if top_hwnd is not None:
         out["top_hwnd"] = top_hwnd
     return out
@@ -256,9 +258,66 @@ def invoke_control(control, *, action: str | None = None) -> dict[str, Any]:
     raise UiaError(f"unknown UIA action {chosen!r}")
 
 
-def public_element_info(info: dict[str, Any]) -> dict[str, Any]:
-    """Drop non-JSON live handles from resolve result."""
-    return {k: v for k, v in info.items() if not str(k).startswith("_")}
+def screen_bbox_to_window(
+    bbox: dict[str, Any],
+    *,
+    origin_left: float,
+    origin_top: float,
+) -> dict[str, Any]:
+    """Convert screen-pixel BoundingRectangle dict to client/window pixels.
+
+    Width/height unchanged; left/top/right/bottom subtract origin.
+    """
+    ol = float(origin_left)
+    ot = float(origin_top)
+    left = int(bbox["left"]) - ol
+    top = int(bbox["top"]) - ot
+    right = int(bbox["right"]) - ol
+    bottom = int(bbox["bottom"]) - ot
+    out: dict[str, Any] = {
+        "left": int(left),
+        "top": int(top),
+        "right": int(right),
+        "bottom": int(bottom),
+        "width": int(bbox.get("width", right - left)),
+        "height": int(bbox.get("height", bottom - top)),
+        "coord_space": "window",
+    }
+    return out
+
+
+def public_element_info(
+    info: dict[str, Any],
+    frame: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Drop non-JSON live handles from resolve result.
+
+    When ``frame`` is window-coord with origin, also stamp ``bbox_window``
+    (client) beside screen ``bbox`` (``coord_space=screen``).
+    """
+    out = {k: v for k, v in info.items() if not str(k).startswith("_")}
+    bbox = out.get("bbox")
+    if isinstance(bbox, dict) and "coord_space" not in bbox:
+        bbox = {**bbox, "coord_space": "screen"}
+        out["bbox"] = bbox
+    if out.get("bbox") is not None and "bbox_coord_space" not in out:
+        out["bbox_coord_space"] = "screen"
+    frame = frame or {}
+    origin = frame.get("origin") if isinstance(frame, dict) else None
+    if (
+        isinstance(bbox, dict)
+        and isinstance(frame, dict)
+        and frame.get("coord_space") == "window"
+        and isinstance(origin, dict)
+        and "left" in origin
+        and "top" in origin
+    ):
+        out["bbox_window"] = screen_bbox_to_window(
+            bbox,
+            origin_left=origin["left"],
+            origin_top=origin["top"],
+        )
+    return out
 
 
 # --- S4: perceive --uia tree walk (compact nodes + norm bboxes) ---

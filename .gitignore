@@ -24,3 +24,6 @@ shots/
 .env.*
 !.env.example
 *.local
+
+# test scratch
+tests/_tmp_synth/
