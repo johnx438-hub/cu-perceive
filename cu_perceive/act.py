@@ -725,10 +725,11 @@ def check_stamp(
     json_path: str | Path | None = None,
     size_slop_px: int = 24,
 ) -> dict:
-    """E3 stamp usability: hwnd/origin/age/ROI. Fail closed for planning/--go.
+    """E3 stamp usability: hwnd/origin/age/ROI/minimized. Fail closed for planning/--go.
 
     Returns {ok, stamp, hwnd, age_sec?, origin_delta?, error?}.
-    Live refresh_geom vs stamp origin for window space. Never clicks.
+    Live iconic check (IsIconic / showCmd) before refresh_geom vs stamp origin.
+    Never clicks; does not restore a minimized hwnd.
     """
     frame = frame or {}
     stamp = frame.get("stamp")
@@ -796,7 +797,21 @@ def check_stamp(
             return out
 
         origin = frame.get("origin")
-        from .windows import is_sentinel_origin
+        from .windows import is_hwnd_minimized, is_sentinel_origin
+
+        # Fail closed on live iconic state *before* refresh_geom: that helper
+        # restores iconic hwnds and then returns the restore rect, which matches
+        # a pre-minimize stamp (origin_delta all zeros). GetWindowPlacement
+        # rcNormalPosition has the same trap — is_hwnd_minimized ignores it.
+        try:
+            if is_hwnd_minimized(hwnd_i):
+                out["ok"] = False
+                out["error"] = "window minimized; stamp invalid — re-perceive"
+                return out
+        except Exception as e:
+            out["ok"] = False
+            out["error"] = f"minimized check failed: {e}; re-perceive"
+            return out
 
         if is_sentinel_origin(origin) or (isinstance(origin, dict) and origin.get("bad")):
             out["ok"] = False
