@@ -246,8 +246,21 @@ def capture_looks_implausible(arr, origin: dict | None = None) -> bool:
     return False
 
 
+def live_geom(hwnd: int) -> tuple[dict | None, dict | None]:
+    """Client origin + window row as they are now. Never restores / force_foreground.
+
+    Stamp validation uses this. Capture/perceive uses refresh_geom (may restore).
+    """
+    hwnd = int(hwnd)
+    return client_origin(hwnd), find_window(hwnd=hwnd)
+
+
 def refresh_geom(hwnd: int) -> tuple[dict | None, dict | None]:
-    """Client origin + window row after restore. Call AFTER capture, not before."""
+    """Client origin + window row after restore. Capture/perceive only — not stamp check.
+
+    Iconic / sentinel hwnds are force_foreground'd so the next grab is live.
+    Stamp validation must use live_geom + is_hwnd_minimized (no restore).
+    """
     import time
     import win32gui
     hwnd = int(hwnd)
