@@ -157,6 +157,38 @@ def find_window(title: str = "", exe: str = "", hwnd: int | None = None) -> dict
 
 
 
+# GetWindowPlacement showCmd values that mean iconic (win32con).
+_SW_SHOWMINIMIZED = 2
+_SW_MINIMIZE = 6
+_SW_SHOWMINNOACTIVE = 7
+_SW_FORCEMINIMIZE = 11
+_MINIMIZED_SHOW_CMDS = frozenset({
+    _SW_SHOWMINIMIZED,
+    _SW_MINIMIZE,
+    _SW_SHOWMINNOACTIVE,
+    _SW_FORCEMINIMIZE,
+})
+
+
+def is_hwnd_minimized(hwnd: int) -> bool:
+    """Live iconic state. Uses IsIconic + showCmd; never rcNormalPosition / restore rect."""
+    import win32gui
+
+    hwnd = int(hwnd)
+    if bool(win32gui.IsIconic(hwnd)):
+        return True
+    try:
+        placement = win32gui.GetWindowPlacement(hwnd)
+    except Exception:
+        return False
+    # pywin32: (flags, showCmd, ptMin, ptMax, rcNormal)
+    try:
+        show_cmd = int(placement[1])
+    except (TypeError, ValueError, IndexError, KeyError):
+        return False
+    return show_cmd in _MINIMIZED_SHOW_CMDS
+
+
 def is_sentinel_origin(origin: dict | None) -> bool:
     """Minimized GetWindowRect is left/top -32000 and a stub size (~144x20)."""
     if not origin:
@@ -214,8 +246,21 @@ def capture_looks_implausible(arr, origin: dict | None = None) -> bool:
     return False
 
 
+def live_geom(hwnd: int) -> tuple[dict | None, dict | None]:
+    """Client origin + window row as they are now. Never restores / force_foreground.
+
+    Stamp validation uses this. Capture/perceive uses refresh_geom (may restore).
+    """
+    hwnd = int(hwnd)
+    return client_origin(hwnd), find_window(hwnd=hwnd)
+
+
 def refresh_geom(hwnd: int) -> tuple[dict | None, dict | None]:
-    """Client origin + window row after restore. Call AFTER capture, not before."""
+    """Client origin + window row after restore. Capture/perceive only — not stamp check.
+
+    Iconic / sentinel hwnds are force_foreground'd so the next grab is live.
+    Stamp validation must use live_geom + is_hwnd_minimized (no restore).
+    """
     import time
     import win32gui
     hwnd = int(hwnd)
