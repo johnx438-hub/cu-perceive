@@ -45,12 +45,15 @@ class _Live(unittest.TestCase):
     def setUp(self):
         self.calls: list[str] = []
         self.fg = HWND
+        self.at = HWND
         patches = [
             mock.patch("cu_perceive.act.check_stamp", return_value={"ok": True}),
             mock.patch("cu_perceive.act.stamp_identity_error", return_value=None),
             mock.patch("cu_perceive.windows.foreground_matches",
                        side_effect=lambda h: (self.fg == h, self.fg)),
             mock.patch("cu_perceive.windows.force_foreground", side_effect=self._focus),
+            mock.patch("cu_perceive.windows.point_owner",
+                       side_effect=lambda h, x, y: (self.at == h, {"hwnd": self.at, "title": "COVER"})),
             mock.patch("cu_perceive.input.click_xy", side_effect=lambda *a, **k: self.calls.append("click")),
             mock.patch("cu_perceive.input.drag_path",
                        side_effect=lambda *a, **k: self.calls.append("drag") or {"samples": 2}),
@@ -69,6 +72,7 @@ class _Live(unittest.TestCase):
     def _focus(self, hwnd):
         self.calls.append(f"focus:{hwnd}")
         self.fg = self.focus_result
+        self.at = self.focus_result
         return True
 
     def go(self, frame, **kw):
@@ -107,11 +111,12 @@ class TestKeyboardOnlyGo(_Live):
         self.assertEqual(self.calls, ["key:ctrl+a", "type:hello", "key:enter"])
         self.assertNotIn("focused_window", out)
 
-    def test_click_first_needs_no_foreground_check(self):
+    def test_click_first_still_checks_foreground(self):
         self.fg = 999
         out = self.go(_window_frame(), norm="500,500", text="hello", replace=True)
-        self.assertTrue(out["ok"], out)
-        self.assertEqual(self.calls, ["click", "key:ctrl+a", "type:hello"])
+        self.assertFalse(out["ok"], out)
+        self.assertEqual(out["keyboard_refused_step"], 1)
+        self.assertEqual(self.calls, ["click"])
 
     def test_screen_stamp_refused(self):
         out = self.go(_screen_frame(), key="enter")
@@ -158,7 +163,7 @@ class TestKeyboardOnlyGo(_Live):
     def test_focus_rechecks_identity(self):
         self.fg = 999
         with mock.patch("cu_perceive.act.stamp_identity_error",
-                        side_effect=["HWND reused by pid 7", None]):
+                        side_effect=[None, "HWND reused by pid 7"]):
             out = self.go(_window_frame(), key="enter", focus=True)
         self.assertFalse(out["ok"])
         self.assertIn("after --focus failed", out["error"])
@@ -349,6 +354,7 @@ class TestImplicitStamp(_OutDir):
                                                       "origin": {"left": 0, "top": 0}, "windows": []})
         with mock.patch("cu_perceive.input.click_xy") as click, \
                 mock.patch("cu_perceive.act.stamp_identity_error", return_value=None), \
+                mock.patch("cu_perceive.windows.point_owner", return_value=(True, {"hwnd": HWND, "title": ""})), \
                 mock.patch("time.sleep"):
             rc, out, _ = _cli(["act", "--norm", "500,500", "--go"])
         data = json.loads(out)

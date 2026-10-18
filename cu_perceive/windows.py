@@ -357,6 +357,49 @@ def foreground_matches(hwnd: int) -> tuple[bool, int]:
     return (_win32.root_window(fg) or fg) == target, fg
 
 
+MENU_CLASS = "#32768"
+_MAX_OWNER_DEPTH = 32
+
+
+def window_at_point(x: int, y: int) -> int:
+    """Top-level window that a mouse event at screen (x, y) would go to, 0 if none."""
+    from . import _win32
+
+    at = _win32.window_from_point(int(x), int(y))
+    return (_win32.root_window(at) or at) if at else 0
+
+
+def owned_by(window: int, hwnd: int) -> bool:
+    """window is hwnd's top-level window, owned (directly or not) by it, or one of
+    its popup menus (menus have no owner but run on the owning window's thread)."""
+    from . import _win32
+
+    if not window or not hwnd:
+        return False
+    target = _win32.root_window(int(hwnd)) or int(hwnd)
+    cur = int(window)
+    for _ in range(_MAX_OWNER_DEPTH):
+        if not cur:
+            break
+        if cur == target:
+            return True
+        cur = _win32.owner_window(cur)
+    return _win32.class_name(window) == MENU_CLASS and _win32.window_thread(window) == _win32.window_thread(target)
+
+
+def point_owner(hwnd: int, x: int, y: int) -> tuple[bool, dict]:
+    """(ok, info): ok when a mouse event at (x, y) would reach hwnd or a window it owns.
+
+    info = {hwnd, title} of the top-level window actually at the point. Raises
+    _win32.Win32Unavailable off Windows.
+    """
+    from . import _win32
+
+    at = window_at_point(x, y)
+    info = {"hwnd": at, "title": _win32.window_title(at) if at else ""}
+    return owned_by(at, hwnd), info
+
+
 def client_origin(hwnd: int) -> dict | None:
     region = _window_service().get_client_region(int(hwnd))
     if region is None:

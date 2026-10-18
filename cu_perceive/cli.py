@@ -117,8 +117,9 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument(
         "--focus",
         action="store_true",
-        help="before --type/--key with no preceding click, bring the stamp window to the front "
-        "(identity re-checked); without it such keys are refused unless that window is already in front",
+        help="with --go, bring the stamp window to the front (identity re-checked) when a click/drag/scroll "
+        "point is covered by another window or a --type/--key would go to another window; without it those "
+        "steps are refused",
     )
     a.add_argument(
         "--method",

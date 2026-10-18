@@ -38,6 +38,7 @@ DWM_TNP_SOURCECLIENTAREAONLY = 0x00000010
 DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
 DWM_SETTLE_S = 0.012
 GA_ROOT = 2
+GW_OWNER = 4
 
 
 class Win32Unavailable(OSError):
@@ -87,6 +88,11 @@ def _declare(name: str, dll) -> None:
             "IsIconic": ([HWND], wintypes.BOOL),
             "GetForegroundWindow": ([], HWND),
             "GetAncestor": ([HWND, wintypes.UINT], HWND),
+            "WindowFromPoint": ([wintypes.POINT], HWND),
+            "GetCursorPos": ([ctypes.POINTER(wintypes.POINT)], wintypes.BOOL),
+            "GetWindow": ([HWND, wintypes.UINT], HWND),
+            "GetClassNameW": ([HWND, wintypes.LPWSTR, ctypes.c_int], ctypes.c_int),
+            "GetWindowTextW": ([HWND, wintypes.LPWSTR, ctypes.c_int], ctypes.c_int),
             "GetWindowThreadProcessId": ([HWND, ctypes.POINTER(wintypes.DWORD)], wintypes.DWORD),
             "GetWindowRect": ([HWND, ctypes.POINTER(wintypes.RECT)], wintypes.BOOL),
             "GetClientRect": ([HWND, ctypes.POINTER(wintypes.RECT)], wintypes.BOOL),
@@ -213,6 +219,39 @@ def root_window(hwnd: int) -> int:
     if not hwnd:
         return 0
     return int(_dll("user32").GetAncestor(int(hwnd), GA_ROOT) or 0)
+
+
+def window_from_point(x: int, y: int) -> int:
+    """Window that would receive a mouse event at screen point (x, y), 0 if none."""
+    return int(_dll("user32").WindowFromPoint(wintypes.POINT(int(x), int(y))) or 0)
+
+
+def cursor_pos() -> tuple[int, int]:
+    pt = wintypes.POINT()
+    if not _dll("user32").GetCursorPos(ctypes.byref(pt)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return int(pt.x), int(pt.y)
+
+
+def owner_window(hwnd: int) -> int:
+    return int(_dll("user32").GetWindow(int(hwnd), GW_OWNER) or 0) if hwnd else 0
+
+
+def class_name(hwnd: int) -> str:
+    buf = ctypes.create_unicode_buffer(256)
+    n = _dll("user32").GetClassNameW(int(hwnd), buf, 256)
+    return buf.value[:n] if n > 0 else ""
+
+
+def window_title(hwnd: int) -> str:
+    buf = ctypes.create_unicode_buffer(512)
+    n = _dll("user32").GetWindowTextW(int(hwnd), buf, 512)
+    return buf.value[:n] if n > 0 else ""
+
+
+def window_thread(hwnd: int) -> int:
+    """Thread that created hwnd, 0 if the window is gone."""
+    return int(_dll("user32").GetWindowThreadProcessId(int(hwnd), None) or 0)
 
 
 def window_pid(hwnd: int) -> int:

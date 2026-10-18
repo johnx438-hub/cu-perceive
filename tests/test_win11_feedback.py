@@ -176,6 +176,8 @@ class TestReplace(_TmpDir):
         with mock.patch("cu_perceive.input.click_xy", side_effect=lambda *a, **k: calls.append("click")), \
                 mock.patch("cu_perceive.input.tap_key", side_effect=lambda k: calls.append(f"key:{k}")), \
                 mock.patch("cu_perceive.input.enter_text", side_effect=lambda t, via="paste": calls.append(f"type:{t}")), \
+                mock.patch("cu_perceive.windows.window_at_point", return_value=77), \
+                mock.patch("cu_perceive.windows.foreground_matches", return_value=(True, 77)), \
                 mock.patch("time.sleep"):
             out = run_chain(_screen_frame(), parse_steps(norm="491,63", text="URL", key="enter", replace=True), dry_run=False)
         self.assertTrue(out["ok"], out)
@@ -240,7 +242,8 @@ class TestTruthfulClickCount(unittest.TestCase):
     def test_mid_chain_abort_counts_only_sent(self):
         with mock.patch("cu_perceive.act.check_stamp", return_value={"ok": True}), \
                 mock.patch("cu_perceive.act.stamp_identity_error", side_effect=[None, "reused"]), \
-                mock.patch("cu_perceive.input.click_xy") as click, mock.patch("time.sleep"):
+                mock.patch("cu_perceive.input.click_xy") as click, mock.patch("time.sleep"), \
+                mock.patch("cu_perceive.windows.point_owner", return_value=(True, {"hwnd": 42, "title": "T"})):
             out = run_chain(_window_frame(), parse_steps(norm="1,1;2,2"), dry_run=False)
         self.assertEqual(click.call_count, 1)
         self.assertEqual(out["identity_abort_step"], 1)

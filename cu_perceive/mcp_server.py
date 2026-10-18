@@ -293,8 +293,11 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         ids+text in ONE call: ids are real clicks first, then text - NOT a silent focus flag.
         Order is click(s) -> text -> key. replace=true adds ctrl+a right before the text so it
         replaces what the field holds (e.g. norm=address bar, text=URL, replace=true, key=enter).
-        text/key with no click first: go=true refuses unless the stamp window is in the foreground;
-        focus=true brings it forward first (identity re-checked). Screen stamps: add a click.
+        go=true on a window stamp: each click / drag start+end / scroll point must be on the stamp
+        window (or a window it owns) and each text/key needs it in the foreground, even after a
+        click; otherwise ok=false (pointer_refused_step + point_window, or keyboard_refused_step).
+        focus=true brings it forward first (identity re-checked). Dry runs list occluded_points.
+        Screen stamps: keys need a click first and go only to the window that click landed on.
         No stamp = latest perceive stamp; go=true then needs a window stamp with identity.
         A window that is gone or whose HWND/PID/creation time changed fails even a dry run;
         stamp_ok / stamp_error report the stamp check at top level.

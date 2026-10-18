@@ -190,9 +190,13 @@ class TestLiveStepGuard(unittest.TestCase):
     """Identity flips mid-chain: later steps must not run."""
 
     def setUp(self):
-        p = mock.patch("cu_perceive.act.check_stamp", return_value={"ok": True, "stamp": "s", "hwnd": 42})
-        p.start()
-        self.addCleanup(p.stop)
+        for p in (
+            mock.patch("cu_perceive.act.check_stamp", return_value={"ok": True, "stamp": "s", "hwnd": 42}),
+            mock.patch("cu_perceive.windows.point_owner", return_value=(True, {"hwnd": 42, "title": "T"})),
+            mock.patch("cu_perceive.windows.foreground_matches", return_value=(True, 42)),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
 
     def _ident(self, *results):
         p = mock.patch("cu_perceive.act.stamp_identity_error", side_effect=list(results))
@@ -217,6 +221,19 @@ class TestLiveStepGuard(unittest.TestCase):
 
     @mock.patch("time.sleep")
     def test_input_hold_key_released_on_abort(self, _sleep):
+        self._ident(None, "reused")
+        import cu_perceive.input as inp
+
+        with mock.patch.object(inp, "key_down") as down, mock.patch.object(inp, "key_up") as up, \
+                mock.patch.object(inp, "click_xy") as click:
+            out = run_chain(_frame(), parse_steps(norm="100,100;200,200"), dry_run=False, method="input", hold_key="ctrl")
+        self.assertFalse(out["ok"])
+        click.assert_called_once()
+        down.assert_called_once_with("ctrl")
+        up.assert_called_once_with("ctrl")
+
+    @mock.patch("time.sleep")
+    def test_input_hold_key_not_pressed_when_first_step_aborts(self, _sleep):
         self._ident("reused")
         import cu_perceive.input as inp
 
@@ -225,8 +242,8 @@ class TestLiveStepGuard(unittest.TestCase):
             out = run_chain(_frame(), parse_steps(norm="100,100"), dry_run=False, method="input", hold_key="ctrl")
         self.assertFalse(out["ok"])
         click.assert_not_called()
-        down.assert_called_once_with("ctrl")
-        up.assert_called_once_with("ctrl")
+        down.assert_not_called()
+        up.assert_not_called()
 
     def test_post_chain_guarded(self):
         self._ident("reused")
