@@ -161,6 +161,9 @@ class TestUiaScope(unittest.TestCase):
 
 class TestRunChainUiaDry(unittest.TestCase):
     def setUp(self):
+        p = mock.patch("cu_perceive.extras.missing_modules", return_value=[])
+        p.start()
+        self.addCleanup(p.stop)
         self.frame = {
             "stamp": "test-uia",
             "hwnd": 1,

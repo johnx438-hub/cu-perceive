@@ -1,6 +1,6 @@
 """Per-window capture that works while the window is behind others. Never focuses.
 
-Chain (default ``auto``): Windows.Graphics.Capture -> DWM thumbnail -> PrintWindow.
+Chain (default ``auto``): Windows.Graphics.Capture -> PrintWindow.
 Each grab is cropped to the client area and resized to the client size the stamp
 origin reports, so the 0-1000 map and origin+xy click math are unchanged. A
 near-black grab counts as a miss (sampled like Piik's BitmapHasContent) and the
@@ -8,6 +8,11 @@ next backend is tried. Minimized windows are refused, never restored.
 
 ``screen`` is the legacy screen-region grab; only valid when the window was
 explicitly brought to the front (perceive focus=true).
+
+``dwm`` (DWM thumbnail into an off-screen host window, read back with BitBlt) is
+experimental and not in ``auto``: DWM composes thumbnails into the desktop surface,
+not into the host window's own bitmap, so the readback is all black (seen 3/3 on
+Windows 11, occluded and not). It stays selectable for experiments only.
 """
 from __future__ import annotations
 
@@ -17,8 +22,13 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-BACKEND_ORDER: tuple[str, ...] = ("wgc", "dwm", "printwindow")
-CAPTURE_CHOICES: tuple[str, ...] = ("auto",) + BACKEND_ORDER + ("screen",)
+BACKEND_ORDER: tuple[str, ...] = ("wgc", "printwindow")
+EXPERIMENTAL_BACKENDS: tuple[str, ...] = ("dwm",)
+CAPTURE_CHOICES: tuple[str, ...] = ("auto", "wgc", "dwm", "printwindow", "screen")
+DWM_EXPERIMENTAL_WARNING = (
+    "capture=dwm is experimental: its readback is all black on Windows 11, so it is not "
+    "part of capture=auto; use auto, wgc or printwindow"
+)
 CONTENT_THRESHOLD = 8
 CONTENT_STEP = 4
 FRAME_SLOP_PX = 2
@@ -54,7 +64,7 @@ class CaptureResult:
 
 
 def parse_capture_choice(value: str | None) -> tuple[str, ...]:
-    """'auto' -> full chain; 'wgc'|'dwm'|'printwindow'|'screen' -> that one only."""
+    """'auto' -> wgc then printwindow; 'wgc'|'dwm'|'printwindow'|'screen' -> that one only."""
     v = (value or "auto").strip().lower()
     if v not in CAPTURE_CHOICES:
         raise ValueError(f"capture must be one of {'|'.join(CAPTURE_CHOICES)} (got {value!r})")

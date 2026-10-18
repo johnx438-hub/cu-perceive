@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
 from pathlib import Path
 
 
@@ -358,7 +357,7 @@ def client_origin(hwnd: int) -> dict | None:
 def capture_window_image(hwnd: int, origin: dict, *, capture: str = "auto", focused: bool = False):
     """Client-area grab of hwnd sized to ``origin``. Never focuses or restores.
 
-    capture='auto' runs WGC -> DWM thumbnail -> PrintWindow. When ``focused`` (the
+    capture='auto' runs WGC -> PrintWindow (dwm is experimental, opt-in only). When ``focused`` (the
     caller already brought the window to front) the legacy screen-region grab is
     a last resort. Returns capture.CaptureResult; raises capture.CaptureError /
     WindowMinimizedError.
@@ -451,10 +450,15 @@ def windows_map(out_dir: str | None = None, rows: list[dict] | None = None) -> d
         label = f"#{i} {w.get('hwnd')}"
         cv2.putText(bgr, label, (x1 + 4, max(16, y1 + 16)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
     stamped = draw_grid(bgr)
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    from . import stamps
+
+    stamp, js = stamps.allocate(dest, ".windows.json")
     mapp = dest / f"{stamp}.windows.map.png"
-    js = dest / f"{stamp}.windows.json"
-    cv2.imwrite(str(mapp), stamped)
+    try:
+        cv2.imwrite(str(mapp), stamped)
+    except BaseException:
+        stamps.release(js)
+        raise
     payload = {
         "stamp": stamp,
         "width": vw,

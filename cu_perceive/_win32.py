@@ -329,6 +329,8 @@ def printwindow_capture(hwnd: int):
 def dwm_thumbnail_capture(hwnd: int):
     """Render the window's DWM thumbnail into an off-screen no-activate tool window and read it.
 
+    Experimental: DWM composes the thumbnail into the desktop surface, not into the
+    host window's bitmap, so this BitBlt reads black on Windows 11. Not in capture=auto.
     Returns (bgr, None); the caller matches the frame size against window/frame rects.
     """
     u32, g32, dwm = _dll("user32"), _dll("gdi32"), _dll("dwmapi")

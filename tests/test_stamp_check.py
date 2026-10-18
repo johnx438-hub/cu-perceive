@@ -6,15 +6,24 @@ import types
 import unittest
 from unittest import mock
 
-# Stamp tests mock win32 APIs; provide a stub so they import on non-Windows.
-if "win32gui" not in sys.modules:
-    _win32gui = types.ModuleType("win32gui")
-    _win32gui.IsWindow = lambda hwnd: True
-    _win32gui.IsIconic = lambda hwnd: False
-    _win32gui.GetWindowPlacement = lambda hwnd: (0, 1, (0, 0), (0, 0), (0, 0, 0, 0))
-    sys.modules["win32gui"] = _win32gui
+# Stamp tests mock win32 APIs; provide a stub on non-Windows, scoped to this module
+# so other test files keep seeing no win32gui.
+_win32gui = types.ModuleType("win32gui")
+_win32gui.IsWindow = lambda hwnd: True
+_win32gui.IsIconic = lambda hwnd: False
+_win32gui.GetWindowPlacement = lambda hwnd: (0, 1, (0, 0), (0, 0), (0, 0, 0, 0))
+_modules_patch = mock.patch.dict(sys.modules, {} if "win32gui" in sys.modules else {"win32gui": _win32gui})
 
-from cu_perceive.act import check_stamp, parse_steps, run_chain
+
+def setUpModule():
+    _modules_patch.start()
+
+
+def tearDownModule():
+    _modules_patch.stop()
+
+
+from cu_perceive.act import check_stamp, parse_steps, run_chain  # noqa: E402
 from cu_perceive.windows import is_hwnd_minimized, live_geom
 
 

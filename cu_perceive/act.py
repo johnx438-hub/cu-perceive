@@ -8,6 +8,7 @@ from pathlib import Path
 from .config import out_dir as _config_out_dir
 
 DEFAULT_OUT = _config_out_dir()
+REPLACE_SELECT_KEY = "ctrl+a"
 
 
 def load_frame(stamp: str | None = None, json_path: str | None = None) -> tuple[dict, Path | None]:
@@ -264,7 +265,10 @@ def parse_steps(
     hold: float = 0,
     extras: list | None = None,
     uia_name: str | list | None = None,
+    replace: bool = False,
 ) -> list[dict]:
+    """Flat act fields -> ordered specs. replace=True puts a ctrl+a select-all before
+    every type step so the paste replaces the field's text instead of inserting at the caret."""
     out: list[dict] = []
     if steps:
         for raw in steps.replace(" ", "").split(","):
@@ -336,6 +340,14 @@ def parse_steps(
             n = n.strip()
             if n:
                 out.append({"kind": "uia_name", "query": n})
+    if replace:
+        with_select: list[dict] = []
+        for s in out:
+            if s.get("kind") == "type":
+                with_select.append({"kind": "key", "key": REPLACE_SELECT_KEY, "replace": True})
+                s["replace"] = True
+            with_select.append(s)
+        out = with_select
     if float(hold or 0) > 0:
         for s in out:
             if s.get("kind") in ("id", "xy", "norm", "uia_name"):
@@ -428,9 +440,15 @@ def plan_steps(frame: dict, specs: list[dict]) -> list[dict]:
         elif kind == "scroll":
             steps.append({"via": "scroll", "notches": int(spec["notches"]), "screen": last_screen})
         elif kind == "type":
-            steps.append({"via": "type", "text": spec["text"], "input_via": spec.get("input_via") or "paste"})
+            step = {"via": "type", "text": spec["text"], "input_via": spec.get("input_via") or "paste"}
+            if spec.get("replace"):
+                step["replace"] = True
+            steps.append(step)
         elif kind == "key":
-            steps.append({"via": "key", "key": spec["key"]})
+            step = {"via": "key", "key": spec["key"]}
+            if spec.get("replace"):
+                step["replace"] = True
+            steps.append(step)
         elif kind == "wait":
             steps.append({"via": "wait", "sec": float(spec["sec"])})
         elif kind == "uia_name":
@@ -698,17 +716,16 @@ def normalize_hold_key(hold_key: str | None) -> str | None:
 
 
 def _parse_stamp_age_sec(stamp: str | None, json_path: str | Path | None = None) -> float | None:
-    """Age in seconds from stamp YYYYMMDD-HHMMSS, else json file mtime. None if unknown."""
+    """Age in seconds from stamp YYYYMMDD-HHMMSS[-mmm][-N], else json file mtime. None if unknown."""
     from datetime import datetime
     import time as _time
 
+    from .stamps import parse_time
+
     if stamp:
-        s = str(stamp).strip()
-        try:
-            dt = datetime.strptime(s, "%Y%m%d-%H%M%S")
+        dt = parse_time(str(stamp))
+        if dt is not None:
             return max(0.0, (datetime.now() - dt).total_seconds())
-        except ValueError:
-            pass
     if json_path:
         p = Path(json_path)
         try:
@@ -819,6 +836,7 @@ def check_stamp(
 
             if not win32gui.IsWindow(hwnd_i):
                 out["ok"] = False
+                out["identity_ok"] = False
                 out["error"] = f"hwnd {hwnd_i} no longer exists; re-perceive"
                 return out
         except Exception as e:
@@ -912,10 +930,12 @@ def check_stamp(
 def apply_foreground_accounting(out: dict) -> None:
     """Mark SendInput / true-cursor usage on click steps and the act JSON.
 
-    Mutates out["steps"] and sets top-level foreground_used /
-    foreground_click_count. Only via in id/xy/norm count as clicks.
-    Effective method is chosen_method when out["method"]=="auto"
-    (missing chosen -> input); otherwise out["method"].
+    Mutates out["steps"] (per-step foreground_used = planned) and sets top-level
+    planned_foreground_click_count. foreground_used / foreground_click_count are the
+    planned values on a dry run; on --go they start at 0/False and count only clicks
+    actually sent (_count_live_click), so a refused --go reports 0.
+    Only via in id/xy/norm count as clicks. Effective method is chosen_method when
+    out["method"]=="auto" (missing chosen -> input); otherwise out["method"].
     input -> True; post/uia -> False.
     """
     method = out.get("method")
@@ -931,8 +951,18 @@ def apply_foreground_accounting(out: dict) -> None:
         step["foreground_used"] = used
         if used:
             count += 1
-    out["foreground_used"] = count > 0
-    out["foreground_click_count"] = count
+    out["planned_foreground_click_count"] = count
+    if out.get("dry_run", True):
+        out["foreground_used"] = count > 0
+        out["foreground_click_count"] = count
+    else:
+        out["foreground_used"] = False
+        out["foreground_click_count"] = 0
+
+
+def _count_live_click(out: dict) -> None:
+    out["foreground_click_count"] = int(out.get("foreground_click_count") or 0) + 1
+    out["foreground_used"] = True
 
 
 def _identity_abort(out: dict, frame: dict, steps: list[dict], n: int) -> bool:
@@ -984,6 +1014,23 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                 "steps": [],
                 "error": err,
             }
+    from . import extras
+
+    uia_missing = method_n in ("uia", "auto") and bool(extras.missing_modules("uia"))
+    if method_n == "uia" and uia_missing:
+        try:
+            extras.require("uia")
+        except extras.MissingExtraError as e:
+            return {
+                **e.to_dict(),
+                "dry_run": bool(dry_run),
+                "method": method_n,
+                "stamp": (frame or {}).get("stamp"),
+                "hwnd": (frame or {}).get("hwnd"),
+                "coord_space": (frame or {}).get("coord_space"),
+                "origin": (frame or {}).get("origin"),
+                "steps": [],
+            }
     try:
         steps = plan_steps(frame or {}, specs)
     except ValueError as e:
@@ -1011,6 +1058,11 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
     }
     if hold:
         out["hold_key"] = hold
+    if uia_missing and method_n == "auto":
+        out["warnings"] = [
+            "uia extra not installed, so method=auto cannot probe UIA and uses input; install: "
+            + extras.install_command("uia")
+        ]
     if method_n == "post":
         try:
             enrich_post_steps(frame or {}, steps, double=double)
@@ -1068,7 +1120,13 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
     out["stamp_reuse"] = True
     out["step_count"] = len(steps)
     stamp_bad = not stamp_check.get("ok")
-    if stamp_bad and (not dry_run or strict_stamp):
+    out["stamp_ok"] = not stamp_bad
+    if stamp_bad:
+        out["stamp_error"] = stamp_check.get("error") or "stamp check failed; re-perceive"
+    # A plan for a window that is gone or now belongs to another process is wrong, so
+    # identity failures fail the dry run too; moved/aged stamps only with strict_stamp.
+    wrong_window = stamp_check.get("identity_ok") is False
+    if stamp_bad and (not dry_run or strict_stamp or wrong_window):
         out["ok"] = False
         out["error"] = stamp_check.get("error") or "stamp check failed; re-perceive"
         if method_n in ("uia", "auto"):
@@ -1137,6 +1195,7 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                     hold=float(step.get("hold") or 0),
                 )
                 step["clicked"] = True
+                _count_live_click(out)
             if n + 1 < len(steps):
                 time.sleep(gap)
         for s in steps:
@@ -1237,6 +1296,7 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
             elif via in ("id", "xy", "norm"):
                 click_xy(step["screen"][0], step["screen"][1], double=double, button=step.get("button") or "left", hold=float(step.get("hold") or 0))
                 step["clicked"] = True
+                _count_live_click(out)
             elif via == "wait":
                 time.sleep(float(step["sec"]))
                 step["waited"] = True

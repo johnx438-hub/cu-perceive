@@ -22,6 +22,43 @@ def transport_security_lists(extra_hosts: list[str] | None = None) -> tuple[list
     return hosts, origins
 
 
+def mcp_api():
+    """(major, ServerClass, Image) for the installed mcp SDK.
+
+    mcp 1.x: mcp.server.fastmcp.FastMCP. mcp 2.x renamed it to
+    mcp.server.mcpserver.MCPServer and moved host / transport_security from the
+    constructor to streamable_http_app().
+    """
+    try:
+        from mcp.server.mcpserver import MCPServer
+        from mcp.server.mcpserver.utilities.types import Image
+
+        return 2, MCPServer, Image
+    except ImportError:
+        pass
+    try:
+        from mcp.server.fastmcp import FastMCP
+        from mcp.server.fastmcp.utilities.types import Image
+    except ImportError as e:
+        raise ImportError(
+            f"cu-perceive mcp needs the mcp SDK 1.19+ or 2.x ({e}); "
+            "reinstall cu-perceive or run: python -m pip install \"mcp>=1.19,<3\""
+        ) from e
+    return 1, FastMCP, Image
+
+
+def build_server(name: str, host: str, port: int, security):
+    """Server object plus a zero-arg factory for its streamable-HTTP Starlette app."""
+    major, server_cls, _image = mcp_api()
+    if major >= 2:
+        app = server_cls(name)
+        return app, lambda: app.streamable_http_app(transport_security=security, host=host)
+    app = server_cls(name, host=host, port=port, transport_security=security)
+    app.settings.host = host
+    app.settings.port = port
+    return app, app.streamable_http_app
+
+
 def _nz_int(v: int):
     return v if v else None
 
@@ -32,8 +69,6 @@ def _nz_str(v: str):
 
 def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | None = None) -> None:
     import json
-    from mcp.server.fastmcp import FastMCP
-    from mcp.server.fastmcp.utilities.types import Image
     from mcp.server.transport_security import TransportSecuritySettings
     from PIL import Image as PILImage
 
@@ -43,7 +78,9 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
     from .launch import launch, list_apps
     from .windows import PICK_RULE, find_windows, list_windows, windows_map
 
-    def _thumb_image(map_path: str) -> Image:
+    _major, _server_cls, Image = mcp_api()
+
+    def _thumb_image(map_path: str):
         im = PILImage.open(map_path)
         w, h = im.size
         if max(w, h) > INLINE_MAX_SIDE:
@@ -68,18 +105,12 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         return text
 
     hosts, origins = transport_security_lists(allowed_hosts)
-    app = FastMCP(
-        "cu-perceive",
-        host=host,
-        port=port,
-        transport_security=TransportSecuritySettings(
-            enable_dns_rebinding_protection=True,
-            allowed_hosts=hosts,
-            allowed_origins=origins,
-        ),
+    security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=hosts,
+        allowed_origins=origins,
     )
-    app.settings.host = host
-    app.settings.port = port
+    app, http_app = build_server("cu-perceive", host, port, security)
 
     @app.tool()
     def windows(title: str = "", exe: str = "", hwnd: int = 0, map: bool = True, map_inline: bool = True):
@@ -143,7 +174,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         hwnd 0 and empty title/exe = primary screen. Returns JSON plus a compressed map (0-1000 still valid; clicks use stamp width/height).
         The window is captured where it is, even behind other windows; focus stays put. focus=true raises/restores it first.
         Minimized window without focus=true -> ok=false, minimized=true, no stamp (restore it or pass focus=true).
-        capture: auto (WGC -> DWM thumbnail -> PrintWindow) | wgc | dwm | printwindow | screen (screen needs focus=true).
+        capture: auto (WGC -> PrintWindow) | wgc | printwindow | screen (needs focus=true) | dwm (experimental, black on Win11).
         map_inline=false = JSON/path only. ocr=true only for text ids. yolo=true runs ScreenParser (class names as item text).
         uia=true (S4) walks UIA under pinned hwnd; additive uia_nodes with 0-1000 norm (same as grid). Default all off. No click.
         ocr/uia/yolo are optional extras; if missing the reply has ok=false and the exact pip command in "install".
@@ -244,6 +275,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         max_age_sec: float | None = None,
         strict_stamp: bool = False,
         uia_name: str = "",
+        replace: bool = False,
     ):
         """
         Plan/run against a stamp. go default false. Prefer norm (map 0-1000) or xy.
@@ -257,7 +289,12 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         ids: comma string / int / list; needs prior ocr/yolo perceive.
         text=paste+restore. key like ctrl+c (comma-separated ok).
         ids+text in ONE call: ids are real clicks first, then text - NOT a silent focus flag.
-        If field already has text, pass key=ctrl+a (or split acts).
+        Order is click(s) -> text -> key. replace=true adds ctrl+a right before the text so it
+        replaces what the field holds (e.g. norm=address bar, text=URL, replace=true, key=enter).
+        A window that is gone or whose HWND/PID/creation time changed fails even a dry run;
+        stamp_ok / stamp_error report the stamp check at top level.
+        go=true: foreground_click_count counts clicks actually sent (0 if refused);
+        planned_foreground_click_count is the plan.
         scroll+xy/norm/ids => hover then wheel (NO left-click) - will not focus an input.
         hold>0 = long-press. hold_key=ctrl|shift|alt across the chain (not mouse hold).
         method=input (default SendInput) | post (S1) | uia (S2) | auto (S3).
@@ -272,6 +309,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
             key=_nz_str(key), drag=_nz_str(drag), drag_norm=_nz_str(drag_norm),
             scroll=_nz_str(scroll), button=button, hover=hover, step_px=step_px, hold=hold,
             uia_name=_nz_str(uia_name) or None,
+            replace=bool(replace),
         )
         try:
             frame, path = load_frame(stamp=_nz_str(stamp))
@@ -301,8 +339,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         return {"apps": list_apps()}
 
     import uvicorn
-    starlette_app = app.streamable_http_app()
-    config = uvicorn.Config(starlette_app, host=host, port=port, log_level="info", http="h11")
+    config = uvicorn.Config(http_app(), host=host, port=port, log_level="info", http="h11")
     uvicorn.Server(config).run()
 
 

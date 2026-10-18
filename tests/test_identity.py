@@ -6,14 +6,26 @@ import types
 import unittest
 from unittest import mock
 
-if "win32gui" not in sys.modules:
-    _win32gui = types.ModuleType("win32gui")
-    _win32gui.IsWindow = lambda hwnd: True
-    _win32gui.IsIconic = lambda hwnd: False
-    _win32gui.GetWindowPlacement = lambda hwnd: (0, 1, (0, 0), (0, 0), (0, 0, 0, 0))
-    sys.modules["win32gui"] = _win32gui
+_win32gui = types.ModuleType("win32gui")
+_win32gui.IsWindow = lambda hwnd: True
+_win32gui.IsIconic = lambda hwnd: False
+_win32gui.GetWindowPlacement = lambda hwnd: (0, 1, (0, 0), (0, 0), (0, 0, 0, 0))
+# Scoped to this module so other test files keep seeing no win32gui on Linux.
+_modules_patch = mock.patch.dict(sys.modules, {} if "win32gui" in sys.modules else {"win32gui": _win32gui})
+_extras_patch = mock.patch("cu_perceive.extras.missing_modules", return_value=[])
 
-from cu_perceive.act import check_stamp, parse_steps, run_chain, stamp_identity_error
+
+def setUpModule():
+    _modules_patch.start()
+    _extras_patch.start()
+
+
+def tearDownModule():
+    _extras_patch.stop()
+    _modules_patch.stop()
+
+
+from cu_perceive.act import check_stamp, parse_steps, run_chain, stamp_identity_error  # noqa: E402
 from cu_perceive.windows import verify_window_identity
 
 CT = 133000000000000000
@@ -137,13 +149,41 @@ class TestCheckStampIdentity(_Live):
         self.assertIn("HWND reused", out["error"])
         click.assert_not_called()
 
-    def test_dry_run_records_but_strict_fails(self):
+    def test_dry_run_fails_on_identity_mismatch_without_strict(self):
         self.live(pid=5555)
         out = run_chain(_frame(), parse_steps(norm="500,500"), dry_run=True, method="input")
-        self.assertTrue(out["ok"])
-        self.assertFalse(out["stamp_check"]["ok"])
-        out = run_chain(_frame(), parse_steps(norm="500,500"), dry_run=True, method="input", strict_stamp=True)
+        self.assertFalse(out["ok"], out)
+        self.assertFalse(out["stamp_ok"])
+        self.assertIn("HWND reused", out["error"])
+        self.assertEqual(out["stamp_error"], out["error"])
+        self.assertFalse(out["stamp_check"]["identity_ok"])
+
+    def test_dry_run_fails_when_window_gone(self):
+        self.live()
+        with mock.patch("win32gui.IsWindow", return_value=False):
+            out = run_chain(_frame(), parse_steps(norm="500,500"), dry_run=True, method="input")
         self.assertFalse(out["ok"])
+        self.assertIn("no longer exists", out["error"])
+        self.assertFalse(out["stamp_check"]["identity_ok"])
+
+    def test_dry_run_fails_on_missing_identity(self):
+        frame = _frame()
+        del frame["identity"]
+        out = run_chain(frame, parse_steps(norm="500,500"), dry_run=True, method="input")
+        self.assertFalse(out["ok"])
+        self.assertIn("no window identity", out["error"])
+
+    def test_moved_window_dry_run_still_ok_but_surfaced(self):
+        self.live()
+        moved = {"left": 900, "top": 900, "width": 640, "height": 480}
+        with mock.patch("cu_perceive.windows.is_hwnd_minimized", return_value=False), \
+                mock.patch("cu_perceive.windows.live_geom", return_value=(moved, {})):
+            out = run_chain(_frame(), parse_steps(norm="500,500"), dry_run=True, method="input")
+            self.assertTrue(out["ok"], out)
+            self.assertFalse(out["stamp_ok"])
+            self.assertIn("window moved", out["stamp_error"])
+            strict = run_chain(_frame(), parse_steps(norm="500,500"), dry_run=True, method="input", strict_stamp=True)
+        self.assertFalse(strict["ok"])
 
 
 class TestLiveStepGuard(unittest.TestCase):

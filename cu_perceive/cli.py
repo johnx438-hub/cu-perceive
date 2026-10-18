@@ -40,7 +40,20 @@ def _slim_win(w: dict) -> dict:
     }
 
 
+def utf8_stdio() -> None:
+    """Emit UTF-8 on stdout/stderr whatever the console code page is (cp1252 cannot
+    encode CJK window titles). Consumers should decode the output as UTF-8."""
+    for stream in (sys.stdout, sys.stderr):
+        enc = (getattr(stream, "encoding", None) or "").lower().replace("-", "")
+        if enc != "utf8" and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+            except (ValueError, OSError):
+                pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    utf8_stdio()
     parser = argparse.ArgumentParser(prog="cu-perceive")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -59,7 +72,7 @@ def main(argv: list[str] | None = None) -> int:
         "--capture",
         choices=CAPTURE_CHOICES,
         default=None,
-        help="auto = WGC -> DWM thumbnail -> PrintWindow (default, or CU_PERCEIVE_CAPTURE); one backend to force it; screen = legacy grab, needs --focus",
+        help="auto = WGC -> PrintWindow (default, or CU_PERCEIVE_CAPTURE); one backend to force it; screen = legacy grab, needs --focus; dwm = experimental, returns black on Windows 11",
     )
     p.add_argument("--ocr", action="store_true", help="also run OCR and write .anno.png + item ids")
     p.add_argument("--yolo", action="store_true", help="ScreenParser boxes as items (class name as text). Default off")
@@ -105,6 +118,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     a.add_argument("--double", action="store_true")
     a.add_argument("--type", "--text", dest="text", help="paste text (clipboard + Ctrl+V). CLI: --type or --text; MCP field is text")
+    a.add_argument(
+        "--replace",
+        action="store_true",
+        help="select all (ctrl+a) right before each --type so the text replaces the field instead of inserting at the caret",
+    )
     a.add_argument("--slow-type", action="store_true", help="per-char SendInput instead of paste")
     a.add_argument("--key", help="tap keys: enter,tab,esc,backspace, or chords like ctrl+c")
     a.add_argument("--drag", help="hold-drag window pixels polyline: x1,y1,x2,y2;x3,y3")
@@ -361,6 +379,7 @@ def main(argv: list[str] | None = None) -> int:
             hold=args.hold,
             extras=extras,
             uia_name=uia_names or None,
+            replace=bool(args.replace),
         )
         if path_specs:
             specs = path_specs + specs
@@ -399,9 +418,13 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(err, ensure_ascii=False))
             print(str(e), file=sys.stderr)
             return 1
-        out["json"] = str(path)
+        out["json"] = str(path) if path else None
+        if out.get("missing_extra"):
+            print(json.dumps(out, ensure_ascii=False))
+            print(out.get("error") or "missing extra", file=sys.stderr)
+            return 3
         if warnings:
-            out["warnings"] = warnings
+            out["warnings"] = (out.get("warnings") or []) + warnings
         if args.path:
             out["experimental"] = True
             out["path_file"] = str(args.path)

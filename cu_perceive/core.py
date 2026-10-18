@@ -2,14 +2,13 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
 from pathlib import Path
 
 import cv2
 import numpy as np
 from PIL import ImageGrab
 
-from . import config, extras
+from . import config, extras, stamps
 
 DEFAULT_OUT = config.out_dir()
 CU_WEIGHTS = config.weights_dir()
@@ -225,7 +224,7 @@ def _capture_pinned(hwnd: int, *, focus: bool, capture: str) -> dict:
     minimized / capture failure / identity change (perceive reports those)."""
     import time
 
-    from .capture import CaptureError, WindowMinimizedError
+    from .capture import DWM_EXPERIMENTAL_WARNING, EXPERIMENTAL_BACKENDS, CaptureError, WindowMinimizedError
     from .windows import (
         RESTORE_SETTLE_S,
         capture_looks_implausible,
@@ -247,6 +246,7 @@ def _capture_pinned(hwnd: int, *, focus: bool, capture: str) -> dict:
                 f"window hwnd={hwnd} is minimized; not captured and not restored. "
                 "Restore it yourself, or re-run with focus=true (CLI --focus) to restore and raise it."
             ),
+            "capture": {"backend": None, "attempts": [], "skipped": "minimized"},
         }
     identity = window_identity(hwnd)
     if focus:
@@ -260,7 +260,12 @@ def _capture_pinned(hwnd: int, *, focus: bool, capture: str) -> dict:
     try:
         result = capture_window_image(hwnd, origin, capture=capture, focused=focus)
     except WindowMinimizedError as e:
-        return {"ok": False, "minimized": True, "error": str(e), "capture": {"attempts": e.attempts}}
+        return {
+            "ok": False,
+            "minimized": True,
+            "error": str(e),
+            "capture": {"backend": None, "attempts": e.attempts, "skipped": "minimized"},
+        }
     except CaptureError as e:
         hint = "" if focus else " Retry with focus=true (CLI --focus) to raise the window and grab the screen."
         return {
@@ -269,6 +274,8 @@ def _capture_pinned(hwnd: int, *, focus: bool, capture: str) -> dict:
             "capture": {"backend": None, "attempts": e.attempts},
         }
     warnings: list[str] = []
+    if capture in EXPERIMENTAL_BACKENDS:
+        warnings.append(DWM_EXPERIMENTAL_WARNING)
     if result.blank:
         warnings.append("capture is all black on every backend; the window may really be black, or hidden")
     if focus and capture_looks_implausible(result.image, origin):
@@ -349,7 +356,7 @@ def perceive(
     A pinned window (hwnd/title/exe) is captured in place, even behind other
     windows; it is only raised / restored when ``focus`` is set. A minimized
     window without ``focus`` returns ok=False, minimized=True and writes no stamp.
-    ``capture``: auto (WGC -> DWM -> PrintWindow) | wgc | dwm | printwindow | screen.
+    ``capture``: auto (WGC -> PrintWindow) | wgc | printwindow | screen | dwm (experimental).
     """
     from .paths import attach_wsl, coerce_out_dir
     if ocr:
@@ -364,7 +371,6 @@ def perceive(
     out_dir = coerce_out_dir(out_dir)
     dest = Path(out_dir) if out_dir else DEFAULT_OUT
     dest.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     src = Path(image) if image else None
     win = None
     origin = None
@@ -434,103 +440,107 @@ def perceive(
             origin = origin or {}
             origin = dict(origin)
             origin["bad"] = True
+    stamp, js = stamps.allocate(dest)
     png = dest / f"{stamp}.png"
     gridp = dest / f"{stamp}.grid.png"
-    js = dest / f"{stamp}.json"
-    cv2.imwrite(str(png), bgr)
-    cv2.imwrite(str(gridp), draw_grid(bgr))
-    anno = None
-    if ocr or yolo:
-        anno = dest / f"{stamp}.anno.png"
-        cv2.imwrite(str(anno), _annotate(bgr, items))
-    if src:
-        source = str(src)
-    elif hwnd is not None:
-        source = f"hwnd:{hwnd}"
-    else:
-        source = "screen"
-    win_slim = None
-    if win:
-        win_slim = {k: win[k] for k in ("hwnd", "title", "exe", "pid", "ctime", "exe_path", "rect") if k in win}
-    # S4: optional compact UIA nodes (additive; fail-closed when requested).
-    uia_nodes: list = []
-    uia_meta: dict = {}
-    uia_ok = True
-    uia_error = None
-    if uia:
-        from .uia import collect_uia_nodes
-        if verify_light:
-            uia_ok = False
-            uia_error = (
-                "perceive --uia is full-window only for E2; omit --roi/--roi-norm when using --uia"
-            )
-        elif hwnd is None:
-            uia_ok = False
-            uia_error = "perceive --uia requires a pinned window hwnd (use --hwnd/--title/--exe)"
+    try:
+        cv2.imwrite(str(png), bgr)
+        cv2.imwrite(str(gridp), draw_grid(bgr))
+        anno = None
+        if ocr or yolo:
+            anno = dest / f"{stamp}.anno.png"
+            cv2.imwrite(str(anno), _annotate(bgr, items))
+        if src:
+            source = str(src)
+        elif hwnd is not None:
+            source = f"hwnd:{hwnd}"
         else:
-            import time as _time
+            source = "screen"
+        win_slim = None
+        if win:
+            win_slim = {k: win[k] for k in ("hwnd", "title", "exe", "pid", "ctime", "exe_path", "rect") if k in win}
+        # S4: optional compact UIA nodes (additive; fail-closed when requested).
+        uia_nodes: list = []
+        uia_meta: dict = {}
+        uia_ok = True
+        uia_error = None
+        if uia:
+            from .uia import collect_uia_nodes
+            if verify_light:
+                uia_ok = False
+                uia_error = (
+                    "perceive --uia is full-window only for E2; omit --roi/--roi-norm when using --uia"
+                )
+            elif hwnd is None:
+                uia_ok = False
+                uia_error = "perceive --uia requires a pinned window hwnd (use --hwnd/--title/--exe)"
+            else:
+                import time as _time
 
-            ol = float((origin or {}).get("left") or 0)
-            ot = float((origin or {}).get("top") or 0)
-            _t_uia = _time.perf_counter()
-            uia_res = collect_uia_nodes(
-                int(hwnd),
-                width=int(w),
-                height=int(h),
-                origin_left=ol,
-                origin_top=ot,
-            )
-            uia_ms = int(round((_time.perf_counter() - _t_uia) * 1000))
-            uia_ok = bool(uia_res.get("ok"))
-            uia_error = uia_res.get("error")
-            uia_nodes = list(uia_res.get("uia_nodes") or [])
-            uia_meta = {
-                k: uia_res[k]
-                for k in ("uia_count", "uia_visited", "uia_truncated", "caps")
-                if k in uia_res
-            }
-            uia_meta["uia_ms"] = uia_ms
+                ol = float((origin or {}).get("left") or 0)
+                ot = float((origin or {}).get("top") or 0)
+                _t_uia = _time.perf_counter()
+                uia_res = collect_uia_nodes(
+                    int(hwnd),
+                    width=int(w),
+                    height=int(h),
+                    origin_left=ol,
+                    origin_top=ot,
+                )
+                uia_ms = int(round((_time.perf_counter() - _t_uia) * 1000))
+                uia_ok = bool(uia_res.get("ok"))
+                uia_error = uia_res.get("error")
+                uia_nodes = list(uia_res.get("uia_nodes") or [])
+                uia_meta = {
+                    k: uia_res[k]
+                    for k in ("uia_count", "uia_visited", "uia_truncated", "caps")
+                    if k in uia_res
+                }
+                uia_meta["uia_ms"] = uia_ms
 
-    payload = {
-        "stamp": stamp,
-        "width": w,
-        "height": h,
-        "source": source,
-        "hwnd": int(hwnd) if hwnd is not None else None,
-        "window": win_slim,
-        "origin": origin,
-        "coord_space": space,
-        "items": items,
-        "ocr": bool(ocr),
-        "yolo": bool(yolo),
-        "uia": bool(uia),
-        "png": str(png),
-        "map": str(gridp),
-        "grid": str(gridp),
-        "anno": str(anno) if anno else None,
-        "json": str(js),
-    }
-    if pin:
-        payload["identity"] = identity
-        payload["capture"] = capture_meta
-        payload["focused"] = bool(focus)
-    if warnings:
-        payload["warnings"] = warnings
-    if verify_light:
-        payload["roi"] = list(roi_px)
-        payload["full_width"] = full_w
-        payload["full_height"] = full_h
-        payload["verify_light"] = True
-        payload["roi_norm"] = list(roi_norm_out) if roi_norm_out is not None else None
-    if ocr_ms is not None:
-        payload["ocr_ms"] = ocr_ms
-    if uia:
-        payload["uia_nodes"] = uia_nodes
-        payload["uia_count"] = len(uia_nodes)
-        payload.update(uia_meta)
-        payload["ok"] = bool(uia_ok)
-        if uia_error:
-            payload["error"] = uia_error
-    attach_wsl(payload, 'png', 'map', 'grid', 'anno', 'json')
-    js.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    return payload
+        payload = {
+            "stamp": stamp,
+            "width": w,
+            "height": h,
+            "source": source,
+            "hwnd": int(hwnd) if hwnd is not None else None,
+            "window": win_slim,
+            "origin": origin,
+            "coord_space": space,
+            "items": items,
+            "ocr": bool(ocr),
+            "yolo": bool(yolo),
+            "uia": bool(uia),
+            "png": str(png),
+            "map": str(gridp),
+            "grid": str(gridp),
+            "anno": str(anno) if anno else None,
+            "json": str(js),
+        }
+        if pin:
+            payload["identity"] = identity
+            payload["capture"] = capture_meta
+            payload["focused"] = bool(focus)
+        if warnings:
+            payload["warnings"] = warnings
+        if verify_light:
+            payload["roi"] = list(roi_px)
+            payload["full_width"] = full_w
+            payload["full_height"] = full_h
+            payload["verify_light"] = True
+            payload["roi_norm"] = list(roi_norm_out) if roi_norm_out is not None else None
+        if ocr_ms is not None:
+            payload["ocr_ms"] = ocr_ms
+        if uia:
+            payload["uia_nodes"] = uia_nodes
+            payload["uia_count"] = len(uia_nodes)
+            payload.update(uia_meta)
+            payload["ok"] = bool(uia_ok)
+            if uia_error:
+                payload["error"] = uia_error
+        attach_wsl(payload, 'png', 'map', 'grid', 'anno', 'json')
+        js.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return payload
+    except BaseException:
+        stamps.release(js)
+        raise

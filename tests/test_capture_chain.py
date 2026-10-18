@@ -11,6 +11,7 @@ import numpy as np
 from cu_perceive import capture as cap
 from cu_perceive.capture import (
     BACKEND_ORDER,
+    CAPTURE_CHOICES,
     CaptureError,
     WindowMinimizedError,
     capture_window,
@@ -149,12 +150,28 @@ class TestCaptureChain(unittest.TestCase):
             "dwm": lambda h: (_img(816, 639, 0), None),
             "printwindow": lambda h: (_img(816, 639, 77), WINDOW),
         }
-        res = self._run(backends)
+        res = self._run(backends, order=("wgc", "dwm", "printwindow"))
         self.assertEqual(res.backend, "printwindow")
         self.assertFalse(res.blank)
         self.assertEqual([a["backend"] for a in res.attempts], ["wgc", "dwm", "printwindow"])
         self.assertIn("WGC unsupported", res.attempts[0]["error"])
         self.assertIn("blank", res.attempts[1]["error"])
+
+    def test_auto_skips_experimental_dwm(self):
+        calls = []
+
+        def boom(h):
+            calls.append("wgc")
+            raise OSError("WGC unsupported")
+
+        backends = {
+            "wgc": boom,
+            "dwm": lambda h: self.fail("dwm must not run under auto"),
+            "printwindow": lambda h: (calls.append("printwindow") or _img(816, 639, 77), WINDOW),
+        }
+        res = self._run(backends, order=parse_capture_choice("auto"))
+        self.assertEqual(res.backend, "printwindow")
+        self.assertEqual(calls, ["wgc", "printwindow"])
 
     def test_all_blank_returns_first_blank_flagged(self):
         backends = {n: (lambda h: (_img(816, 639, 0), WINDOW)) for n in BACKEND_ORDER}
@@ -169,7 +186,7 @@ class TestCaptureChain(unittest.TestCase):
 
         with self.assertRaises(CaptureError) as cm:
             self._run({n: boom for n in BACKEND_ORDER})
-        self.assertEqual(len(cm.exception.attempts), 3)
+        self.assertEqual(len(cm.exception.attempts), len(BACKEND_ORDER))
 
     def test_minimized_refused_without_any_backend(self):
         called = []
@@ -190,8 +207,10 @@ class TestCaptureChain(unittest.TestCase):
 
 class TestParseCaptureChoice(unittest.TestCase):
     def test_choices(self):
-        self.assertEqual(parse_capture_choice(None), BACKEND_ORDER)
+        self.assertEqual(parse_capture_choice(None), ("wgc", "printwindow"))
         self.assertEqual(parse_capture_choice("AUTO"), BACKEND_ORDER)
+        self.assertNotIn("dwm", BACKEND_ORDER)
+        self.assertIn("dwm", CAPTURE_CHOICES)
         self.assertEqual(parse_capture_choice("dwm"), ("dwm",))
         self.assertEqual(parse_capture_choice("screen"), ("screen",))
         with self.assertRaises(ValueError):

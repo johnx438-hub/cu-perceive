@@ -13,7 +13,8 @@ license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "cu_perceive/_vendor/enikk
 requires-python = ">=3.11"
 # Core install: grid map, background window capture, act (input/post). No OCR/UIA/YOLO.
 dependencies = [
-  "mcp>=1.19.0",
+  # 1.x (FastMCP) and 2.x (MCPServer) both work; see mcp_server.mcp_api. 3.x is untested.
+  "mcp>=1.19.0,<3",
   "pillow>=11.2.0",
   "opencv-python>=4.10.0",
   "numpy>=2.0.0",
