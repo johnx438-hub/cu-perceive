@@ -4,6 +4,8 @@ import argparse
 import json
 import sys
 
+from .capture import CAPTURE_CHOICES
+
 
 def _act_type_key_order(argv: list[str] | None) -> list[dict] | None:
     """Keep --key/--type/--text in the order they were typed so the first key is not dropped."""
@@ -32,6 +34,7 @@ def _slim_win(w: dict) -> dict:
         "title": w.get("title"),
         "exe": w.get("exe"),
         "pid": w.get("pid"),
+        "ctime": w.get("ctime"),
         "rect": w.get("rect"),
         "minimized": w.get("minimized"),
     }
@@ -47,7 +50,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--hwnd", type=int, help="capture this window client area")
     p.add_argument("--title", help="find window by title substring")
     p.add_argument("--exe", help="find window by exe name substring")
-    p.add_argument("--focus", action="store_true", help="bring the window to front before capture")
+    p.add_argument(
+        "--focus",
+        action="store_true",
+        help="restore + raise the window before capture. Default: capture in place (works behind other windows; minimized -> ok=false)",
+    )
+    p.add_argument(
+        "--capture",
+        choices=CAPTURE_CHOICES,
+        default=None,
+        help="auto = WGC -> DWM thumbnail -> PrintWindow (default, or CU_PERCEIVE_CAPTURE); one backend to force it; screen = legacy grab, needs --focus",
+    )
     p.add_argument("--ocr", action="store_true", help="also run OCR and write .anno.png + item ids")
     p.add_argument("--yolo", action="store_true", help="ScreenParser boxes as items (class name as text). Default off")
     p.add_argument("--uia", action="store_true", help="S4: also walk UIA tree under pinned window; additive uia_nodes with 0-1000 norm. Default off")
@@ -171,23 +184,41 @@ def main(argv: list[str] | None = None) -> int:
     m = sub.add_parser("mcp", help="serve streamable-http MCP on this machine")
     m.add_argument("--host", default="127.0.0.1")
     m.add_argument("--port", type=int, default=8771)
+    m.add_argument(
+        "--allow-host",
+        dest="allow_host",
+        action="append",
+        default=None,
+        help="extra Host name to accept besides loopback (repeatable; also CU_PERCEIVE_ALLOWED_HOSTS=a,b)",
+    )
 
     args = parser.parse_args(argv)
     if args.cmd == "perceive":
         from .core import perceive
-        out = perceive(
-            image=args.image,
-            out_dir=args.out,
-            hwnd=args.hwnd,
-            title=args.title,
-            exe=args.exe,
-            focus=args.focus,
-            ocr=args.ocr,
-            yolo=args.yolo,
-            uia=bool(getattr(args, "uia", False)),
-            roi=getattr(args, "roi", None),
-            roi_norm=getattr(args, "roi_norm", None),
-        )
+        from .extras import MissingExtraError
+        try:
+            out = perceive(
+                image=args.image,
+                out_dir=args.out,
+                hwnd=args.hwnd,
+                title=args.title,
+                exe=args.exe,
+                focus=args.focus,
+                ocr=args.ocr,
+                yolo=args.yolo,
+                uia=bool(getattr(args, "uia", False)),
+                roi=getattr(args, "roi", None),
+                roi_norm=getattr(args, "roi_norm", None),
+                capture=getattr(args, "capture", None),
+            )
+        except MissingExtraError as e:
+            print(json.dumps(e.to_dict(), ensure_ascii=False))
+            print(str(e), file=sys.stderr)
+            return 3
+        if out.get("ok") is False and not out.get("stamp"):
+            print(json.dumps(out, ensure_ascii=False))
+            print(out.get("error") or "perceive failed", file=sys.stderr)
+            return 1
         slim = {
             "stamp": out["stamp"],
             "count": len(out["items"]),
@@ -206,6 +237,9 @@ def main(argv: list[str] | None = None) -> int:
             "anno": out.get("anno"),
             "json": out["json"],
         }
+        for k in ("identity", "capture", "focused", "warnings"):
+            if k in out:
+                slim[k] = out[k]
         if out.get("verify_light"):
             slim["verify_light"] = True
             slim["roi"] = out.get("roi")
@@ -414,7 +448,7 @@ def main(argv: list[str] | None = None) -> int:
         return code
     if args.cmd == "mcp":
         from .mcp_server import serve
-        serve(host=args.host, port=args.port)
+        serve(host=args.host, port=args.port, allowed_hosts=args.allow_host)
         return 0
     return 2
 

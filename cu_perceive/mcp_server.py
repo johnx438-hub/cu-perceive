@@ -1,9 +1,25 @@
-"""HTTP MCP face. Must run on ARCHER. Bind a specific host, never 0.0.0.0."""
+"""HTTP MCP face. Runs on the Windows machine it controls. Bind loopback (default) or a
+specific host, never 0.0.0.0. Extra Host names (e.g. a tailnet name behind a reverse
+proxy) are opt-in via --allow-host or CU_PERCEIVE_ALLOWED_HOSTS."""
 
 from io import BytesIO
 from pathlib import Path
 
 INLINE_MAX_SIDE = 1280
+
+_PASS_THROUGH = ("ok", "error", "minimized", "identity", "capture", "focused", "warnings")
+
+
+def transport_security_lists(extra_hosts: list[str] | None = None) -> tuple[list[str], list[str]]:
+    """(allowed_hosts, allowed_origins) for DNS-rebinding protection: loopback + opt-in names."""
+    from .config import allowed_hosts as _configured
+
+    hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+    origins = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
+    for h in _configured(extra_hosts):
+        hosts += [f"{h}:*", h]
+        origins += [f"https://{h}:*", f"https://{h}"]
+    return hosts, origins
 
 
 def _nz_int(v: int):
@@ -14,7 +30,7 @@ def _nz_str(v: str):
     return v if v else None
 
 
-def serve(host: str = "127.0.0.1", port: int = 8771) -> None:
+def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | None = None) -> None:
     import json
     from mcp.server.fastmcp import FastMCP
     from mcp.server.fastmcp.utilities.types import Image
@@ -23,6 +39,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771) -> None:
 
     from .act import coerce_ids, load_frame, parse_steps, run_chain
     from .core import perceive
+    from .extras import MissingExtraError
     from .launch import launch, list_apps
     from .windows import PICK_RULE, find_windows, list_windows, windows_map
 
@@ -50,21 +67,15 @@ def serve(host: str = "127.0.0.1", port: int = 8771) -> None:
             return [text, _thumb_image(map_path)]
         return text
 
-    ts_host = "archer.tailca07d9.ts.net"
+    hosts, origins = transport_security_lists(allowed_hosts)
     app = FastMCP(
         "cu-perceive",
         host=host,
         port=port,
         transport_security=TransportSecuritySettings(
             enable_dns_rebinding_protection=True,
-            allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*", f"{ts_host}:*", ts_host],
-            allowed_origins=[
-                "http://127.0.0.1:*",
-                "http://localhost:*",
-                "http://[::1]:*",
-                f"https://{ts_host}:*",
-                f"https://{ts_host}",
-            ],
+            allowed_hosts=hosts,
+            allowed_origins=origins,
         ),
     )
     app.settings.host = host
@@ -84,7 +95,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771) -> None:
             else:
                 rows = find_windows(title=title or "", exe=exe or "")
             slim = [
-                {k: w.get(k) for k in ("hwnd", "title", "exe", "pid", "minimized", "rect", "class")}
+                {k: w.get(k) for k in ("hwnd", "title", "exe", "pid", "ctime", "minimized", "rect", "class")}
                 for w in rows
                 if w
             ]
@@ -98,7 +109,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771) -> None:
 
         if not map:
             rows = list_windows()
-            slim = [{k: w.get(k) for k in ("hwnd", "title", "exe", "pid", "minimized", "rect")} for w in rows]
+            slim = [{k: w.get(k) for k in ("hwnd", "title", "exe", "pid", "ctime", "minimized", "rect")} for w in rows]
             return {"windows": slim}
         out = windows_map()
         payload = {
@@ -125,11 +136,17 @@ def serve(host: str = "127.0.0.1", port: int = 8771) -> None:
         out_dir: str = "",
         roi: str = "",
         roi_norm: str = "",
+        focus: bool = False,
+        capture: str = "",
     ):
         """Pin one window (or primary screen). Writes raw + 0-1000 map. Default ocr=false.
         hwnd 0 and empty title/exe = primary screen. Returns JSON plus a compressed map (0-1000 still valid; clicks use stamp width/height).
+        The window is captured where it is, even behind other windows; focus stays put. focus=true raises/restores it first.
+        Minimized window without focus=true -> ok=false, minimized=true, no stamp (restore it or pass focus=true).
+        capture: auto (WGC -> DWM thumbnail -> PrintWindow) | wgc | dwm | printwindow | screen (screen needs focus=true).
         map_inline=false = JSON/path only. ocr=true only for text ids. yolo=true runs ScreenParser (class names as item text).
         uia=true (S4) walks UIA under pinned hwnd; additive uia_nodes with 0-1000 norm (same as grid). Default all off. No click.
+        ocr/uia/yolo are optional extras; if missing the reply has ok=false and the exact pip command in "install".
         E2 light verify: roi="L,T,W,H" or roi_norm="CX,CY[,HALF]" (mutually exclusive) crops after full grab; map 0-1000 is ROI-local.
         out_dir optional: Windows path or /mnt/c/... ; response also has map_wsl / png_wsl (lowercase drive)."""
         hwnd_n = _nz_int(hwnd)
@@ -139,21 +156,25 @@ def serve(host: str = "127.0.0.1", port: int = 8771) -> None:
         roi_norm_n = _nz_str(roi_norm)
         if roi_n and roi_norm_n:
             return {"ok": False, "error": "roi and roi_norm are mutually exclusive"}
-        # Pin then look: hwnd/title/exe always activate so capture_hwnd double-shots.
-        pin = bool(hwnd_n or title_n or exe_n)
-        out = perceive(
-            image=_nz_str(image),
-            hwnd=hwnd_n,
-            title=title_n,
-            exe=exe_n,
-            focus=pin,
-            ocr=ocr,
-            yolo=yolo,
-            uia=uia,
-            out_dir=_nz_str(out_dir),
-            roi=roi_n or None,
-            roi_norm=roi_norm_n or None,
-        )
+        try:
+            out = perceive(
+                image=_nz_str(image),
+                hwnd=hwnd_n,
+                title=title_n,
+                exe=exe_n,
+                focus=bool(focus),
+                ocr=ocr,
+                yolo=yolo,
+                uia=uia,
+                out_dir=_nz_str(out_dir),
+                roi=roi_n or None,
+                roi_norm=roi_norm_n or None,
+                capture=_nz_str(capture),
+            )
+        except MissingExtraError as e:
+            return e.to_dict()
+        if out.get("ok") is False and not out.get("stamp"):
+            return {k: out.get(k) for k in ("ok", "error", "minimized", "hwnd", "window", "capture", "focused") if k in out}
         payload = {
             "stamp": out["stamp"],
             "count": len(out["items"]),
@@ -177,6 +198,9 @@ def serve(host: str = "127.0.0.1", port: int = 8771) -> None:
             "json_wsl": out.get("json_wsl"),
             "inline": "jpeg-1280" if map_inline else False,
         }
+        for k in _PASS_THROUGH:
+            if k in out:
+                payload[k] = out[k]
         if out.get("verify_light"):
             payload["verify_light"] = True
             payload["roi"] = out.get("roi")

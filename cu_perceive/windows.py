@@ -1,14 +1,16 @@
-"""Window list/find and hwnd capture. Harvested from Enikk Win32 helpers, not the game layer."""
+"""Window list/find, identity and hwnd capture. Win32 helpers come from vendored Enikk."""
 from __future__ import annotations
 
 import json
-import sys
 from datetime import datetime
 from pathlib import Path
 
-ENIKK_ROOT = Path(r"C:\Users\jawn\src\enikk")
-if str(ENIKK_ROOT) not in sys.path:
-    sys.path.insert(0, str(ENIKK_ROOT))
+
+def _window_service():
+    from ._vendor.enikk.window import WindowService
+
+    return WindowService()
+
 
 _SKIP_CLASS = frozenset({
     "Progman",
@@ -61,6 +63,7 @@ def list_windows(include_minimized: bool = True) -> list[dict]:
                 "hwnd": int(hwnd),
                 "title": title,
                 "pid": int(pid),
+                "ctime": _ctime_str(int(pid)),
                 "exe": exe,
                 "exe_path": exe_path,
                 "class": cls,
@@ -141,10 +144,12 @@ def find_window(title: str = "", exe: str = "", hwnd: int | None = None) -> dict
         for w in wins:
             if int(w["hwnd"]) == hwnd:
                 return w
-        from enikk.game.window import WindowService
-        if WindowService().is_valid(hwnd):
+        if _window_service().is_valid(hwnd):
+            from . import _win32
+            pid = _win32.window_pid(hwnd)
             return {
-                "hwnd": hwnd, "title": "", "exe": "", "pid": 0,
+                "hwnd": hwnd, "title": "", "exe": "", "pid": pid,
+                "ctime": _ctime_str(pid),
                 "exe_path": "", "rect": [0, 0, 0, 0], "minimized": False,
                 "minimized_unknown": True,
             }
@@ -154,6 +159,66 @@ def find_window(title: str = "", exe: str = "", hwnd: int | None = None) -> dict
     return ranked[0] if ranked else None
 
 
+def _ctime_str(pid: int) -> str | None:
+    """Process creation FILETIME as a decimal string (exceeds JS safe-int range)."""
+    if not pid:
+        return None
+    try:
+        from . import _win32
+        ct = _win32.process_creation_time(int(pid))
+    except Exception:
+        return None
+    return str(ct) if ct else None
+
+
+def window_identity(hwnd: int) -> dict:
+    """{hwnd, pid, ctime} for a live hwnd. pid/ctime None when they can't be read."""
+    from . import _win32
+
+    hwnd = int(hwnd)
+    pid = _win32.window_pid(hwnd)
+    return {"hwnd": hwnd, "pid": pid or None, "ctime": _ctime_str(pid)}
+
+
+def verify_window_identity(hwnd, pid, ctime) -> str | None:
+    """Fail-closed HWND + PID + process-creation-time check. None = same window; else why not.
+
+    Catches a closed window whose HWND was reused by another process, and a PID
+    reused by a restarted process.
+    """
+    from . import _win32
+
+    try:
+        hwnd_i = int(hwnd)
+    except (TypeError, ValueError):
+        return f"bad hwnd {hwnd!r}; re-perceive"
+    try:
+        pid_i = int(pid) if pid not in (None, "") else 0
+        ctime_i = int(ctime) if ctime not in (None, "") else 0
+    except (TypeError, ValueError):
+        return f"bad stamp identity pid={pid!r} ctime={ctime!r}; re-perceive"
+    if pid_i <= 0 or ctime_i <= 0:
+        return "stamp has no process identity (pid + creation time); re-perceive this window"
+    try:
+        if not _win32.is_window(hwnd_i):
+            return f"hwnd {hwnd_i} no longer exists; re-perceive"
+        live_pid = _win32.window_pid(hwnd_i)
+        if live_pid != pid_i:
+            return (
+                f"hwnd {hwnd_i} now belongs to pid {live_pid}, stamp was pid {pid_i} "
+                "(HWND reused by another process); re-perceive"
+            )
+        live_ct = _win32.process_creation_time(live_pid)
+    except Exception as e:
+        return f"identity check failed: {e}; re-perceive"
+    if not live_ct:
+        return f"cannot read creation time of pid {pid_i}; identity unverified (fail closed) — re-perceive"
+    if int(live_ct) != ctime_i:
+        return (
+            f"pid {pid_i} is a different process than at perceive time "
+            "(creation time changed; PID reused); re-perceive"
+        )
+    return None
 
 
 
@@ -249,14 +314,14 @@ def capture_looks_implausible(arr, origin: dict | None = None) -> bool:
 def live_geom(hwnd: int) -> tuple[dict | None, dict | None]:
     """Client origin + window row as they are now. Never restores / force_foreground.
 
-    Stamp validation uses this. Capture/perceive uses refresh_geom (may restore).
+    Stamp validation and default (no-focus) perceive use this.
     """
     hwnd = int(hwnd)
     return client_origin(hwnd), find_window(hwnd=hwnd)
 
 
 def refresh_geom(hwnd: int) -> tuple[dict | None, dict | None]:
-    """Client origin + window row after restore. Capture/perceive only — not stamp check.
+    """Client origin + window row after restore. Only for perceive focus=true.
 
     Iconic / sentinel hwnds are force_foreground'd so the next grab is live.
     Stamp validation must use live_geom + is_hwnd_minimized (no restore).
@@ -267,16 +332,19 @@ def refresh_geom(hwnd: int) -> tuple[dict | None, dict | None]:
     origin = client_origin(hwnd)
     was_iconic = bool(win32gui.IsIconic(hwnd))
     if was_iconic or is_sentinel_origin(origin):
-        from enikk.game.window import WindowService
-        WindowService().force_foreground(hwnd)
+        _window_service().force_foreground(hwnd)
         time.sleep(RESTORE_SETTLE_S if was_iconic else 0.15)
         origin = client_origin(hwnd)
     return origin, find_window(hwnd=hwnd)
 
 
+def force_foreground(hwnd: int) -> bool:
+    """Restore + raise + focus. Only on explicit request (perceive focus=true)."""
+    return bool(_window_service().force_foreground(int(hwnd)))
+
+
 def client_origin(hwnd: int) -> dict | None:
-    from enikk.game.window import WindowService
-    region = WindowService().get_client_region(int(hwnd))
+    region = _window_service().get_client_region(int(hwnd))
     if region is None:
         return None
     return {
@@ -287,21 +355,49 @@ def client_origin(hwnd: int) -> dict | None:
     }
 
 
+def capture_window_image(hwnd: int, origin: dict, *, capture: str = "auto", focused: bool = False):
+    """Client-area grab of hwnd sized to ``origin``. Never focuses or restores.
+
+    capture='auto' runs WGC -> DWM thumbnail -> PrintWindow. When ``focused`` (the
+    caller already brought the window to front) the legacy screen-region grab is
+    a last resort. Returns capture.CaptureResult; raises capture.CaptureError /
+    WindowMinimizedError.
+    """
+    from .capture import CaptureError, capture_screen_region, capture_window, parse_capture_choice
+
+    order = parse_capture_choice(capture)
+    if order == ("screen",):
+        if not focused:
+            raise CaptureError(
+                "capture=screen grabs whatever is on screen at the window rect; "
+                "it needs focus=true (window brought to front)"
+            )
+        return capture_screen_region(origin)
+    out_size = (int(origin["width"]), int(origin["height"]))
+    try:
+        return capture_window(int(hwnd), out_size, order=order)
+    except CaptureError as e:
+        if not focused or type(e) is not CaptureError or capture not in (None, "", "auto"):
+            raise
+        res = capture_screen_region(origin)
+        res.attempts = e.attempts + res.attempts
+        return res
+
+
 def capture_hwnd(hwnd: int, activate: bool = False):
-    from enikk.game.capture import CaptureService
+    """Back-compat: BGR ndarray of hwnd's client area, or None. activate=True focuses first."""
     import time
-    import win32gui
     hwnd = int(hwnd)
-    was_iconic = bool(win32gui.IsIconic(hwnd))
-    if not (was_iconic or activate):
-        return CaptureService().capture(hwnd, activate=False)
-    # Restore / pin-to-front: first frame can be wallpaper, the window
-    # sitting on top (e.g. Chrome over Steam CEF), or a PrintWindow empty.
-    # Always discard it. Do not gate on capture_looks_implausible.
-    CaptureService().capture(hwnd, activate=True)
-    time.sleep(RESTORE_SETTLE_S)
-    again = CaptureService().capture(hwnd, activate=False)
-    return again
+    if activate:
+        force_foreground(hwnd)
+        time.sleep(RESTORE_SETTLE_S)
+    origin = client_origin(hwnd)
+    if origin is None:
+        return None
+    try:
+        return capture_window_image(hwnd, origin, focused=activate).image
+    except Exception:
+        return None
 
 
 def virtual_screen() -> tuple[int, int, int, int]:

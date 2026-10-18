@@ -211,11 +211,12 @@ class TestRunChainAutoDry(unittest.TestCase):
         self.assertEqual(step.get("uia_probe_attempts"), 1)
         self.assertEqual(probe.call_count, 1)
 
+    @mock.patch("cu_perceive.act.stamp_identity_error", return_value=None)
     @mock.patch("cu_perceive.act.check_stamp", return_value={"ok": True, "stamp": "test-auto", "hwnd": 1})
     @mock.patch("cu_perceive.act.invoke_control", create=True)
     @mock.patch("cu_perceive.uia.invoke_control")
     @mock.patch("cu_perceive.uia.probe_at_screen")
-    def test_go_uia_fail_no_input_fallback(self, probe, invoke, _unused, _stamp):
+    def test_go_uia_fail_no_input_fallback(self, probe, invoke, _unused, _stamp, _ident):
         probe.return_value = {
             "ok": True,
             "method": "uia",

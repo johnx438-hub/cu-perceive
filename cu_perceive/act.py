@@ -5,7 +5,9 @@ import json
 import time
 from pathlib import Path
 
-DEFAULT_OUT = Path(r"C:\Users\jawn\agent-bus\archive\shots\perceive")
+from .config import out_dir as _config_out_dir
+
+DEFAULT_OUT = _config_out_dir()
 
 
 def load_frame(stamp: str | None = None, json_path: str | None = None) -> tuple[dict, Path | None]:
@@ -717,6 +719,34 @@ def _parse_stamp_age_sec(stamp: str | None, json_path: str | Path | None = None)
     return None
 
 
+def _needs_window_checks(frame: dict) -> bool:
+    coord = frame.get("coord_space")
+    return coord == "window" or (frame.get("hwnd") is not None and coord != "screen")
+
+
+def stamp_identity_error(frame: dict | None) -> str | None:
+    """HWND + PID + process creation time on the stamp vs live. None = same window.
+
+    Screen-space stamps carry no window and pass. Window stamps without an
+    identity block (older stamps) fail closed.
+    """
+    frame = frame or {}
+    if not _needs_window_checks(frame):
+        return None
+    hwnd = frame.get("hwnd")
+    ident = frame.get("identity") or {}
+    if not ident:
+        return "stamp has no window identity (perceived by an older cu-perceive); re-perceive"
+    try:
+        if int(ident.get("hwnd")) != int(hwnd):
+            return f"stamp identity hwnd {ident.get('hwnd')!r} != stamp hwnd {hwnd!r}; re-perceive"
+    except (TypeError, ValueError):
+        return f"bad stamp identity hwnd {ident.get('hwnd')!r}; re-perceive"
+    from .windows import verify_window_identity
+
+    return verify_window_identity(hwnd, ident.get("pid"), ident.get("ctime"))
+
+
 def check_stamp(
     frame: dict | None,
     *,
@@ -794,6 +824,13 @@ def check_stamp(
         except Exception as e:
             out["ok"] = False
             out["error"] = f"hwnd check failed: {e}; re-perceive"
+            return out
+
+        id_err = stamp_identity_error(frame)
+        out["identity_ok"] = id_err is None
+        if id_err:
+            out["ok"] = False
+            out["error"] = id_err
             return out
 
         origin = frame.get("origin")
@@ -896,6 +933,20 @@ def apply_foreground_accounting(out: dict) -> None:
             count += 1
     out["foreground_used"] = count > 0
     out["foreground_click_count"] = count
+
+
+def _identity_abort(out: dict, frame: dict, steps: list[dict], n: int) -> bool:
+    """Re-check stamp identity right before live step n. True = aborted (out updated)."""
+    err = stamp_identity_error(frame)
+    if err is None:
+        return False
+    out["ok"] = False
+    out["error"] = f"window identity check before step {n} failed: {err}"
+    out["identity_abort_step"] = n
+    for s in steps:
+        s.pop("_uia_control", None)
+        s.pop("_uia_action", None)
+    return True
 
 
 def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: bool = False, gap: float = 0.12, hold_key: str | None = None, method: str | None = None, max_age_sec: float | None = None, strict_stamp: bool = False, stamp_json_path: str | Path | None = None, origin_slop_px: int = 8) -> dict:
@@ -1037,6 +1088,8 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
         from .input import click_xy
 
         for n, step in enumerate(steps):
+            if _identity_abort(out, frame or {}, steps, n):
+                return out
             via = step["via"]
             if via not in ("id", "xy", "norm"):
                 out["ok"] = False
@@ -1095,6 +1148,8 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
         from .uia import UiaError, invoke_control
 
         for n, step in enumerate(steps):
+            if _identity_abort(out, frame or {}, steps, n):
+                return out
             via = step["via"]
             if via not in ("id", "xy", "norm"):
                 out["ok"] = False
@@ -1141,6 +1196,8 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
         from .input import post_click_xy
         hwnd = int((frame or {}).get("hwnd") or 0)
         for n, step in enumerate(steps):
+            if _identity_abort(out, frame or {}, steps, n):
+                return out
             via = step["via"]
             if via not in ("id", "xy", "norm"):
                 out["ok"] = False
@@ -1171,6 +1228,8 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
         if hold:
             key_down(hold)
         for n, step in enumerate(steps):
+            if _identity_abort(out, frame or {}, steps, n):
+                return out
             via = step["via"]
             if via == "hover":
                 hover_xy(step["screen"][0], step["screen"][1])
