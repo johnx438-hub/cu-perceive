@@ -65,7 +65,9 @@ on Windows 11 it returns an all-black frame. It is kept only for experiments
 and adds a warning to the result.
 
 Stamps are named `YYYYMMDD-HHMMSS-mmm` (milliseconds), with `-2`, `-3`, ... if
-that name is already taken, so two perceives never overwrite each other.
+that name is already taken, so two perceives never overwrite each other. A stamp's
+`.json` only appears once it is complete (it is written to a temporary file and
+renamed into place), so `act` never reads a half-written stamp.
 
 ## Acting
 
@@ -74,6 +76,17 @@ that name is already taken, so two perceives never overwrite each other.
 - `--replace` (MCP `replace=true`) sends `ctrl+a` right before each `--type`, so
   the text replaces what the field holds instead of being inserted at the caret:
   `act --norm 491,63 --type https://example.org --replace --key enter --go`.
+- Keys go to whichever window is in front. If `--type` / `--key` have no click
+  (or drag) before them in the same `act`, `--go` sends them only when the
+  stamped window is in the foreground; otherwise it refuses (`ok: false`,
+  `keyboard_refused_step`) and sends nothing. `--focus` (MCP `focus=true`) brings
+  the stamped window to the front first, re-checks its identity, and still
+  refuses if it did not come to the front. Screen-space stamps have no window to
+  check against, so keys-only `--go` on them always refuses: add a click.
+- Without `--stamp` / `--json`, `act` uses the newest perceive stamp (desktop
+  maps from `windows` are never picked) and reports `stamp_source: "latest"`.
+  `--go` on it requires a window stamp with identity; for a screen-space stamp,
+  pass `--stamp` explicitly.
 - A dry run fails (`ok: false`) when the stamped window is gone or its HWND, PID
   or process creation time no longer match. Other stamp problems (moved,
   resized, too old) only fail a dry run with `--strict-stamp`, but every result
@@ -85,7 +98,10 @@ that name is already taken, so two perceives never overwrite each other.
   without it falls back to input and says so in `warnings`.
 
 CLI output is always UTF-8 (window titles can contain any script), whatever the
-console code page is. Decode it as UTF-8.
+console code page is. Decode it as UTF-8. PowerShell decodes captured output
+(`$x = cu-perceive ...` or a pipe) with `[Console]::OutputEncoding`, which is not
+UTF-8 by default, so CJK text gets garbled; run
+`[Console]::OutputEncoding = [Text.Encoding]::UTF8` first in that session.
 
 ## Configuration
 

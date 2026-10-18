@@ -47,7 +47,7 @@ OCR / UIA / YOLO 是可选包（`[ocr]` / `[uia]` / `[yolo]`），第一次用�
 4. **可选 OCR / YOLO** — 有字的框用 `--ocr`。没字的图标/按钮加 `--yolo`（ScreenParser，类名当 text，可用 `--ids`）。默认都关。浏览器跳网址仍可先 OCR 地址栏。
    - **可选 UIA 节点(S4) / E4 旁路 OCR** — 有字的 Win32/WPF 按钮/菜单：**优先** `perceive --uia`（不要默认 `--ocr`）。格子图仍是主地图；`uia_nodes` 只是附加。 点仍走 **norm + `method=auto|uia|input`**（`act --uia-name "File"` 或 `--steps uia:File` / `uia:File@MenuItemControl` / `uia:#12` → 解析成 norm 中心）；**不要**把 element_token / raw Invoke 当默认点击路径。 无 hwnd 或 UIA 失败 → ok:false；弱 a11y（`uia_count=0`）退回格子图/OCR。OCR 留给绘制文字 / 浏览器正文。 `perceive --uia` 可带 `uia_ms`；同次 `--ocr` 时可有 `ocr_ms`。
    - **E2 点后轻复验 ROI** — `perceive --roi L,T,W,H` 或 `--roi-norm CX,CY[,HALF]`（HALF 默认 150，全窗 0–1000）：全窗抓图后裁切，写小 png+grid；`verify_light=true`，`width`/`height`=裁切尺寸，`full_width`/`full_height`+`roi` 保留全窗坐标。格子图 0–1000 **相对裁切**（局部复验空间）；下一步点击优先再全窗 perceive，除非自行把 ROI 局部 norm 换算回全窗。`--uia` 与 ROI 互斥（E2：UIA 仅全窗）。默认无 ROI 时行为不变。
-5. **动手** — `act --stamp …`。先 dry-run，用户 说了再 `--go`。
+5. **动手** — `act --stamp …`。先 dry-run，用户 说了再 `--go`。不传 `--stamp` 时用最新的 perceive stamp（`stamp_source: "latest"`，永远不会选 `windows` 桌面图）；此时 `--go` 要求它是带 identity 的窗口 stamp，屏幕 stamp 请显式 `--stamp`。
    - 点：`--norm 177,752` 或 `--xy 183,542`。有字控件且 stamp 带 `uia_nodes` 时可用 `--uia-name "File"` / `--steps uia:File@MenuItemControl`（解析成 norm，不另开 Invoke 默认路径）。长按加 `--hold 1.8`（按下、睡、松开；MCP 字段 `hold`）。`ids` 接受 `"14,9,16"`、单个数字 `5`、或列表 `[5,9]`（MCP 把 int/list coerce 成逗号串）。
 
    - **E3 同 stamp 多步** — 稳定 UI：一次 `perceive` 后用**同一 stamp** 规划多步 `act`（先 dry-run 列出，用户 一次批准再串行 `--go`）。已有 `--steps "norm:a:b,norm:c:d,..."` 或 `--norm "a,b;c,d"` 即可链式；不要另写点击引擎。动画/弹层场景不要硬套。
@@ -62,11 +62,12 @@ OCR / UIA / YOLO 是可选包（`[ocr]` / `[uia]` / `[yolo]`），第一次用�
    - 会动的选中（动画/弹起）用 `--gap 0.4`；按钮、丝带、浏览器标签保持默认 0.12，不要全局加大。
    - 键：`--type` / `--text` 剪贴板+Ctrl+V 并还原（MCP 字段是 `text`）；`--key` 可写多次并按出现顺序执行，也可 `ctrl+a,enter`
    - **已有字的输入框用 `--replace`（MCP `replace=true`）。** 它在每次 `--type` 前先按 ctrl+a，粘贴就替换原文；不加时 click+type 会插到光标处（实测 about:blank 变成 `chrome://blankhttps//...`）。一次做完：`act --norm 491,63 --type URL --replace --key enter --go`。
+   - **只有键、前面没点击（或拖）时，`--go` 只在 stamp 那个窗口在前台时才发键**；否则 `ok=false` + `keyboard_refused_step`，一个键都不发（键永远发给前台窗口）。要先拉它到前台加 `--focus`（MCP `focus=true`）：拉前台后再核 identity 和前台，没成功仍拒绝。屏幕 stamp 没有窗口可核，只有键的 `--go` 一律拒绝——在同一次 act 里先点输入框。
    - **ids 不是静默聚焦**：同一次 `act` 里 `ids`/`norm`/`xy` 会先真正点击，再 `text` 粘贴。点的必须是可编辑框本身；点到标签/按钮再 type 不会自动聚焦输入框。`scroll`+位置会变成 hover 不点击，此时同链 `text` 也不会靠 ids 聚焦。
    - `--button right`；`--hover`；`--scroll -3` / `down:3` / `up:3`
    - **正文超链接页用 `scroll` + `xy`/`norm`/`ids`，只定位不点。** 同链有 scroll 又有位置时，位置步是 hover（光标移过去）再滚轮，不左键点。不要先单独 xy 再 scroll（会点进文章）。只传 scroll、不传点：仍在 last_screen 或当前光标滚。`--hover` 仍可用；scroll+xy 已隐含 hover。
    - 笔画 / 拖：一次**按住**的折线。`--drag-norm 200,300;450,280;600,450` 或 `--drag`（窗口像素）。`--step-px` 默认 4。底层是 LEFTDOWN 后连续 `SendInput` MOVE，再 LEFTUP（光标空跑不算拖）。
-6. **拖窗口** — 同一套按住折线。perceive 默认只有客户区，标题栏不在里面。用 `windows` 那张桌面 `map` 的 stamp，从标题栏附近 `norm` 拖到目标。还没单独验收，当普通拖。
+6. **拖窗口** — 同一套按住折线。perceive 默认只有客户区，标题栏不在里面。用 `windows` 那张桌面 `map` 的 stamp（显式 `--stamp <windows 的 stamp>`，会读 `<stamp>.windows.json`；不传 `--stamp` 不会选到它），从标题栏附近 `norm` 拖到目标。还没单独验收，当普通拖。
 
 ## MCP 字段（和 CLI 对齐）
 
@@ -81,6 +82,7 @@ OCR / UIA / YOLO 是可选包（`[ocr]` / `[uia]` / `[yolo]`），第一次用�
 | E2 轻复验 ROI | `--roi` / `--roi-norm` | `roi` / `roi_norm`（互斥；`verify_light`） |
 | E3 stamp 守卫 | `--max-age` / `--strict-stamp` | `max_age_sec` / `strict_stamp`（`stamp_check`） |
 | 真动手 | `--go` | `go=true` |
+| 只有键时先拉 stamp 窗前台 | `--focus` | `focus=true` |
 | 接触方式（实验） | `--method input|post|uia|auto` | `method`（默认 input；auto→chosen_method=uia|input） |
 | 点 | `--norm` `--xy` `--ids` | `norm` `xy` `ids` |
 | E4 UIA 名→norm | `--uia-name` / `--steps uia:Name` | `uia_name`（需 `perceive --uia` stamp） |
@@ -118,7 +120,7 @@ MCP 默认带压缩图；要全分辨率走磁盘路径。CLI 仍用 map 路径�
 ## Agent 易踩坑（K3 / 88yr 2026-09-05）
 
 - MCP `act` 只有**扁平字段**（`norm`/`xy`/`ids`/`text`/`key`…），**没有** `steps=[{...}]` JSON 数组；乱传会被静默丢掉。若解析后零步骤，现在返回 `ok:false` + error（不再假绿）。
-- 点击例：`act(norm="935,69", go=true)`；坐标逗号（也认冒号）。
+- 点击例：`act(stamp="...", norm="935,69", go=true)`；坐标逗号（也认冒号）。只有键：`act(stamp="...", text="hi", replace=true, go=true, focus=true)`。
 - 完整回路：`windows` → `perceive_window` →（稳定 UI）同 stamp 多步 dry `act` → 用户 批后再 `--go` → 再 `perceive_window` 验证（点后优先 `--roi-norm` 轻复验，首次选点/规划仍全窗）。窗挪了或 ROI stamp → 重 perceive，勿盲点。
 
 ## 不要
