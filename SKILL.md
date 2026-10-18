@@ -62,7 +62,7 @@ OCR / UIA / YOLO 是可选包（`[ocr]` / `[uia]` / `[yolo]`），第一次用�
    - 会动的选中（动画/弹起）用 `--gap 0.4`；按钮、丝带、浏览器标签保持默认 0.12，不要全局加大。
    - 键：`--type` / `--text` 剪贴板+Ctrl+V 并还原（MCP 字段是 `text`）；`--key` 可写多次并按出现顺序执行，也可 `ctrl+a,enter`
    - **已有字的输入框用 `--replace`（MCP `replace=true`）。** 它在每次 `--type` 前先按 ctrl+a，粘贴就替换原文；不加时 click+type 会插到光标处（实测 about:blank 变成 `chrome://blankhttps//...`）。一次做完：`act --norm 491,63 --type URL --replace --key enter --go`。
-   - **只有键、前面没点击（或拖）时，`--go` 只在 stamp 那个窗口在前台时才发键**；否则 `ok=false` + `keyboard_refused_step`，一个键都不发（键永远发给前台窗口）。要先拉它到前台加 `--focus`（MCP `focus=true`）：拉前台后再核 identity 和前台，没成功仍拒绝。屏幕 stamp 没有窗口可核，只有键的 `--go` 一律拒绝——在同一次 act 里先点输入框。
+   - **被挡住的窗口可以 perceive，但 `--go` 不会把输入送进别的窗口。** 窗口 stamp 上每一步发送前都核：点击 / 拖动起点和终点 / 滚轮的那个屏幕点，最上层窗口必须是 stamp 窗（或它拥有的对话框、弹窗、菜单），否则 `ok=false` + `pointer_refused_step` + `point_window`（真正在那里的 hwnd 和标题）；每个 `--type`/`--key` 前 stamp 窗必须在前台（点击之后也核），否则 `keyboard_refused_step`。被拒那步及之后都不发，`--hold-key` 也等第一个点击/拖/滚通过后才按下。要先把它拉到前台加 `--focus`（MCP `focus=true`）：拉前台后再核 identity 和点/前台，仍被挡（比如置顶窗）照样拒绝。dry-run 的 `occluded_points` 列出现在被挡的点并给警告。只管 `method=input` 和 auto 里选了 input 的步；uia / post 不变。屏幕 stamp 没有窗口可核：键必须同一次 act 里先点，且只在那次点到的窗口在前台时发送。
    - **ids 不是静默聚焦**：同一次 `act` 里 `ids`/`norm`/`xy` 会先真正点击，再 `text` 粘贴。点的必须是可编辑框本身；点到标签/按钮再 type 不会自动聚焦输入框。`scroll`+位置会变成 hover 不点击，此时同链 `text` 也不会靠 ids 聚焦。
    - `--button right`；`--hover`；`--scroll -3` / `down:3` / `up:3`
    - **正文超链接页用 `scroll` + `xy`/`norm`/`ids`，只定位不点。** 同链有 scroll 又有位置时，位置步是 hover（光标移过去）再滚轮，不左键点。不要先单独 xy 再 scroll（会点进文章）。只传 scroll、不传点：仍在 last_screen 或当前光标滚。`--hover` 仍可用；scroll+xy 已隐含 hover。
@@ -82,7 +82,7 @@ OCR / UIA / YOLO 是可选包（`[ocr]` / `[uia]` / `[yolo]`），第一次用�
 | E2 轻复验 ROI | `--roi` / `--roi-norm` | `roi` / `roi_norm`（互斥；`verify_light`） |
 | E3 stamp 守卫 | `--max-age` / `--strict-stamp` | `max_age_sec` / `strict_stamp`（`stamp_check`） |
 | 真动手 | `--go` | `go=true` |
-| 只有键时先拉 stamp 窗前台 | `--focus` | `focus=true` |
+| 被挡/不在前台时先拉 stamp 窗前台 | `--focus` | `focus=true` |
 | 接触方式（实验） | `--method input|post|uia|auto` | `method`（默认 input；auto→chosen_method=uia|input） |
 | 点 | `--norm` `--xy` `--ids` | `norm` `xy` `ids` |
 | E4 UIA 名→norm | `--uia-name` / `--steps uia:Name` | `uia_name`（需 `perceive --uia` stamp） |

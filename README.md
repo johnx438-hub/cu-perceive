@@ -76,13 +76,27 @@ renamed into place), so `act` never reads a half-written stamp.
 - `--replace` (MCP `replace=true`) sends `ctrl+a` right before each `--type`, so
   the text replaces what the field holds instead of being inserted at the caret:
   `act --norm 491,63 --type https://example.org --replace --key enter --go`.
-- Keys go to whichever window is in front. If `--type` / `--key` have no click
-  (or drag) before them in the same `act`, `--go` sends them only when the
-  stamped window is in the foreground; otherwise it refuses (`ok: false`,
-  `keyboard_refused_step`) and sends nothing. `--focus` (MCP `focus=true`) brings
-  the stamped window to the front first, re-checks its identity, and still
-  refuses if it did not come to the front. Screen-space stamps have no window to
-  check against, so keys-only `--go` on them always refuses: add a click.
+- Mouse input goes to the window on top at that point, and keys go to the
+  window in front, even when the stamped window is behind another one. So with
+  `--go` on a window stamp, each step is checked right before it is sent:
+  - each click, drag (start and end) and scroll point must be on the stamped
+    window or a window it owns (its dialogs, popups and menus). Otherwise `act`
+    refuses with `pointer_refused_step` and `point_window` (the hwnd and title
+    actually there);
+  - each `--type` / `--key` needs the stamped window in the foreground, also
+    after a click. Otherwise it refuses with `keyboard_refused_step`.
+
+  A refused step and everything after it are not sent, and `--hold-key` is only
+  pressed once the first click, drag or scroll has passed. `--focus` (MCP
+  `focus=true`) brings the stamped window to the front instead, re-checks its
+  identity, then re-checks the point or foreground, and still refuses if it is
+  covered (for example by an always-on-top window). A dry run lists points that
+  are covered right now in `occluded_points` and warns. This applies to
+  `--method input` and to `--method auto` steps that chose input; `uia` and
+  `post` don't need the point to be visible and are unchanged.
+- Screen-space stamps have no window to compare points with. Keys on them need a
+  click first in the same `act` and are sent only while the window that click
+  landed on is in front.
 - Without `--stamp` / `--json`, `act` uses the newest perceive stamp (desktop
   maps from `windows` are never picked) and reports `stamp_source: "latest"`.
   `--go` on it requires a window stamp with identity; for a screen-space stamp,
