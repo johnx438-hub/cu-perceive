@@ -1,17 +1,26 @@
 """Win <-> WSL path helpers. Drive letter always lowercased on the WSL side."""
 from __future__ import annotations
 
-WSL_DISTRO = "Ubuntu"
+import sys
+
+from .config import wsl_distro
+
+WSL_DISTRO = wsl_distro()
 _UNC_PREFIXES = ("\\\\wsl.localhost\\", "\\\\wsl$\\")
 
 
 def coerce_out_dir(raw: str | None) -> str | None:
-    """Accept Windows, UNC, /mnt/<drive>/..., or /home/... (rewritten to UNC)."""
+    """Accept Windows, UNC, /mnt/<drive>/..., or /home/... (rewritten to UNC).
+
+    Off Windows, POSIX paths are native and pass through unchanged.
+    """
     if not raw:
         return None
     s = str(raw).strip().strip('"')
     if not s:
         return None
+    if sys.platform != "win32":
+        return s
     if s.startswith("/mnt/") and len(s) > 6 and s[5].isalpha() and s[6] == "/":
         drive = s[5].upper()
         rest = s[7:].replace("/", "\\")
@@ -22,8 +31,8 @@ def coerce_out_dir(raw: str | None) -> str | None:
     if s.startswith("/") and not s.startswith("//"):
         raise ValueError(
             "out_dir looks like a Linux path. Use UNC "
-            rf"\\\\wsl.localhost\\{WSL_DISTRO}\\home\\archer\\... "
-            "or /mnt/c/.... Bare /home/archer writes to C:\\home\\archer."
+            rf"\\\\wsl.localhost\\{WSL_DISTRO}\\home\\<user>\\... "
+            "or /mnt/c/.... A bare /home/<user> would write to C:\\home\\<user>."
         )
     return s
 

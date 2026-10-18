@@ -30,10 +30,16 @@ class UiaError(OSError):
 
 
 def _auto():
+    from . import extras
+
     try:
+        extras.require("uia")
         import uiautomation as auto
     except ImportError as e:
-        raise UiaError(f"uiautomation not installed: {e}") from e
+        missing = e if isinstance(e, extras.MissingExtraError) else extras.missing_from_import_error("uia", e)
+        err = UiaError(str(missing))
+        err.install = missing.command
+        raise err from e
     return auto
 
 

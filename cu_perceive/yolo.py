@@ -1,21 +1,31 @@
-"""Optional ScreenParser (YOLO11-L) detector. Default off."""
+"""Optional ScreenParser (YOLO11-L) detector. Default off. Needs the 'yolo' extra (AGPL-3.0)."""
 from __future__ import annotations
 
 from pathlib import Path
 
 import numpy as np
 
-WEIGHT = Path(r"C:\Users\jawn\src\cu-perceive\weights\screenparser\best.pt")
+from . import config, extras
+
+WEIGHT = config.yolo_weight()
 _model = None
 
 
 def _load():
     global _model
     if _model is None:
-        from ultralytics import YOLO
-        if not WEIGHT.exists() or WEIGHT.stat().st_size < 1_000_000:
-            raise FileNotFoundError(f"ScreenParser weight missing: {WEIGHT}")
-        _model = YOLO(str(WEIGHT))
+        extras.require("yolo")
+        try:
+            from ultralytics import YOLO
+        except ImportError as e:
+            raise extras.missing_from_import_error("yolo", e) from e
+        weight = Path(WEIGHT)
+        if not weight.exists() or weight.stat().st_size < 1_000_000:
+            raise FileNotFoundError(
+                f"ScreenParser weight missing: {weight}. Download best.pt (see weights/README.md) "
+                f"or set {config.ENV_YOLO_WEIGHT} to its path."
+            )
+        _model = YOLO(str(weight))
     return _model
 
 

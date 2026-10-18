@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import ctypes
+import sys
 import time
 from ctypes import wintypes
 
-user32 = ctypes.WinDLL("user32", use_last_error=True)
+# None off Windows so the pure helpers (lParam packing, densify) stay importable for tests.
+user32 = ctypes.WinDLL("user32", use_last_error=True) if sys.platform == "win32" else None
 try:
     user32.SetProcessDPIAware()
 except Exception:
@@ -136,6 +138,8 @@ def pack_lparam(cx: int, cy: int) -> int:
 def screen_to_client(hwnd: int, sx: int, sy: int) -> tuple[int, int]:
     """Screen pixels -> client-relative for hwnd. Raises on failure."""
     hwnd = int(hwnd)
+    if user32 is None:
+        raise OSError("ScreenToClient needs Windows")
     if not user32.IsWindow(hwnd):
         raise OSError(f"hwnd {hwnd} is not a window")
     pt = POINT(int(sx), int(sy))

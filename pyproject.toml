@@ -4,18 +4,39 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cu-perceive"
-version = "0.1.0"
-description = "Local YOLO+OCR perceive: CLI and MCP, no names, no click"
+version = "0.2.0"
+description = "Windows computer use: pin one window, read a 0-1000 grid map, then click or type. CLI and MCP."
+readme = "README.md"
 requires-python = ">=3.11"
+# Core install: grid map, background window capture, act (input/post). No OCR/UIA/YOLO.
 dependencies = [
   "mcp>=1.19.0",
   "pillow>=11.2.0",
   "opencv-python>=4.10.0",
   "numpy>=2.0.0",
+  "pywin32>=306; sys_platform == 'win32'",
+  "psutil>=5.9; sys_platform == 'win32'",
+  # Windows.Graphics.Capture tier; prebuilt abi3 win_amd64 wheel (MIT).
+  "windows-capture>=2.0.1; sys_platform == 'win32' and platform_machine == 'AMD64'",
 ]
+
+# Keep in sync with cu_perceive/extras.py PACKAGES.
+[project.optional-dependencies]
+ocr = ["rapidocr-onnxruntime>=1.4.4", "onnxruntime>=1.18"]
+uia = ["uiautomation>=2.0.29", "comtypes>=1.4"]
+# AGPL-3.0 and several GB with torch.
+yolo = ["ultralytics>=8.3"]
+all = ["cu-perceive[ocr,uia,yolo]"]
+test = ["pytest>=8"]
 
 [project.scripts]
 cu-perceive = "cu_perceive.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["cu_perceive"]
+include = ["cu_perceive", "cu_perceive.*"]
+
+[tool.setuptools.package-data]
+cu_perceive = ["apps.default.json", "_vendor/enikk/LICENSE"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
