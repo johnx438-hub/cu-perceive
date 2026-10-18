@@ -276,13 +276,15 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         strict_stamp: bool = False,
         uia_name: str = "",
         replace: bool = False,
+        focus: bool = False,
     ):
         """
         Plan/run against a stamp. go default false. Prefer norm (map 0-1000) or xy.
 
         FLAT STRING FIELDS ONLY (not a JSON steps array). Examples:
-          click:  act(norm="935,69", go=true)
+          click:  act(stamp="...", norm="935,69", go=true)
           chain:  act(stamp="...", ids="3", key="ctrl+a", text="hi", go=true)
+          keys only: act(stamp="...", text="hi", replace=true, go=true, focus=true)
           scroll: act(norm="500,500", scroll="down:3")  # hover then wheel, no click
 
         norm/xy: "x,y" or "x:y"; multi with ";" e.g. "177,752;500,200".
@@ -291,6 +293,9 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         ids+text in ONE call: ids are real clicks first, then text - NOT a silent focus flag.
         Order is click(s) -> text -> key. replace=true adds ctrl+a right before the text so it
         replaces what the field holds (e.g. norm=address bar, text=URL, replace=true, key=enter).
+        text/key with no click first: go=true refuses unless the stamp window is in the foreground;
+        focus=true brings it forward first (identity re-checked). Screen stamps: add a click.
+        No stamp = latest perceive stamp; go=true then needs a window stamp with identity.
         A window that is gone or whose HWND/PID/creation time changed fails even a dry run;
         stamp_ok / stamp_error report the stamp check at top level.
         go=true: foreground_click_count counts clicks actually sent (0 if refused);
@@ -324,6 +329,8 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
             max_age_sec=max_age_sec,
             strict_stamp=bool(strict_stamp),
             stamp_json_path=str(path) if path else None,
+            focus=bool(focus),
+            stamp_source=("explicit" if _nz_str(stamp) else "latest") if path else None,
         )
         out["json"] = str(path) if path else None
         return out

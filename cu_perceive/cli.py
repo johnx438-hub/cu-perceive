@@ -97,7 +97,10 @@ def main(argv: list[str] | None = None) -> int:
     w.add_argument("--no-map", action="store_true", help="json only, skip the desktop ruler map")
 
     a = sub.add_parser("act", help="click ids from a perceive frame (chain, one shot)")
-    a.add_argument("--stamp", help="perceive stamp, default latest json")
+    a.add_argument(
+        "--stamp",
+        help="perceive stamp, default latest perceive json (--go then needs a window stamp with identity)",
+    )
     a.add_argument("--json", help="path to perceive json")
     a.add_argument("--ids", help="comma ids from anno, e.g. 14,9,16")
     a.add_argument("--xy", help="window pixels: 183,542;400,300")
@@ -111,6 +114,12 @@ def main(argv: list[str] | None = None) -> int:
         help="E4: click UIA node by name from stamp uia_nodes (repeatable or comma-list); maps to norm, still method=auto|uia|input",
     )
     a.add_argument("--go", action="store_true", help="actually click; default is dry-run")
+    a.add_argument(
+        "--focus",
+        action="store_true",
+        help="before --type/--key with no preceding click, bring the stamp window to the front "
+        "(identity re-checked); without it such keys are refused unless that window is already in front",
+    )
     a.add_argument(
         "--method",
         default="input",
@@ -404,6 +413,8 @@ def main(argv: list[str] | None = None) -> int:
                 max_age_sec=getattr(args, "max_age", None),
                 strict_stamp=bool(getattr(args, "strict_stamp", False)),
                 stamp_json_path=str(path) if path else None,
+                focus=bool(args.focus),
+                stamp_source=("explicit" if (args.stamp or args.json) else "latest") if path else None,
             )
         except (MethodError, RuntimeError, FileNotFoundError, OSError, KeyError, ValueError) as e:
             err = {

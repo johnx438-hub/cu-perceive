@@ -37,6 +37,7 @@ DWM_TNP_VISIBLE = 0x00000008
 DWM_TNP_SOURCECLIENTAREAONLY = 0x00000010
 DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
 DWM_SETTLE_S = 0.012
+GA_ROOT = 2
 
 
 class Win32Unavailable(OSError):
@@ -84,6 +85,8 @@ def _declare(name: str, dll) -> None:
         sigs = {
             "IsWindow": ([HWND], wintypes.BOOL),
             "IsIconic": ([HWND], wintypes.BOOL),
+            "GetForegroundWindow": ([], HWND),
+            "GetAncestor": ([HWND, wintypes.UINT], HWND),
             "GetWindowThreadProcessId": ([HWND, ctypes.POINTER(wintypes.DWORD)], wintypes.DWORD),
             "GetWindowRect": ([HWND, ctypes.POINTER(wintypes.RECT)], wintypes.BOOL),
             "GetClientRect": ([HWND, ctypes.POINTER(wintypes.RECT)], wintypes.BOOL),
@@ -198,6 +201,18 @@ def is_window(hwnd: int) -> bool:
 
 def is_iconic(hwnd: int) -> bool:
     return bool(_dll("user32").IsIconic(int(hwnd)))
+
+
+def foreground_window() -> int:
+    """HWND that receives keyboard input right now, 0 if none."""
+    return int(_dll("user32").GetForegroundWindow() or 0)
+
+
+def root_window(hwnd: int) -> int:
+    """Top-level ancestor of hwnd via the parent chain (GA_ROOT; owners are not followed)."""
+    if not hwnd:
+        return 0
+    return int(_dll("user32").GetAncestor(int(hwnd), GA_ROOT) or 0)
 
 
 def window_pid(hwnd: int) -> int:

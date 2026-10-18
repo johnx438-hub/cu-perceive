@@ -134,6 +134,7 @@ class TestMcpServerE2E(unittest.TestCase):
         self.assertTrue({"windows", "perceive_window", "act", "launch_app", "apps"} <= names, names)
         act = next(t for t in res["result"]["tools"] if t["name"] == "act")
         self.assertIn("replace", act["inputSchema"]["properties"])
+        self.assertIn("focus", act["inputSchema"]["properties"])
 
     def test_perceive_image_then_dry_run_act(self):
         content = self._call("perceive_window", {"image": str(self.png), "map_inline": True})
@@ -151,6 +152,12 @@ class TestMcpServerE2E(unittest.TestCase):
         self.assertEqual(vias, ["norm", "key", "type"])
         self.assertEqual(act["steps"][1]["key"], "ctrl+a")
         self.assertEqual(act["foreground_click_count"], 1)
+        self.assertEqual(act["stamp_source"], "explicit")
+
+        keys = json.loads(self._call("act", {"stamp": payload["stamp"], "text": "hi", "go": True})[0]["text"])
+        self.assertFalse(keys["ok"], keys)
+        self.assertEqual(keys["keyboard_refused_step"], 0)
+        self.assertNotIn("typed", keys["steps"][0])
 
     def test_rejects_foreign_host_header(self):
         body = {"jsonrpc": "2.0", "id": 999, "method": "tools/list", "params": {}}

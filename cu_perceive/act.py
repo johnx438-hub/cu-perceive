@@ -11,19 +11,62 @@ DEFAULT_OUT = _config_out_dir()
 REPLACE_SELECT_KEY = "ctrl+a"
 
 
+def read_frame(path: Path) -> dict:
+    """Parse one stamp JSON. ValueError (not a bare JSONDecodeError) when empty or partial."""
+    text = Path(path).read_text(encoding="utf-8")
+    if not text.strip():
+        raise ValueError(f"stamp json is empty (still being written?): {path}; retry or re-perceive")
+    try:
+        frame = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"stamp json is unreadable ({e}): {path}; retry or re-perceive") from e
+    if not isinstance(frame, dict):
+        raise ValueError(f"stamp json is not an object: {path}; re-perceive")
+    return frame
+
+
+def _is_perceive_stamp_json(p: Path) -> bool:
+    """<stamp>.json from perceive. Excludes <stamp>.windows.json desktop maps."""
+    from . import stamps
+
+    return p.suffix == ".json" and bool(stamps.STAMP_RE.match(p.name[: -len(".json")]))
+
+
+def latest_frame(out_dir: Path | None = None) -> tuple[dict, Path | None]:
+    """Newest readable perceive stamp; skips windows maps and empty / partial files."""
+    out_dir = Path(out_dir or DEFAULT_OUT)
+    cands = []
+    for p in out_dir.glob("*.json"):
+        if not _is_perceive_stamp_json(p):
+            continue
+        try:
+            cands.append((p.stat().st_mtime, p))
+        except OSError:
+            continue
+    if not cands:
+        return {}, None
+    cands.sort(key=lambda t: t[0], reverse=True)
+    for _, p in cands:
+        try:
+            return read_frame(p), p
+        except (OSError, ValueError):
+            continue
+    raise ValueError(f"no readable perceive stamp in {out_dir}; re-perceive or pass --stamp")
+
+
 def load_frame(stamp: str | None = None, json_path: str | None = None) -> tuple[dict, Path | None]:
     if json_path:
         path = Path(json_path)
     elif stamp:
         path = DEFAULT_OUT / f"{stamp}.json"
+        windows_map = DEFAULT_OUT / f"{stamp}.windows.json"
+        if not path.is_file() and windows_map.is_file():
+            path = windows_map
     else:
-        cands = list(DEFAULT_OUT.glob("*.json"))
-        if not cands:
-            return {}, None
-        path = max(cands, key=lambda p: p.stat().st_mtime)
+        return latest_frame()
     if not path.is_file():
         raise FileNotFoundError(f"stamp json not found: {path}")
-    return json.loads(path.read_text(encoding="utf-8")), path
+    return read_frame(path), path
 
 
 def window_to_screen(frame: dict, x: int, y: int) -> tuple[int, int]:
@@ -979,7 +1022,110 @@ def _identity_abort(out: dict, frame: dict, steps: list[dict], n: int) -> bool:
     return True
 
 
-def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: bool = False, gap: float = 0.12, hold_key: str | None = None, method: str | None = None, max_age_sec: float | None = None, strict_stamp: bool = False, stamp_json_path: str | Path | None = None, origin_slop_px: int = 8) -> dict:
+KEYBOARD_VIAS = ("type", "key")
+FOCUSING_VIAS = ("id", "xy", "norm", "drag")
+FOCUS_SETTLE_S = 0.15
+
+
+def unguarded_keyboard_steps(steps: list[dict]) -> list[int]:
+    """Indices of type/key steps with no click or drag earlier in the chain.
+
+    Keys go to whatever window has keyboard focus; only an earlier click/drag in the
+    same chain puts that focus on the stamp window.
+    """
+    found: list[int] = []
+    clicked = False
+    for n, step in enumerate(steps):
+        via = step.get("via")
+        if via in FOCUSING_VIAS:
+            clicked = True
+        elif via in KEYBOARD_VIAS and not clicked:
+            found.append(n)
+    return found
+
+
+def _has_window(frame: dict) -> bool:
+    return bool(frame.get("hwnd")) and _needs_window_checks(frame)
+
+
+def _keyboard_target_error(frame: dict, *, focus: bool, out: dict) -> str | None:
+    """None when keys sent now would reach the stamp window. Fails closed.
+
+    With focus, brings the stamp window forward, then re-checks identity and foreground.
+    """
+    frame = frame or {}
+    hwnd = frame.get("hwnd")
+    if not _has_window(frame):
+        return (
+            "keyboard step without a preceding click needs a window stamp: keys go to the "
+            "foreground window and this stamp has no window to check against; add a click on "
+            "the target field, or perceive the window (--hwnd/--title/--exe) and pass --stamp"
+        )
+    from .windows import foreground_matches
+
+    try:
+        ok, fg = foreground_matches(int(hwnd))
+    except Exception as e:
+        return f"could not read the foreground window ({e}); keyboard step refused"
+    if ok:
+        return None
+    if not focus:
+        return (
+            f"stamp window {hwnd} is not in the foreground (foreground hwnd {fg}), so keys would "
+            "go to another window; add a click on the target field, or pass --focus "
+            "(MCP focus=true) to bring the stamp window forward first"
+        )
+    from .windows import force_foreground
+
+    try:
+        force_foreground(int(hwnd))
+    except Exception as e:
+        return f"--focus could not bring stamp window {hwnd} forward ({e}); keyboard step refused"
+    out["focused_window"] = True
+    time.sleep(FOCUS_SETTLE_S)
+    err = stamp_identity_error(frame)
+    if err:
+        return f"window identity check after --focus failed: {err}"
+    try:
+        ok, fg = foreground_matches(int(hwnd))
+    except Exception as e:
+        return f"could not read the foreground window after --focus ({e}); keyboard step refused"
+    if not ok:
+        return (
+            f"stamp window {hwnd} is still not in the foreground after --focus "
+            f"(foreground hwnd {fg}); keyboard step refused"
+        )
+    return None
+
+
+def _keyboard_refuse(out: dict, n: int, err: str) -> dict:
+    out["ok"] = False
+    out["error"] = f"keyboard step {n} refused: {err}"
+    out["keyboard_refused_step"] = n
+    return out
+
+
+def _implicit_stamp_error(frame: dict, stamp_source: str | None) -> str | None:
+    """--go on the latest stamp (no --stamp/--json) needs a window stamp with identity."""
+    if stamp_source != "latest":
+        return None
+    frame = frame or {}
+    if _has_window(frame) and frame.get("identity"):
+        return None
+    stamp = frame.get("stamp") or "<stamp>"
+    return (
+        f"act without --stamp picked the latest stamp {stamp}, which has no window identity "
+        f"(screen-space or older stamp); pass --stamp {stamp} (MCP stamp=...) or --json to act on it"
+    )
+
+
+def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: bool = False, gap: float = 0.12, hold_key: str | None = None, method: str | None = None, max_age_sec: float | None = None, strict_stamp: bool = False, stamp_json_path: str | Path | None = None, origin_slop_px: int = 8, focus: bool = False, stamp_source: str | None = None) -> dict:
+    """Plan specs against frame; dry_run=False sends input.
+
+    stamp_source: "explicit" (--stamp/--json), "latest" (newest stamp picked implicitly)
+    or None. focus: bring the stamp window forward before keyboard steps that have no
+    preceding click (identity and foreground are re-checked; otherwise those are refused).
+    """
     if not specs:
         return {
             "ok": False,
@@ -1056,6 +1202,8 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
         "origin": (frame or {}).get("origin"),
         "steps": steps,
     }
+    if stamp_source:
+        out["stamp_source"] = stamp_source
     if hold:
         out["hold_key"] = hold
     if uia_missing and method_n == "auto":
@@ -1134,11 +1282,37 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                 s.pop("_uia_control", None)
                 s.pop("_uia_action", None)
         return out
+    implicit_err = _implicit_stamp_error(frame or {}, stamp_source)
+    unguarded = unguarded_keyboard_steps(steps) if method_n == "input" else []
     if dry_run:
+        warns = []
+        if implicit_err:
+            warns.append(implicit_err + "; --go will refuse")
+        if unguarded:
+            if _has_window(frame or {}):
+                warns.append(
+                    f"keyboard step(s) {unguarded} have no preceding click: --go sends them only "
+                    f"if stamp window {(frame or {}).get('hwnd')} is in the foreground "
+                    "(--focus brings it forward), otherwise refuses"
+                )
+            else:
+                warns.append(
+                    f"keyboard step(s) {unguarded} have no preceding click and this stamp has no "
+                    "window: --go will refuse; add a click on the target field"
+                )
+        if warns:
+            out["warnings"] = (out.get("warnings") or []) + warns
         if method_n in ("uia", "auto"):
             for s in steps:
                 s.pop("_uia_control", None)
                 s.pop("_uia_action", None)
+        return out
+    if implicit_err:
+        out["ok"] = False
+        out["error"] = implicit_err
+        for s in steps:
+            s.pop("_uia_control", None)
+            s.pop("_uia_action", None)
         return out
     if method_n == "auto":
         # Live auto: execute chosen path only. No mid-go fallback uia->input.
@@ -1283,6 +1457,10 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                 time.sleep(gap)
         return out
     from .input import click_xy, drag_path, enter_text, hover_xy, key_down, key_up, scroll_xy, tap_key
+    if unguarded:
+        err = _keyboard_target_error(frame or {}, focus=focus, out=out)
+        if err:
+            return _keyboard_refuse(out, unguarded[0], err)
     try:
         if hold:
             key_down(hold)
@@ -1290,6 +1468,10 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
             if _identity_abort(out, frame or {}, steps, n):
                 return out
             via = step["via"]
+            if n in unguarded and n > 0:
+                err = _keyboard_target_error(frame or {}, focus=focus, out=out)
+                if err:
+                    return _keyboard_refuse(out, n, err)
             if via == "hover":
                 hover_xy(step["screen"][0], step["screen"][1])
                 step["hovered"] = True

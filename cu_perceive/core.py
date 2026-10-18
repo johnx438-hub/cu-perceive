@@ -539,8 +539,13 @@ def perceive(
             if uia_error:
                 payload["error"] = uia_error
         attach_wsl(payload, 'png', 'map', 'grid', 'anno', 'json')
-        js.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        stamps.commit(js, json.dumps(payload, ensure_ascii=False, indent=2))
         return payload
     except BaseException:
         stamps.release(js)
+        for orphan in (png, gridp, dest / f"{stamp}.anno.png"):
+            try:
+                orphan.unlink()
+            except OSError:
+                pass
         raise

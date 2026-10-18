@@ -108,7 +108,8 @@ class TestUniqueStamps(_TmpDir):
         b, pb = stamps.allocate(self.dir, now=now)
         c, _ = stamps.allocate(self.dir, now=now)
         self.assertEqual((a, b, c), ("20261019-064141-005", "20261019-064141-005-2", "20261019-064141-005-3"))
-        self.assertTrue(pa.is_file() and pb.is_file())
+        self.assertFalse(pa.exists() or pb.exists())
+        self.assertTrue(stamps.reserve_path(pa).is_file() and stamps.reserve_path(pb).is_file())
 
     def test_two_perceives_same_millisecond_do_not_overwrite(self):
         out = self.dir / "out"

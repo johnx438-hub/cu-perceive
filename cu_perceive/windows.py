@@ -342,6 +342,21 @@ def force_foreground(hwnd: int) -> bool:
     return bool(_window_service().force_foreground(int(hwnd)))
 
 
+def foreground_matches(hwnd: int) -> tuple[bool, int]:
+    """(True, fg) when the keyboard-focus window is hwnd or one of its children.
+
+    Strict: an owned dialog or popup of hwnd is a different top-level window and
+    does not match. Raises _win32.Win32Unavailable off Windows.
+    """
+    from . import _win32
+
+    fg = _win32.foreground_window()
+    if not fg or not hwnd:
+        return False, fg
+    target = _win32.root_window(int(hwnd)) or int(hwnd)
+    return (_win32.root_window(fg) or fg) == target, fg
+
+
 def client_origin(hwnd: int) -> dict | None:
     region = _window_service().get_client_region(int(hwnd))
     if region is None:
@@ -456,18 +471,22 @@ def windows_map(out_dir: str | None = None, rows: list[dict] | None = None) -> d
     mapp = dest / f"{stamp}.windows.map.png"
     try:
         cv2.imwrite(str(mapp), stamped)
+        payload = {
+            "stamp": stamp,
+            "width": vw,
+            "height": vh,
+            "origin": {"left": left, "top": top},
+            "coord_space": "screen",
+            "windows": mapped,
+            "map": str(mapp),
+            "json": str(js),
+        }
+        stamps.commit(js, json.dumps(payload, ensure_ascii=False, indent=2))
     except BaseException:
         stamps.release(js)
+        try:
+            mapp.unlink()
+        except OSError:
+            pass
         raise
-    payload = {
-        "stamp": stamp,
-        "width": vw,
-        "height": vh,
-        "origin": {"left": left, "top": top},
-        "coord_space": "screen",
-        "windows": mapped,
-        "map": str(mapp),
-        "json": str(js),
-    }
-    js.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return payload
