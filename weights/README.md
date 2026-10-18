@@ -2,8 +2,11 @@
 
 Download separately. Do not commit `*.pt`, `*.onnx`, `*.onnx.bad`, or `*.bin`.
 
-Location: `./weights` in a source checkout, else `%LOCALAPPDATA%\cu-perceive\weights`,
-or wherever `CU_PERCEIVE_WEIGHTS` points.
+Location: this folder (`<checkout>\weights`) for a source checkout or editable
+install (`pip install -e .`); `%LOCALAPPDATA%\cu-perceive\weights` (really
+`<CU_PERCEIVE_HOME>\weights`) for a regular install; or wherever
+`CU_PERCEIVE_WEIGHTS` points. The YOLO weight defaults to
+`<weights>\screenparser\best.pt`.
 
 - `rapidocr/`: optional RapidOCR ONNX (`ch_PP-OCRv4_det_infer.onnx`,
   `ch_PP-OCRv4_rec_infer.onnx`, `ch_ppocr_mobile_v2.0_cls_infer.onnx`). Without

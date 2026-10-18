@@ -42,7 +42,7 @@ OCR / UIA / YOLO 是可选包（`[ocr]` / `[uia]` / `[yolo]`），第一次用�
 
 1. **选窗** — `windows`（MCP 同名）。默认出桌面标尺图：格子 + `#id hwnd`。看 `map` 选。`--title` / `--exe` 返回匹配数组 `windows[]` + `window`（picked）+ `pick_rule`（非最小化 → EnumWindows z-top → 面积；非保证前台）。同 exe 多窗再加 title/hwnd。`--hwnd` 仍一行。`--no-map` / `map=false` 只出 JSON。
 2. **钉住再看** — `perceive --hwnd N`（MCP：`perceive_window`）。默认原图 + `.grid.png`，字段 `map`。不要默认开 OCR。
-   **默认不抢前台**：按窗口本身抓（WGC → DWM 缩略图 → PrintWindow），被别的窗口挡住也能抓；返回 `capture.backend` / `capture.attempts`。**最小化的窗口不还原**，返回 `ok:false, minimized:true`、不出 stamp；要还原并拉到前台显式加 `--focus` / `focus=true`。stamp 带 `identity {hwnd,pid,ctime}`。不要再 launch。
+   **默认不抢前台**：按窗口本身抓（WGC → PrintWindow），被别的窗口挡住也能抓；返回 `capture.backend` / `capture.attempts`。`--capture dwm` 是实验性的（Win11 上恒为全黑），不在 auto 里。**最小化的窗口不还原**，返回 `ok:false, minimized:true, capture.skipped="minimized"`、不出 stamp；要还原并拉到前台显式加 `--focus` / `focus=true`。stamp 带 `identity {hwnd,pid,ctime}`，名字是 `YYYYMMDD-HHMMSS-mmm`（同名再加 `-2`…，不会互相覆盖）。不要再 launch。
 3. **读 `map`** — 没标上的点（图标、牌面、空白画布）看格子，不要看 `.anno.png`。
 4. **可选 OCR / YOLO** — 有字的框用 `--ocr`。没字的图标/按钮加 `--yolo`（ScreenParser，类名当 text，可用 `--ids`）。默认都关。浏览器跳网址仍可先 OCR 地址栏。
    - **可选 UIA 节点(S4) / E4 旁路 OCR** — 有字的 Win32/WPF 按钮/菜单：**优先** `perceive --uia`（不要默认 `--ocr`）。格子图仍是主地图；`uia_nodes` 只是附加。 点仍走 **norm + `method=auto|uia|input`**（`act --uia-name "File"` 或 `--steps uia:File` / `uia:File@MenuItemControl` / `uia:#12` → 解析成 norm 中心）；**不要**把 element_token / raw Invoke 当默认点击路径。 无 hwnd 或 UIA 失败 → ok:false；弱 a11y（`uia_count=0`）退回格子图/OCR。OCR 留给绘制文字 / 浏览器正文。 `perceive --uia` 可带 `uia_ms`；同次 `--ocr` 时可有 `ocr_ms`。
@@ -52,15 +52,16 @@ OCR / UIA / YOLO 是可选包（`[ocr]` / `[uia]` / `[yolo]`），第一次用�
 
    - **E3 同 stamp 多步** — 稳定 UI：一次 `perceive` 后用**同一 stamp** 规划多步 `act`（先 dry-run 列出，用户 一次批准再串行 `--go`）。已有 `--steps "norm:a:b,norm:c:d,..."` 或 `--norm "a,b;c,d"` 即可链式；不要另写点击引擎。动画/弹层场景不要硬套。
      - 每次 act（含 dry）返回 `stamp_check` / `stamp_reuse` / `step_count`。`--go` 时 stamp 坏了（窗挪了、最小化、hwnd 没了、**hwnd 被别的进程复用 / pid 或进程创建时间不符 / 旧 stamp 没有 identity**、超 `--max-age`、或 `verify_light` ROI stamp）→ `ok=false` **不点**，强制重 perceive。`--go` 时每一步执行前还会再核一次 identity。
-     - dry-run 默认只把坏 stamp 记在 `stamp_check.ok=false`，整体仍可 ok；要 dry 也 fail-closed 加 `--strict-stamp`。
+     - **窗口没了或 identity 不符（hwnd 复用 / pid / 创建时间 / 旧 stamp 无 identity）时 dry-run 也 `ok=false`。** 其它坏 stamp（挪了、改大小、超龄）dry-run 仍可 ok，但顶层总有 `stamp_ok`，坏时有 `stamp_error`；要 dry 也 fail-closed 加 `--strict-stamp`。
+     - `--go` 时 `foreground_click_count` 只数真正发出的 SendInput 点击（被拒为 0）；计划值在 `planned_foreground_click_count`。
      - **ROI / `verify_light` stamp 只用于点后复验，不能拿来多步规划**（须全窗 stamp）。
      - CLI：`act --max-age SEC`（可选）、`act --strict-stamp`。MCP：`max_age_sec` / `strict_stamp` 已透传。
 
-   - **实验 `method=post|uia|auto`**：`post`=HWND PostMessage 单点；`uia`=UIA Invoke/Toggle/Expand/Select（无 pattern 则 fail-closed，不退 post/input）；`auto`=命中 stamp 上可 Invoke 等 → uia，否则 input（永不选 post；软 miss 同点再探一次；dry-run 报 `chosen_method` + `uia_reprobe`/`uia_first` + `foreground_used` / `foreground_click_count`）。均仅 left 单点 norm/xy/ids；drag/path 等请显式 `method=input`。
+   - **实验 `method=post|uia|auto`**：`post`=HWND PostMessage 单点；`uia`=UIA Invoke/Toggle/Expand/Select（无 pattern 则 fail-closed，不退 post/input）；`auto`=命中 stamp 上可 Invoke 等 → uia，否则 input（永不选 post；软 miss 同点再探一次；dry-run 报 `chosen_method` + `uia_reprobe`/`uia_first` + `foreground_used` / `foreground_click_count`）。均仅 left 单点 norm/xy/ids；drag/path 等请显式 `method=input`。没装 `uia` extra 时 `--method uia` 退出码 3 并给 `missing_extra` / `install`（同 `perceive --uia`）；`auto` 退回 input 并在 `warnings` 里说明。
    - 链修饰键：`--hold-key ctrl`（MCP `hold_key`，接受 `ctrl`/`control`/`shift`/`alt`）在整条链的 click/hover 前按下，链结束（含失败）再松开。不是 `--hold`（那是鼠标长按）。Explorer/Office/列表多选：`--hold-key ctrl` + 多个 `--norm`/`--ids`，界面要落稳再加 `--gap`。Shift+click 头尾可以两次点击、不设 hold_key；需要时再用 `--hold-key shift`。
    - 会动的选中（动画/弹起）用 `--gap 0.4`；按钮、丝带、浏览器标签保持默认 0.12，不要全局加大。
    - 键：`--type` / `--text` 剪贴板+Ctrl+V 并还原（MCP 字段是 `text`）；`--key` 可写多次并按出现顺序执行，也可 `ctrl+a,enter`
-   - **已有字的输入框先 ctrl+a 再 type。** click+type 一次做完会插到原文中间（实测 about:blank 变成 aboubilibili.comblank）。拆两次 act：先 ids + key=ctrl+a，再单独 text + key=enter。
+   - **已有字的输入框用 `--replace`（MCP `replace=true`）。** 它在每次 `--type` 前先按 ctrl+a，粘贴就替换原文；不加时 click+type 会插到光标处（实测 about:blank 变成 `chrome://blankhttps//...`）。一次做完：`act --norm 491,63 --type URL --replace --key enter --go`。
    - **ids 不是静默聚焦**：同一次 `act` 里 `ids`/`norm`/`xy` 会先真正点击，再 `text` 粘贴。点的必须是可编辑框本身；点到标签/按钮再 type 不会自动聚焦输入框。`scroll`+位置会变成 hover 不点击，此时同链 `text` 也不会靠 ids 聚焦。
    - `--button right`；`--hover`；`--scroll -3` / `down:3` / `up:3`
    - **正文超链接页用 `scroll` + `xy`/`norm`/`ids`，只定位不点。** 同链有 scroll 又有位置时，位置步是 hover（光标移过去）再滚轮，不左键点。不要先单独 xy 再 scroll（会点进文章）。只传 scroll、不传点：仍在 last_screen 或当前光标滚。`--hover` 仍可用；scroll+xy 已隐含 hover。
@@ -88,10 +89,11 @@ OCR / UIA / YOLO 是可选包（`[ocr]` / `[uia]` / `[yolo]`），第一次用�
 | 长按 | `--hold 1.8` | `hold`（秒，配合 xy/norm/ids） |
 | 链修饰键 | `--hold-key ctrl` | `hold_key`（`ctrl`/`control`/`shift`/`alt`，不是鼠标长按） |
 | 打字 | `--type` / `--text` | `text` |
+| 先全选再打字 | `--replace` | `replace=true` |
 | 读哪张图 | `map` | `map`（默认 jpeg-1280 内联，`map_inline=false` 只路径） |
 | 出图目录 | `--out` | `out_dir`。写进 WSL workspace 用 UNC `\\wsl.localhost\Ubuntu\home\<user>\...`，不要 `/home/<user>`（会落到 `C:\home\<user>`）。`/mnt/c/...` 仍可用。另有 `map_wsl` |
 | 拉前台再抓 | `--focus` | `focus=true`（默认 false，不抢前台） |
-| 采集后端 | `--capture auto|wgc|dwm|printwindow|screen` | `capture`（`screen` 需 focus） |
+| 采集后端 | `--capture auto|wgc|printwindow|screen|dwm` | `capture`（`screen` 需 focus；`dwm` 实验性） |
 
 `launch` / `launch_app` 会真启动，没有 dry-run。
 

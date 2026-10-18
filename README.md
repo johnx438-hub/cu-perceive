@@ -49,14 +49,43 @@ tried in order (`--capture auto`, the default):
    [`windows-capture`](https://pypi.org/project/windows-capture/) wheel (x64).
    It asks for a borderless capture on Windows 11 / build 20348+. Older
    builds may flash the yellow capture border.
-2. `dwm`: DWM thumbnail rendered into an off-screen, non-activating tool window.
-3. `printwindow`: `PrintWindow(PW_RENDERFULLCONTENT)`, then flag 0.
+2. `printwindow`: `PrintWindow(PW_RENDERFULLCONTENT)`, then flag 0.
 
 A grab that is all black counts as a miss and the next backend is tried.
-`--capture wgc|dwm|printwindow` forces one backend. `--capture screen` is the
+`--capture wgc|printwindow` forces one backend. `--capture screen` is the
 legacy screen-region grab and needs `--focus`. The JSON reports which backend
 won under `capture.backend`, with every attempt in `capture.attempts`.
 Windows on another virtual desktop, or cloaked windows, may come back blank.
+A minimized window is reported with `capture.skipped = "minimized"`.
+
+`--capture dwm` is **experimental** and not part of `auto`. It renders a DWM
+thumbnail into an off-screen window and reads it back with BitBlt, but DWM
+composes thumbnails into the desktop rather than into that window's bitmap, so
+on Windows 11 it returns an all-black frame. It is kept only for experiments
+and adds a warning to the result.
+
+Stamps are named `YYYYMMDD-HHMMSS-mmm` (milliseconds), with `-2`, `-3`, ... if
+that name is already taken, so two perceives never overwrite each other.
+
+## Acting
+
+- `act` runs clicks first, then `--type` / `--key` in the order given on the
+  command line. The MCP `act` tool runs clicks, then `text`, then `key`.
+- `--replace` (MCP `replace=true`) sends `ctrl+a` right before each `--type`, so
+  the text replaces what the field holds instead of being inserted at the caret:
+  `act --norm 491,63 --type https://example.org --replace --key enter --go`.
+- A dry run fails (`ok: false`) when the stamped window is gone or its HWND, PID
+  or process creation time no longer match. Other stamp problems (moved,
+  resized, too old) only fail a dry run with `--strict-stamp`, but every result
+  reports `stamp_ok` and, when false, `stamp_error`.
+- On `--go`, `foreground_click_count` counts the SendInput clicks actually sent
+  (0 when the run is refused); `planned_foreground_click_count` is the plan.
+- `--method uia` without the `uia` extra exits with code 3 and prints the same
+  `missing_extra` / `install` fields as `perceive --uia`. `--method auto`
+  without it falls back to input and says so in `warnings`.
+
+CLI output is always UTF-8 (window titles can contain any script), whatever the
+console code page is. Decode it as UTF-8.
 
 ## Configuration
 
@@ -66,7 +95,7 @@ Nothing machine-specific is hard-coded. Defaults and overrides:
 |---|---|---|
 | Data dir | `%LOCALAPPDATA%\cu-perceive` | `CU_PERCEIVE_HOME` |
 | Stamp / shot dir | `<data dir>\shots\perceive` | `CU_PERCEIVE_OUT` |
-| Weights dir | `./weights` in a checkout, else `<data dir>\weights` | `CU_PERCEIVE_WEIGHTS` |
+| Weights dir | `<checkout>\weights` for a source checkout / editable install (`pip install -e .`), else `<data dir>\weights` | `CU_PERCEIVE_WEIGHTS` |
 | ScreenParser weight | `<weights>\screenparser\best.pt` | `CU_PERCEIVE_YOLO_WEIGHT` |
 | Quick-launch list | `<data dir>\apps.json`, else packaged `apps.default.json` | `CU_PERCEIVE_APPS` |
 | Extra MCP Host names (e.g. a tailnet name behind a proxy) | none | `CU_PERCEIVE_ALLOWED_HOSTS=a,b` or `mcp --allow-host a` |
