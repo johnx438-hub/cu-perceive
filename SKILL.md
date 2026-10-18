@@ -1,16 +1,16 @@
 ---
 name: cu-perceive
 description: >-
-  use when looking at or acting on Shawn's Windows desktop via cu-perceive (CLI
+  use when looking at or acting on the user's Windows desktop via cu-perceive (CLI
   now, MCP later) — pin one window, read the 0-1000 grid map, then
   click/type/drag by norm or xy. OCR ids optional. Default dry-run; --go only
-  when Shawn said so. Not for the cloud computer screen.
+  when the user said so. Not for the cloud computer screen.
 ---
 # cu-perceive
 
-看或操作 **Shawn 的 Windows 桌面**（ARCHER）时用。云电脑屏幕不走这里。
+看或操作 **用户的 Windows 桌面**时用。云电脑屏幕不走这里。
 
-**格子图是地图。** OCR / id 是可选项。默认 **不点不拖**；`--go` / `go=true` 只在 Shawn 当次明确说了才加。
+**格子图是地图。** OCR / id 是可选项。默认 **不点不拖**；`--go` / `go=true` 只在 用户 当次明确说了才加。
 
 CLI 和 MCP 是同一套合同。字段名对齐，不要另编一套。唯一例外：输入文字 CLI 是 `--type` 或 `--text`，MCP 字段叫 `text`。
 
@@ -47,10 +47,10 @@ OCR / UIA / YOLO 是可选包（`[ocr]` / `[uia]` / `[yolo]`），第一次用�
 4. **可选 OCR / YOLO** — 有字的框用 `--ocr`。没字的图标/按钮加 `--yolo`（ScreenParser，类名当 text，可用 `--ids`）。默认都关。浏览器跳网址仍可先 OCR 地址栏。
    - **可选 UIA 节点(S4) / E4 旁路 OCR** — 有字的 Win32/WPF 按钮/菜单：**优先** `perceive --uia`（不要默认 `--ocr`）。格子图仍是主地图；`uia_nodes` 只是附加。 点仍走 **norm + `method=auto|uia|input`**（`act --uia-name "File"` 或 `--steps uia:File` / `uia:File@MenuItemControl` / `uia:#12` → 解析成 norm 中心）；**不要**把 element_token / raw Invoke 当默认点击路径。 无 hwnd 或 UIA 失败 → ok:false；弱 a11y（`uia_count=0`）退回格子图/OCR。OCR 留给绘制文字 / 浏览器正文。 `perceive --uia` 可带 `uia_ms`；同次 `--ocr` 时可有 `ocr_ms`。
    - **E2 点后轻复验 ROI** — `perceive --roi L,T,W,H` 或 `--roi-norm CX,CY[,HALF]`（HALF 默认 150，全窗 0–1000）：全窗抓图后裁切，写小 png+grid；`verify_light=true`，`width`/`height`=裁切尺寸，`full_width`/`full_height`+`roi` 保留全窗坐标。格子图 0–1000 **相对裁切**（局部复验空间）；下一步点击优先再全窗 perceive，除非自行把 ROI 局部 norm 换算回全窗。`--uia` 与 ROI 互斥（E2：UIA 仅全窗）。默认无 ROI 时行为不变。
-5. **动手** — `act --stamp …`。先 dry-run，Shawn 说了再 `--go`。
+5. **动手** — `act --stamp …`。先 dry-run，用户 说了再 `--go`。
    - 点：`--norm 177,752` 或 `--xy 183,542`。有字控件且 stamp 带 `uia_nodes` 时可用 `--uia-name "File"` / `--steps uia:File@MenuItemControl`（解析成 norm，不另开 Invoke 默认路径）。长按加 `--hold 1.8`（按下、睡、松开；MCP 字段 `hold`）。`ids` 接受 `"14,9,16"`、单个数字 `5`、或列表 `[5,9]`（MCP 把 int/list coerce 成逗号串）。
 
-   - **E3 同 stamp 多步** — 稳定 UI：一次 `perceive` 后用**同一 stamp** 规划多步 `act`（先 dry-run 列出，Shawn 一次批准再串行 `--go`）。已有 `--steps "norm:a:b,norm:c:d,..."` 或 `--norm "a,b;c,d"` 即可链式；不要另写点击引擎。动画/弹层场景不要硬套。
+   - **E3 同 stamp 多步** — 稳定 UI：一次 `perceive` 后用**同一 stamp** 规划多步 `act`（先 dry-run 列出，用户 一次批准再串行 `--go`）。已有 `--steps "norm:a:b,norm:c:d,..."` 或 `--norm "a,b;c,d"` 即可链式；不要另写点击引擎。动画/弹层场景不要硬套。
      - 每次 act（含 dry）返回 `stamp_check` / `stamp_reuse` / `step_count`。`--go` 时 stamp 坏了（窗挪了、最小化、hwnd 没了、**hwnd 被别的进程复用 / pid 或进程创建时间不符 / 旧 stamp 没有 identity**、超 `--max-age`、或 `verify_light` ROI stamp）→ `ok=false` **不点**，强制重 perceive。`--go` 时每一步执行前还会再核一次 identity。
      - dry-run 默认只把坏 stamp 记在 `stamp_check.ok=false`，整体仍可 ok；要 dry 也 fail-closed 加 `--strict-stamp`。
      - **ROI / `verify_light` stamp 只用于点后复验，不能拿来多步规划**（须全窗 stamp）。
@@ -117,7 +117,7 @@ MCP 默认带压缩图；要全分辨率走磁盘路径。CLI 仍用 map 路径�
 
 - MCP `act` 只有**扁平字段**（`norm`/`xy`/`ids`/`text`/`key`…），**没有** `steps=[{...}]` JSON 数组；乱传会被静默丢掉。若解析后零步骤，现在返回 `ok:false` + error（不再假绿）。
 - 点击例：`act(norm="935,69", go=true)`；坐标逗号（也认冒号）。
-- 完整回路：`windows` → `perceive_window` →（稳定 UI）同 stamp 多步 dry `act` → Shawn 批后再 `--go` → 再 `perceive_window` 验证（点后优先 `--roi-norm` 轻复验，首次选点/规划仍全窗）。窗挪了或 ROI stamp → 重 perceive，勿盲点。
+- 完整回路：`windows` → `perceive_window` →（稳定 UI）同 stamp 多步 dry `act` → 用户 批后再 `--go` → 再 `perceive_window` 验证（点后优先 `--roi-norm` 轻复验，首次选点/规划仍全窗）。窗挪了或 ROI stamp → 重 perceive，勿盲点。
 
 ## 不要
 
