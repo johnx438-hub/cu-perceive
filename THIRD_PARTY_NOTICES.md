@@ -1,7 +1,8 @@
 # Third-party notices
 
-cu-perceive (Ez-Computer-Use) includes or is derived in part from the
-following third-party works. Their licenses are reproduced below.
+cu-perceive (Ez-Computer-Use) is licensed under AGPL-3.0-or-later (see
+`LICENSE`). It includes or is derived in part from the following third-party
+works. Their licenses are reproduced below.
 
 ## Piik — window capture approach (MIT)
 
@@ -100,5 +101,11 @@ LGPL-2.1).
 | comtypes | `uia` | MIT |
 | ultralytics (+ torch) | `yolo` | **AGPL-3.0** (torch: BSD-style) |
 
-The ScreenParser YOLO weights used by the `yolo` extra are not distributed
-here; see `weights/README.md`.
+ultralytics is AGPL-3.0, which is compatible with this project's
+AGPL-3.0-or-later license. It is only installed with the `yolo` extra.
+
+The ScreenParser YOLO weight (`screenparser/best.pt`) used by the `yolo`
+extra is not distributed here. Its license is ambiguous: the Hugging Face
+model card (`docling-project/ScreenParser`) says Apache-2.0, but the metadata
+embedded in the weight file says AGPL-3.0 (Ultralytics). Treat it as
+AGPL-3.0 unless the publisher clarifies. See `weights/README.md`.

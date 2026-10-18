@@ -1,5 +1,6 @@
 [build-system]
-requires = ["setuptools>=68"]
+# >=77 for PEP 639 license expressions and license-files.
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,6 +8,8 @@ name = "cu-perceive"
 version = "0.2.0"
 description = "Windows computer use: pin one window, read a 0-1000 grid map, then click or type. CLI and MCP."
 readme = "README.md"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "cu_perceive/_vendor/enikk/LICENSE"]
 requires-python = ">=3.11"
 # Core install: grid map, background window capture, act (input/post). No OCR/UIA/YOLO.
 dependencies = [

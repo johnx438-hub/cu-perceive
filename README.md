@@ -93,3 +93,16 @@ third-party licenses.
 
 The tests mock Win32 and run on Linux. The Windows capture paths need a manual
 check on a real Windows machine.
+
+## License
+
+cu-perceive (Ez-Computer-Use) is licensed under the GNU Affero General Public
+License v3.0 or later (AGPL-3.0-or-later); see `LICENSE`.
+
+It was iterated from Enikk's modified version of the Hermes agent's computer
+use. Third-party notices are in `THIRD_PARTY_NOTICES.md`, including:
+
+- ultralytics (`yolo` extra) is AGPL-3.0.
+- The ScreenParser weight `best.pt` has an ambiguous license: the model card
+  says Apache-2.0, but the weight's metadata says AGPL-3.0.
+- opencv-python bundles FFmpeg, which is LGPL-2.1.
