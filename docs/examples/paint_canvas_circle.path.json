@@ -2,7 +2,7 @@
   "version": 1,
   "experimental": true,
   "source": {
-    "image": "C:\\Users\\jawn\\src\\cu-perceive\\docs\\examples\\synth_circle.arc.path.json",
+    "image": "docs/examples/synth_circle.arc.path.json",
     "width": 1536,
     "height": 864,
     "mode": "contour",

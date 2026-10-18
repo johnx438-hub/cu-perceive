@@ -21,11 +21,13 @@ MCP 的 `windows` / `perceive_window` 默认带一张压缩格子图（长边 12
 ## 跑法（CLI）
 
 ```
-PYTHONPATH=C:\Users\jawn\src\cu-perceive;C:\Users\jawn\src\enikk
-C:\Users\jawn\miniconda3\python.exe -m cu_perceive <cmd>
+cu-perceive <cmd>            # pip 安装后
+python -m cu_perceive <cmd>  # 源码目录
 ```
 
-出图：`C:\Users\jawn\agent-bus\archive\shots\perceive\`。给人看时读返回的 `map` 再附上。
+出图：默认 `%LOCALAPPDATA%\cu-perceive\shots\perceive\`（`CU_PERCEIVE_OUT` 可改）。给人看时读返回的 `map` 再附上。
+
+OCR / UIA / YOLO 是可选包（`[ocr]` / `[uia]` / `[yolo]`），第一次用到时才加载。缺包时返回 `ok:false` + `install`（确切的 pip 命令），**不会自动安装**。
 
 ## 坐标
 
@@ -40,7 +42,7 @@ C:\Users\jawn\miniconda3\python.exe -m cu_perceive <cmd>
 
 1. **选窗** — `windows`（MCP 同名）。默认出桌面标尺图：格子 + `#id hwnd`。看 `map` 选。`--title` / `--exe` 返回匹配数组 `windows[]` + `window`（picked）+ `pick_rule`（非最小化 → EnumWindows z-top → 面积；非保证前台）。同 exe 多窗再加 title/hwnd。`--hwnd` 仍一行。`--no-map` / `map=false` 只出 JSON。
 2. **钉住再看** — `perceive --hwnd N`（MCP：`perceive_window`）。默认原图 + `.grid.png`，字段 `map`。不要默认开 OCR。
-   **restore / 钉窗后固定双拍，第一张丢掉**（壁纸 / 上面那层 Chrome / CEF PrintWindow 空帧）。settle 0.3s 后取第二帧。未 restore 且未 activate 的静默截图仍单拍。不要再 launch。
+   **默认不抢前台**：按窗口本身抓（WGC → DWM 缩略图 → PrintWindow），被别的窗口挡住也能抓；返回 `capture.backend` / `capture.attempts`。**最小化的窗口不还原**，返回 `ok:false, minimized:true`、不出 stamp；要还原并拉到前台显式加 `--focus` / `focus=true`。stamp 带 `identity {hwnd,pid,ctime}`。不要再 launch。
 3. **读 `map`** — 没标上的点（图标、牌面、空白画布）看格子，不要看 `.anno.png`。
 4. **可选 OCR / YOLO** — 有字的框用 `--ocr`。没字的图标/按钮加 `--yolo`（ScreenParser，类名当 text，可用 `--ids`）。默认都关。浏览器跳网址仍可先 OCR 地址栏。
    - **可选 UIA 节点(S4) / E4 旁路 OCR** — 有字的 Win32/WPF 按钮/菜单：**优先** `perceive --uia`（不要默认 `--ocr`）。格子图仍是主地图；`uia_nodes` 只是附加。 点仍走 **norm + `method=auto|uia|input`**（`act --uia-name "File"` 或 `--steps uia:File` / `uia:File@MenuItemControl` / `uia:#12` → 解析成 norm 中心）；**不要**把 element_token / raw Invoke 当默认点击路径。 无 hwnd 或 UIA 失败 → ok:false；弱 a11y（`uia_count=0`）退回格子图/OCR。OCR 留给绘制文字 / 浏览器正文。 `perceive --uia` 可带 `uia_ms`；同次 `--ocr` 时可有 `ocr_ms`。
@@ -49,7 +51,7 @@ C:\Users\jawn\miniconda3\python.exe -m cu_perceive <cmd>
    - 点：`--norm 177,752` 或 `--xy 183,542`。有字控件且 stamp 带 `uia_nodes` 时可用 `--uia-name "File"` / `--steps uia:File@MenuItemControl`（解析成 norm，不另开 Invoke 默认路径）。长按加 `--hold 1.8`（按下、睡、松开；MCP 字段 `hold`）。`ids` 接受 `"14,9,16"`、单个数字 `5`、或列表 `[5,9]`（MCP 把 int/list coerce 成逗号串）。
 
    - **E3 同 stamp 多步** — 稳定 UI：一次 `perceive` 后用**同一 stamp** 规划多步 `act`（先 dry-run 列出，Shawn 一次批准再串行 `--go`）。已有 `--steps "norm:a:b,norm:c:d,..."` 或 `--norm "a,b;c,d"` 即可链式；不要另写点击引擎。动画/弹层场景不要硬套。
-     - 每次 act（含 dry）返回 `stamp_check` / `stamp_reuse` / `step_count`。`--go` 时 stamp 坏了（窗挪了、最小化、hwnd 没了、超 `--max-age`、或 `verify_light` ROI stamp）→ `ok=false` **不点**，强制重 perceive。
+     - 每次 act（含 dry）返回 `stamp_check` / `stamp_reuse` / `step_count`。`--go` 时 stamp 坏了（窗挪了、最小化、hwnd 没了、**hwnd 被别的进程复用 / pid 或进程创建时间不符 / 旧 stamp 没有 identity**、超 `--max-age`、或 `verify_light` ROI stamp）→ `ok=false` **不点**，强制重 perceive。`--go` 时每一步执行前还会再核一次 identity。
      - dry-run 默认只把坏 stamp 记在 `stamp_check.ok=false`，整体仍可 ok；要 dry 也 fail-closed 加 `--strict-stamp`。
      - **ROI / `verify_light` stamp 只用于点后复验，不能拿来多步规划**（须全窗 stamp）。
      - CLI：`act --max-age SEC`（可选）、`act --strict-stamp`。MCP：`max_age_sec` / `strict_stamp` 已透传。
@@ -87,7 +89,9 @@ C:\Users\jawn\miniconda3\python.exe -m cu_perceive <cmd>
 | 链修饰键 | `--hold-key ctrl` | `hold_key`（`ctrl`/`control`/`shift`/`alt`，不是鼠标长按） |
 | 打字 | `--type` / `--text` | `text` |
 | 读哪张图 | `map` | `map`（默认 jpeg-1280 内联，`map_inline=false` 只路径） |
-| 出图目录 | `--out` | `out_dir`。写进 WSL workspace 用 UNC `\\wsl.localhost\Ubuntu\home\archer\...`，不要 `/home/archer`（会落到 `C:\home\archer`）。`/mnt/c/...` 仍可用。另有 `map_wsl` |
+| 出图目录 | `--out` | `out_dir`。写进 WSL workspace 用 UNC `\\wsl.localhost\Ubuntu\home\<user>\...`，不要 `/home/<user>`（会落到 `C:\home\<user>`）。`/mnt/c/...` 仍可用。另有 `map_wsl` |
+| 拉前台再抓 | `--focus` | `focus=true`（默认 false，不抢前台） |
+| 采集后端 | `--capture auto|wgc|dwm|printwindow|screen` | `capture`（`screen` 需 focus） |
 
 `launch` / `launch_app` 会真启动，没有 dry-run。
 
@@ -95,9 +99,9 @@ C:\Users\jawn\miniconda3\python.exe -m cu_perceive <cmd>
 
 从 WSL 调 Windows 上的 Python（不要用 Linux python）：
 
-    /mnt/c/Users/jawn/src/cu-perceive/bin/cu-perceive.sh windows
-    /mnt/c/Users/jawn/src/cu-perceive/bin/cu-perceive.sh perceive --hwnd N
-    /mnt/c/Users/jawn/src/cu-perceive/bin/cu-perceive.sh act --stamp STAMP --drag-norm ...
+    CU_PERCEIVE_PYTHON=/mnt/c/<python-dir>/python.exe <checkout>/bin/cu-perceive.sh windows
+    <checkout>/bin/cu-perceive.sh perceive --hwnd N
+    <checkout>/bin/cu-perceive.sh act --stamp STAMP --drag-norm ...
 
 MCP 本机 loopback（不碰 8000 的 windows-mcp）：
 
@@ -106,7 +110,7 @@ MCP 本机 loopback（不碰 8000 的 windows-mcp）：
 Grok: ~/.grok/config.toml 里 [mcp_servers.cu-perceive]。
 minimal-agent-ts: agent.json 的 mcp_servers 里同名一项。
 当前端口是 8771。8766 可能还有旧进程 / Tailscale 反代，别连。
-MCP 默认带压缩图；要全分辨率走磁盘路径。CLI 仍用 map 路径。WSL 用返回的 `map_wsl` / `png_wsl`。写进 Linux workspace 用 UNC： `\\wsl.localhost\Ubuntu\home\archer\zerostack-analysis\...`。 不要传 `/home/archer/...`，Win Python 会当相对路径写到 `C:\home\archer`，不报错。 `/mnt/c/...` 仍映射到 NTFS。origin.left <= -10000 是最小化哨兵，丢掉 stamp 重 perceieve。
+MCP 默认带压缩图；要全分辨率走磁盘路径。CLI 仍用 map 路径。WSL 用返回的 `map_wsl` / `png_wsl`。写进 Linux workspace 用 UNC： `\\wsl.localhost\Ubuntu\home\<user>\...`（发行版名用 `CU_PERCEIVE_WSL_DISTRO` 改）。 不要传 `/home/<user>/...`，Win Python 会当相对路径写到 `C:\home\<user>`，不报错。 `/mnt/c/...` 仍映射到 NTFS。origin.left <= -10000 是最小化哨兵，丢掉 stamp 重 perceieve。
 
 
 ## Agent 易踩坑（K3 / 88yr 2026-09-05）
