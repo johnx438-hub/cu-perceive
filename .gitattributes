@@ -1,0 +1,8 @@
+# Shell scripts run under WSL/bash, which rejects CRLF ("bash\r: No such file").
+*.sh text eol=lf
+bin/* text eol=lf
+
+*.png binary
+*.jpg binary
+*.pt binary
+*.onnx binary

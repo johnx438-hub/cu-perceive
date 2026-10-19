@@ -57,14 +57,16 @@ class TestMcpServerE2E(unittest.TestCase):
         cls.port = _free_port()
         env = dict(os.environ, CU_PERCEIVE_HOME=str(home), CU_PERCEIVE_OUT=str(cls.out), PYTHONPATH=str(ROOT))
         env.pop("CU_PERCEIVE_ALLOWED_HOSTS", None)
+        # A pipe nobody reads fills up (about 4 KB on Windows) and blocks the server's logging.
+        cls.log = open(home / "server.log", "wb")
         cls.proc = subprocess.Popen(
             [sys.executable, "-m", "cu_perceive", "mcp", "--port", str(cls.port)],
-            cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            cwd=ROOT, env=env, stdout=cls.log, stderr=subprocess.STDOUT,
         )
         deadline = time.time() + 20
         while time.time() < deadline:
             if cls.proc.poll() is not None:
-                out = cls.proc.stdout.read().decode("utf-8", "replace")
+                out = (home / "server.log").read_text("utf-8", "replace")
                 raise AssertionError(f"mcp server exited early:\n{out}")
             try:
                 with socket.create_connection(("127.0.0.1", cls.port), timeout=0.2):
@@ -91,7 +93,7 @@ class TestMcpServerE2E(unittest.TestCase):
             cls.proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             cls.proc.kill()
-        cls.proc.stdout.close()
+        cls.log.close()
         cls.td.cleanup()
 
     @classmethod
@@ -158,6 +160,42 @@ class TestMcpServerE2E(unittest.TestCase):
         self.assertFalse(keys["ok"], keys)
         self.assertEqual(keys["keyboard_refused_step"], 0)
         self.assertNotIn("typed", keys["steps"][0])
+
+    def test_scroll_int_and_json_path_stamp(self):
+        payload = json.loads(self._call("perceive_window", {"image": str(self.png), "map_inline": False})[0]["text"])
+        for scroll, notches in ((5, 5), (-5, -5), ("down:5", -5)):
+            act = json.loads(self._call("act", {"stamp": payload["json"], "norm": "500,500", "scroll": scroll})[0]["text"])
+            self.assertTrue(act["ok"], act)
+            self.assertEqual([s["notches"] for s in act["steps"] if s["via"] == "scroll"], [notches])
+            self.assertEqual(act["json"], payload["json"])
+        up = json.loads(self._call("act", {"stamp": payload["stamp"], "norm": "500,500", "scroll": 5})[0]["text"])
+        self.assertTrue(any("scrolls UP" in w for w in up.get("warnings", [])), up)
+
+    def test_unknown_args_refused_dry_run_wins_and_array_points(self):
+        payload = json.loads(self._call("perceive_window", {"image": str(self.png), "map_inline": False})[0]["text"])
+        res = self._rpc("tools/call", {"name": "act", "arguments": {
+            "stamp": payload["stamp"], "steps": [{"action": "click", "x": 1, "y": 2}], "go": True}})
+        self.assertTrue(res["result"]["isError"], res)
+        err = json.loads(res["result"]["content"][0]["text"])
+        self.assertEqual(err["reason"], "unknown_args")
+        self.assertEqual(err["unknown_args"], ["steps"])
+        self.assertIn("norm", err["valid_args"])
+        self.assertIn("dry_run", err["valid_args"])
+
+        res = self._rpc("tools/call", {"name": "perceive_window", "arguments": {"image": str(self.png), "region": "x"}})
+        self.assertTrue(res["result"]["isError"], res)
+        self.assertEqual(json.loads(res["result"]["content"][0]["text"])["unknown_args"], ["region"])
+
+        act = json.loads(self._call("act", {"stamp": payload["stamp"], "norm": [500, 500], "go": True,
+                                             "dry_run": True})[0]["text"])
+        self.assertTrue(act["ok"], act)
+        self.assertTrue(act["dry_run"])
+        self.assertEqual(act["steps"][0]["via"], "norm")
+        self.assertIn("dry_run=true overrides go=true", act["warnings"][0])
+
+        big = json.loads(self._call("act", {"stamp": payload["stamp"], "norm": "500,500", "scroll": "down:1000"})[0]["text"])
+        self.assertTrue(big["scroll_clamped"])
+        self.assertEqual([s["notches"] for s in big["steps"] if s["via"] == "scroll"], [-50])
 
     def test_rejects_foreign_host_header(self):
         body = {"jsonrpc": "2.0", "id": 999, "method": "tools/list", "params": {}}

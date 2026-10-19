@@ -6,6 +6,8 @@ import sys
 import time
 from ctypes import wintypes
 
+from .keys import VK, UnknownKeyError, check_key_spec, key_names, key_names_summary, normalize_key  # noqa: F401
+
 # None off Windows so the pure helpers (lParam packing, densify) stay importable for tests.
 user32 = ctypes.WinDLL("user32", use_last_error=True) if sys.platform == "win32" else None
 try:
@@ -38,21 +40,6 @@ MK_LBUTTON = 0x0001
 MK_RBUTTON = 0x0002
 MK_MBUTTON = 0x0010
 
-VK = {
-    "enter": 0x0D,
-    "return": 0x0D,
-    "tab": 0x09,
-    "esc": 0x1B,
-    "escape": 0x1B,
-    "backspace": 0x08,
-    "space": 0x20,
-    "delete": 0x2E,
-    "ctrl": 0x11,
-    "control": 0x11,
-    "alt": 0x12,
-    "shift": 0x10,
-    "v": 0x56,
-}
 
 
 class KEYBDINPUT(ctypes.Structure):
@@ -255,9 +242,7 @@ def type_text(text: str, gap: float = 0.012) -> dict:
 def tap_key(name: str) -> dict:
     if "+" in name:
         return tap_combo(name)
-    vk = VK.get(name.lower())
-    if vk is None:
-        raise KeyError(f"unknown key {name}")
+    vk = VK[normalize_key(name)]
     down = INPUT(type=INPUT_KEYBOARD, union=INPUT_UNION(ki=KEYBDINPUT(vk, 0, 0, 0, 0)))
     up = INPUT(type=INPUT_KEYBOARD, union=INPUT_UNION(ki=KEYBDINPUT(vk, 0, KEYEVENTF_KEYUP, 0, 0)))
     _send(down)
@@ -266,17 +251,13 @@ def tap_key(name: str) -> dict:
 
 
 def key_down(name: str) -> dict:
-    vk = VK.get(name.lower())
-    if vk is None:
-        raise KeyError(f"unknown key {name}")
+    vk = VK[normalize_key(name)]
     _vk_down(vk)
     return {"ok": True, "key": name.lower(), "down": True}
 
 
 def key_up(name: str) -> dict:
-    vk = VK.get(name.lower())
-    if vk is None:
-        raise KeyError(f"unknown key {name}")
+    vk = VK[normalize_key(name)]
     _vk_up(vk)
     return {"ok": True, "key": name.lower(), "up": True}
 
@@ -412,17 +393,6 @@ MOUSEEVENTF_MIDDLEDOWN = 0x0020
 MOUSEEVENTF_MIDDLEUP = 0x0040
 MODS = frozenset({"ctrl", "alt", "shift", "win"})
 
-for _i, _c in enumerate("abcdefghijklmnopqrstuvwxyz"):
-    VK.setdefault(_c, 0x41 + _i)
-for _i in range(1, 13):
-    VK.setdefault(f"f{_i}", 0x70 + _i - 1)
-VK.setdefault("win", 0x5B)
-VK.setdefault("up", 0x26)
-VK.setdefault("down", 0x28)
-VK.setdefault("left", 0x25)
-VK.setdefault("right", 0x27)
-VK.setdefault("home", 0x24)
-VK.setdefault("end", 0x23)
 
 
 def click_xy(x, y, double=False, button: str = "left", hold: float = 0):
@@ -456,9 +426,7 @@ def hover_xy(x, y, linger: float = 0.15) -> dict:
 
 
 def tap_combo(spec: str) -> dict:
-    parts = [p for p in spec.lower().replace(" ", "").split("+") if p]
-    if not parts:
-        raise ValueError("empty key")
+    parts = [p for p in check_key_spec(spec).split("+") if p]
     mods = [p for p in parts if p in MODS]
     keys = [p for p in parts if p not in MODS]
     if not keys:

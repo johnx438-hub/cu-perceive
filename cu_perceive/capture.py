@@ -16,6 +16,7 @@ Windows 11, occluded and not). It stays selectable for experiments only.
 """
 from __future__ import annotations
 
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -36,9 +37,12 @@ WGC_TIMEOUT_S = 1.5
 
 
 class CaptureError(RuntimeError):
-    def __init__(self, message: str, attempts: list[dict] | None = None):
+    def __init__(self, message: str, attempts: list[dict] | None = None, reason: str | None = None,
+                 hint: str | None = None):
         super().__init__(message)
         self.attempts = list(attempts or [])
+        self.reason = reason
+        self.hint = hint
 
 
 class WindowMinimizedError(CaptureError):
@@ -143,6 +147,30 @@ def crop_to_client(img: np.ndarray, candidates, client_rect, out_size: tuple[int
         shrink = ow < out.shape[1] or oh < out.shape[0]
         out = cv2.resize(out, (ow, oh), interpolation=cv2.INTER_AREA if shrink else cv2.INTER_LINEAR)
     return np.ascontiguousarray(out)
+
+
+WGC_UNSAFE_MODULES: tuple[str, ...] = ("onnxruntime",)
+WGC_GUARD_HINT = (
+    "use capture=printwindow (or auto, which falls back to it), or restart the server "
+    "without CU_PERCEIVE_DETECT_INPROC=1 so OCR/YOLO run in the worker process"
+)
+
+
+def wgc_blocker() -> str | None:
+    """Why WGC must not run in this process, or None.
+
+    After onnxruntime is loaded, the next windows_capture start_free_threaded crashes
+    the whole process (access violation), so WGC is skipped; PrintWindow is unaffected.
+    perceive keeps OCR/YOLO in a child process (detect_worker), so this only triggers
+    with CU_PERCEIVE_DETECT_INPROC=1 or when something else imported onnxruntime.
+    """
+    for mod in WGC_UNSAFE_MODULES:
+        if mod in sys.modules:
+            return (
+                f"{mod} is loaded in this process and WGC would crash it; skipped "
+                "(restart the process to use WGC again)"
+            )
+    return None
 
 
 def _wgc_once(WindowsCapture, hwnd: int, draw_border, timeout: float):
@@ -255,6 +283,11 @@ def capture_window(
             rec.update(ok=False, error="unknown backend")
             attempts.append(rec)
             continue
+        blocked = wgc_blocker() if name == "wgc" else None
+        if blocked:
+            rec.update(ok=False, skipped="unsafe", error=blocked)
+            attempts.append(rec)
+            continue
         try:
             raw, hint = fn(int(hwnd))
             cands = [hint] + [geom.get(k) for k in _FRAME_HINTS.get(name, ("window",))]
@@ -277,6 +310,15 @@ def capture_window(
         return CaptureResult(img, name, attempts)
     if blank is not None:
         return CaptureResult(blank[1], blank[0], attempts, blank=True)
+    if attempts and all(a.get("skipped") == "unsafe" for a in attempts):
+        raise CaptureError(
+            "capture=wgc refused by the onnxruntime guard: "
+            + attempts[0]["error"]
+            + f"; {WGC_GUARD_HINT}",
+            attempts,
+            reason="wgc_refused_onnxruntime_guard",
+            hint=WGC_GUARD_HINT,
+        )
     raise CaptureError("every window capture backend failed", attempts)
 
 

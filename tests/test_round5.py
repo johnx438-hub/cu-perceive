@@ -219,15 +219,19 @@ class TestGhostWindowPerceive(_Mocks):
         self.assertFalse(out["ok"])
         self.assertIsNone(out["stamp"])
         self.assertIn("parked off-screen", out["error"])
-        self.assertIn("even after --focus", out["error"])
+        self.assertIn("move the window back on-screen", out["error"])
+        self.assertEqual(out["reason"], "offscreen")
         self.assertEqual(out["degenerate_client"]["image"], [144, 1])
         self.assertEqual(list(self.out.glob("*.json")), [])
 
-    def test_no_focus_ghost_suggests_focus(self):
+    def test_no_focus_ghost_says_move_it_back_not_focus(self):
         self._ghost()
         out = perceive(hwnd=77, out_dir=str(self.out))
         self.assertFalse(out["ok"])
-        self.assertIn("--focus restores and raises it", out["error"])
+        self.assertEqual(out["reason"], "offscreen")
+        self.assertIn("move the window back on-screen", out["hint"])
+        self.assertIn("focus=true does not help", out["hint"])
+        self.assertNotIn("--focus restores", out["error"])
         self.assertEqual(list(self.out.glob("*")), [])
 
     def test_on_screen_but_one_pixel_high(self):
