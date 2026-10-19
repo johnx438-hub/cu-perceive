@@ -56,7 +56,12 @@ A grab that is all black counts as a miss and the next backend is tried.
 legacy screen-region grab and needs `--focus`. The JSON reports which backend
 won under `capture.backend`, with every attempt in `capture.attempts`.
 Windows on another virtual desktop, or cloaked windows, may come back blank.
-A minimized window is reported with `capture.skipped = "minimized"`.
+A minimized window is reported with `capture.skipped = "minimized"`. A window
+that is parked off-screen (left/top at -32000 without being minimized) or whose
+client area is under 8 px on a side (for example 144x1) fails with `ok: false`,
+no stamp and a `degenerate_client` field, also with `--focus`. A client area
+under 80 px on a side is captured with a warning, because `act` refuses such
+stamps.
 
 `--capture dwm` is **experimental** and not part of `auto`. It renders a DWM
 thumbnail into an off-screen window and reads it back with BitBlt, but DWM
@@ -83,11 +88,15 @@ renamed into place), so `act` never reads a half-written stamp.
     window or a window it owns (its dialogs, popups and menus). Otherwise `act`
     refuses with `pointer_refused_step` and `point_window` (the hwnd and title
     actually there);
-  - each `--type` / `--key` needs the stamped window in the foreground, also
-    after a click. Otherwise it refuses with `keyboard_refused_step`.
+  - each `--type` / `--key` needs the stamped window, or a window it owns (for
+    example a dialog the click just opened), in the foreground, also after a
+    click. Otherwise it refuses with `keyboard_refused_step`;
+  - `--hold-key` counts as a key: it is pressed at the first click, drag or
+    scroll, once that step's point has passed and only if the stamped window
+    (or one it owns) is in the foreground. Otherwise it refuses with
+    `hold_key_refused_step` before anything is pressed.
 
-  A refused step and everything after it are not sent, and `--hold-key` is only
-  pressed once the first click, drag or scroll has passed. `--focus` (MCP
+  A refused step and everything after it are not sent. `--focus` (MCP
   `focus=true`) brings the stamped window to the front instead, re-checks its
   identity, then re-checks the point or foreground, and still refuses if it is
   covered (for example by an always-on-top window). A dry run lists points that
@@ -96,7 +105,8 @@ renamed into place), so `act` never reads a half-written stamp.
   `post` don't need the point to be visible and are unchanged.
 - Screen-space stamps have no window to compare points with. Keys on them need a
   click first in the same `act` and are sent only while the window that click
-  landed on is in front.
+  landed on is in front; `--hold-key` needs the window under its first point
+  in front.
 - Without `--stamp` / `--json`, `act` uses the newest perceive stamp (desktop
   maps from `windows` are never picked) and reports `stamp_source: "latest"`.
   `--go` on it requires a window stamp with identity; for a screen-space stamp,
