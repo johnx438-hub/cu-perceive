@@ -4,10 +4,14 @@ from __future__ import annotations
 import unittest
 
 from cu_perceive.uia import (
+    UIA_CONTENT_MAX,
     UIA_MAX_DEPTH,
     UIA_MAX_NODES,
+    UIA_VALUE_MAX,
+    control_center_occluded,
     screen_bbox_to_norm,
     should_keep_uia_node,
+    truncate_uia_value,
 )
 
 
@@ -115,6 +119,85 @@ class TestShouldKeepUiaNode(unittest.TestCase):
                 norm=[10, 100, 900, 900],
             )
         )
+
+    def test_keep_text_label_and_dataitem_value(self):
+        self.assertTrue(
+            should_keep_uia_node(
+                name="保存成功，单号 XS-0001",
+                control_type="TextControl",
+                patterns=[],
+                norm=[10, 20, 400, 80],
+            )
+        )
+        self.assertTrue(
+            should_keep_uia_node(
+                name="",
+                control_type="DataItemControl",
+                patterns=[],
+                norm=[10, 40, 80, 70],
+                value="B2003",
+            )
+        )
+        self.assertFalse(
+            should_keep_uia_node(
+                name="",
+                control_type="DataItemControl",
+                patterns=[],
+                norm=[10, 40, 80, 70],
+                value="",
+            )
+        )
+
+    def test_content_cap_drops_extra_text_nodes(self):
+        self.assertFalse(
+            should_keep_uia_node(
+                name="row",
+                control_type="Text",
+                patterns=[],
+                norm=[1, 1, 10, 10],
+                content_kept=UIA_CONTENT_MAX,
+            )
+        )
+        self.assertTrue(
+            should_keep_uia_node(
+                name="OK",
+                control_type="ButtonControl",
+                patterns=["Invoke"],
+                norm=[1, 1, 10, 10],
+                content_kept=UIA_CONTENT_MAX,
+            )
+        )
+
+    def test_value_is_truncated(self):
+        raw = "x" * (UIA_VALUE_MAX + 20)
+        out = truncate_uia_value(raw)
+        self.assertEqual(len(out), UIA_VALUE_MAX)
+        self.assertTrue(out.endswith("..."))
+
+
+class _Node:
+    def __init__(self, name, parent=None, runtime=None):
+        self.name = name
+        self.parent = parent
+        self.runtime = runtime if runtime is not None else (id(self),)
+
+    def GetParentControl(self):
+        return self.parent
+
+    def GetRuntimeId(self):
+        return self.runtime
+
+
+class TestOccludedMdi(unittest.TestCase):
+    def test_front_child_hides_the_back_child(self):
+        back = _Node("order")
+        front = _Node("report")
+        cell = _Node("code", parent=back)
+        box = (0, 0, 40, 20)
+        self.assertTrue(control_center_occluded(back, box, hit_at=lambda x, y: front))
+        self.assertFalse(control_center_occluded(front, box, hit_at=lambda x, y: front))
+        self.assertFalse(control_center_occluded(back, box, hit_at=lambda x, y: cell))
+        self.assertFalse(control_center_occluded(back, box, hit_at=lambda x, y: None))
 
 
 class TestCapsDefaults(unittest.TestCase):

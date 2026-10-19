@@ -57,6 +57,9 @@ class _Desk(unittest.TestCase):
             mock.patch("cu_perceive.input.tap_key", side_effect=lambda k: self.calls.append(f"key:{k}")),
             mock.patch("cu_perceive.input.enter_text",
                        side_effect=lambda t, via="paste": self.calls.append(f"type:{t}")),
+            mock.patch("cu_perceive.input.clear_field_for_replace",
+                       side_effect=lambda **k: self.calls.append("clear") or {
+                           "ok": True, "method": "value_pattern", "empty": True, "verified": True}),
             mock.patch("cu_perceive.input.key_down", side_effect=lambda k: self.calls.append(f"down:{k}")),
             mock.patch("cu_perceive.input.key_up", side_effect=lambda k: self.calls.append(f"up:{k}")),
             mock.patch("time.sleep"),
@@ -102,7 +105,7 @@ class TestCoveredClick(_Desk):
     def test_uncovered_point_clicks_then_types(self):
         out = self.go(norm="900,700", text="hello", replace=True)
         self.assertTrue(out["ok"], out)
-        self.assertEqual(self.calls, ["click:1020,550", "key:ctrl+a", "type:hello"])
+        self.assertEqual(self.calls, ["click:1020,550", "clear", "type:hello"])
 
     def test_focus_raises_then_clicks_target(self):
         self.covered = {(1020, 550)}
@@ -110,7 +113,7 @@ class TestCoveredClick(_Desk):
         out = self.go(norm="900,700", text="hello", replace=True, focus=True)
         self.assertTrue(out["ok"], out)
         self.assertTrue(out["focused_window"])
-        self.assertEqual(self.calls, [f"focus:{HWND}", "click:1020,550", "key:ctrl+a", "type:hello"])
+        self.assertEqual(self.calls, [f"focus:{HWND}", "click:1020,550", "clear", "type:hello"])
 
     def test_focus_still_covered_refuses(self):
         self.covered = {(1020, 550)}
@@ -214,10 +217,10 @@ class TestKeyboardAfterClick(_Desk):
             self.fg = COVER
 
         with mock.patch("cu_perceive.input.tap_key", side_effect=tap):
-            out = self.go(norm="500,500", text="hi", replace=True)
+            out = self.go(norm="500,500", key="a,b")
         self.assertFalse(out["ok"])
         self.assertEqual(out["keyboard_refused_step"], 2)
-        self.assertEqual(self.calls, ["click:700,450", "key:ctrl+a"])
+        self.assertEqual(self.calls, ["click:700,450", "key:a"])
 
 
 class TestScreenStamp(_Desk):

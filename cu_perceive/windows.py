@@ -25,6 +25,46 @@ _SKIP_TITLE = (
 )
 
 
+def top_level_brief() -> list[dict] | None:
+    """Visible top-level windows as {hwnd, title, class}. None when the list cannot be read."""
+    try:
+        rows = list_windows(include_minimized=True)
+    except Exception:
+        return None
+    out: list[dict] = []
+    for w in rows:
+        try:
+            out.append({
+                "hwnd": int(w["hwnd"]),
+                "title": w.get("title") or "",
+                "class": w.get("class") or "",
+            })
+        except (TypeError, ValueError, KeyError):
+            continue
+    return out
+
+
+def foreground_brief() -> dict | None:
+    """Foreground window {foreground_hwnd, title, class}. None off Windows."""
+    try:
+        from . import _win32
+
+        fg = int(_win32.foreground_window() or 0)
+    except Exception:
+        return None
+    if not fg:
+        return {"foreground_hwnd": 0, "title": "", "class": ""}
+    try:
+        title = _win32.window_title(fg) or ""
+    except Exception:
+        title = ""
+    try:
+        cls = _win32.class_name(fg) or ""
+    except Exception:
+        cls = ""
+    return {"foreground_hwnd": fg, "title": title, "class": cls}
+
+
 def list_windows(include_minimized: bool = True) -> list[dict]:
     import psutil
     import win32gui

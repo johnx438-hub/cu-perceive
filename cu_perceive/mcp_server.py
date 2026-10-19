@@ -174,17 +174,25 @@ def _compact_rows(payload: dict) -> None:
         for it in payload.get("items") or []
     ]
     if "uia_nodes" in payload:
-        payload["uia_nodes"] = [
-            {"id": n.get("id"), "name": n.get("name"), "control_type": n.get("control_type"),
-             "center_norm": _center_norm(n.get("norm"))}
-            for n in payload.get("uia_nodes") or []
-        ]
+        rows = []
+        for n in payload.get("uia_nodes") or []:
+            row = {
+                "id": n.get("id"),
+                "name": n.get("name"),
+                "control_type": n.get("control_type"),
+                "center_norm": _center_norm(n.get("norm")),
+            }
+            if n.get("value") is not None:
+                row["value"] = n.get("value")
+            if n.get("readonly"):
+                row["readonly"] = True
+            rows.append(row)
+        payload["uia_nodes"] = rows
     payload["compact"] = True
 
 
 def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | None = None) -> None:
     import json
-    import threading
     from mcp.server.transport_security import TransportSecuritySettings
     from PIL import Image as PILImage
 
@@ -228,7 +236,6 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         allowed_origins=origins,
     )
     app, http_app = build_server("cu-perceive", host, port, security)
-    act_lock = threading.Lock()
 
     def _tool(fn):
         app.tool()(offloaded(fn))
@@ -306,7 +313,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         ocr/uia/yolo are optional extras; if missing the reply has ok=false and the exact pip command in "install".
         ocr/yolo run in a worker process with a timeout (CU_PERCEIVE_DETECT_TIMEOUT, default 30 s): a hung worker is
         restarted and the stamp comes back without detections plus a warning. Unknown arguments are refused (reason=unknown_args).
-        compact=true: items (and uia_nodes) only as {id, text|name, kind|control_type, center_norm}; center_norm goes straight into act norm.
+        compact=true: items as {id, text, kind, center_norm}; uia_nodes keep name, control_type, center_norm, and value (readonly when set). Text/DataItem/Edit content stays. Occluded nodes are omitted (uia_occluded). center_norm goes straight into act norm.
         E2 light verify: roi="L,T,W,H" or roi_norm="CX,CY[,HALF]" (mutually exclusive) crops after full grab; map 0-1000 is ROI-local.
         out_dir optional: Windows path or /mnt/c/... ; response also has map_wsl / png_wsl (lowercase drive)."""
         hwnd_n = _nz_int(hwnd)
@@ -379,6 +386,8 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
                 payload["caps"] = out["caps"]
             if "uia_truncated" in out:
                 payload["uia_truncated"] = out["uia_truncated"]
+            if "uia_occluded" in out:
+                payload["uia_occluded"] = out["uia_occluded"]
             payload["ok"] = out.get("ok", True)
             if out.get("error"):
                 payload["error"] = out["error"]
@@ -408,12 +417,14 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         strict_stamp: bool = False,
         uia_name: str = "",
         replace: bool = False,
+        via: str = "",
+        ime: str = "",
         focus: bool = False,
         hwnd: int = 0,
         dry_run: bool | None = None,
     ):
         """act: go=true sends (default: dry run; dry_run=true wins); needs window in front or focus=true. scroll="down:5" notches (bare 5 = UP). key="enter"|"pagedown". norm="x,y" or [x,y]. hwnd= checks stamp.
-        norm="x,y" or [x,y] (0-1000 map) | xy="x,y" or [x,y] (stamp px) | ids="3"; scroll="down:3"|"up:3" (wheel notches, not pixels; max 50; int or string; bare numbers: negative = down, positive = UP); drag_norm="x1,y1;x2,y2"; text="..." + replace=true; key="enter"|"ctrl+a"|"pagedown"; hold_key=ctrl|shift|alt (needs a click/drag/scroll); button="left"|"right"; focus=true; go=true sends (default: dry run).
+        norm="x,y" or [x,y] (0-1000 map) | xy="x,y" or [x,y] (stamp px) | ids="3"; scroll="down:3"|"up:3" (wheel notches, not pixels; max 50; int or string; bare numbers: negative = down, positive = UP); drag_norm="x1,y1;x2,y2"; text="..." + replace=true; key="enter"|"ctrl+a"|"pagedown"; hold_key=ctrl|shift|alt (needs a click/drag/scroll); button="left"|"right"; focus=true; go=true sends (default: dry run); via=paste|keys; ime=off.
         perceive_window does not focus; act go needs the window in front or focus=true.
         stamp: a stamp name or the json path perceive_window returned. hwnd (optional): the window you mean;
         with no stamp it picks that window's newest stamp, with a stamp it refuses one from another window
@@ -436,15 +447,20 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         Stamps older than 120 s add stamp_stale=true and a warning (max_age_sec=N refuses instead).
         scroll counts are wheel notches (one notch ~3 lines), not pixels; more than 50 is capped at 50 with scroll_clamped=true and a warning.
         ids: comma string / int / list; needs prior ocr/yolo perceive.
-        text=paste+restore. key like ctrl+c (comma-separated ok). Unknown key -> ok=false, reason=unknown_key, valid_keys.
+        text=paste+restore by default (via="paste"|"keys"; keys = SendInput unicode, for a grid cell that ignores Ctrl+V). key like ctrl+c (comma-separated ok). Unknown key -> ok=false, reason=unknown_key, valid_keys.
+        Clipboard errors return ok=false reason=clipboard_failed (the server stays up). Previous clipboard text is restored best-effort.
+        ime="off" switches the target window to English for this act and restores it. An active IME is reported as ime_active in warnings.
+        Concurrent go=true acts run one at a time. A dry run reports foreground_click_count=0; the plan is planned_foreground_click_count.
+        go=true adds new_windows [{hwnd, title, class}] for top-level windows that appeared, and after {foreground_hwnd, title, class}.
         Keys: a-z, 0-9, f1-f24, num0-num9, alt, backquote, backslash, backspace, bracketleft,
               bracketright, capslock, comma, ctrl, delete, down, end, enter, equals, esc, home, insert,
               left, menu, minus, numlock, pagedown, pageup, pause, period, printscreen, quote, right,
               scrolllock, semicolon, shift, slash, space, tab, up, volumedown, volumemute, volumeup, win
           (case-insensitive; page_down / PgDn / Return / Escape / del also work).
         ids+text in ONE call: ids are real clicks first, then text - NOT a silent focus flag.
-        Order is click(s) -> text -> key. replace=true adds ctrl+a right before the text so it
-        replaces what the field holds (e.g. norm=address bar, text=URL, replace=true, key=enter).
+        Order is click(s) -> text -> key. replace=true clears the focused edit before the text
+        (ValuePattern.SetValue, EM_SETSEL on a WinForms Edit, or Home+Shift+End+Delete — not Ctrl+A,
+        which a classic TextBox ignores) and checks the field is empty before typing.
         go=true on a window stamp: each click / drag start+end / scroll point must be on the stamp
         window (or a window it owns) and each text/key needs it in the foreground, even after a
         click; otherwise ok=false (pointer_refused_step + point_window, or keyboard_refused_step).
@@ -453,8 +469,8 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         No stamp = latest perceive stamp; go=true then needs a window stamp with identity.
         A window that is gone or whose HWND/PID/creation time changed fails even a dry run;
         stamp_ok / stamp_error report the stamp check at top level.
-        go=true: foreground_click_count counts clicks actually sent (0 if refused);
-        planned_foreground_click_count is the plan.
+        go=true: foreground_click_count counts clicks actually sent (0 if refused or on a dry run);
+        planned_foreground_click_count is the plan. go=true calls are serialized in-process.
         scroll+xy/norm/ids => hover then wheel (NO left-click) - will not focus an input.
         hold>0 = long-press. hold_key=ctrl|shift|alt across the chain (not mouse hold); needs a
         norm/xy/ids click, drag or scroll in the same call (else reason=hold_key_needs_pointer_step).
@@ -483,6 +499,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
                 scroll=_nz_scroll(scroll), button=button, hover=hover, step_px=step_px, hold=hold,
                 uia_name=_nz_str(uia_name) or None,
                 replace=bool(replace),
+                input_via=_nz_str(via),
             )
         except ValueError as e:
             return {"ok": False, "error": str(e), "dry_run": not send, "reason": "bad_args",
@@ -494,19 +511,19 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
                     "hint": "perceive_window(hwnd=...) and pass that stamp, or drop hwnd"}
         except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError) as e:
             return {"ok": False, "error": str(e), "dry_run": not send}
-        with act_lock:
-            out = run_chain(
-                frame,
-                specs,
-                dry_run=not send,
-                hold_key=_nz_str(hold_key),
-                method=_nz_str(method) or "input",
-                max_age_sec=max_age_sec,
-                strict_stamp=bool(strict_stamp),
-                stamp_json_path=str(path) if path else None,
-                focus=bool(focus),
-                stamp_source=("explicit" if _nz_str(stamp) else "latest") if path else None,
-            )
+        out = run_chain(
+            frame,
+            specs,
+            dry_run=not send,
+            hold_key=_nz_str(hold_key),
+            method=_nz_str(method) or "input",
+            max_age_sec=max_age_sec,
+            strict_stamp=bool(strict_stamp),
+            stamp_json_path=str(path) if path else None,
+            focus=bool(focus),
+            stamp_source=("explicit" if _nz_str(stamp) else "latest") if path else None,
+            ime=_nz_str(ime),
+        )
         out["json"] = str(path) if path else None
         if notes:
             out["warnings"] = notes + (out.get("warnings") or [])

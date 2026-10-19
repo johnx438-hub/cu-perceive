@@ -188,8 +188,9 @@ class TestRunChainAutoDry(unittest.TestCase):
         self.assertEqual(step["uia_first"]["control_type"], "DocumentControl")
         self.assertEqual(probe.call_count, 2)
         self.assertTrue(step["foreground_used"])
-        self.assertTrue(out["foreground_used"])
-        self.assertGreaterEqual(out["foreground_click_count"], 1)
+        self.assertFalse(out["foreground_used"])
+        self.assertEqual(out["foreground_click_count"], 0)
+        self.assertGreaterEqual(out["planned_foreground_click_count"], 1)
 
     @mock.patch("cu_perceive.uia.probe_at_screen")
     def test_hwnd_mismatch_chooses_input(self, probe):
@@ -248,8 +249,9 @@ class TestRunChainAutoDry(unittest.TestCase):
         self.assertEqual(out["method"], "input")
         step = out["steps"][0]
         self.assertTrue(step["foreground_used"])
-        self.assertTrue(out["foreground_used"])
-        self.assertGreaterEqual(out["foreground_click_count"], 1)
+        self.assertFalse(out["foreground_used"])
+        self.assertEqual(out["foreground_click_count"], 0)
+        self.assertGreaterEqual(out["planned_foreground_click_count"], 1)
 
 
 

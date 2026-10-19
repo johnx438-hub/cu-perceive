@@ -140,9 +140,13 @@ every json in a large output directory.
   drag smoothness; passing it without a drag adds a warning.
 - A stamp older than 120 s adds `stamp_stale: true` and a warning. Pass
   `max_age_sec` to refuse old stamps instead.
-- MCP `perceive_window(compact=true)` returns items (and `uia_nodes`) as
-  `{id, text, kind, center_norm}` only; `center_norm` goes straight into
-  `act(norm=...)`.
+- MCP `perceive_window(compact=true)` returns items as
+  `{id, text, kind, center_norm}` and UIA nodes as
+  `{id, name, control_type, center_norm}` plus `value` (and `readonly` when
+  set). `center_norm` goes straight into `act(norm=...)`. Compact UIA keeps
+  Text / DataItem / readonly Edit content (labels, message-box text, grid
+  cells), not only clickable controls, and drops nodes whose center is covered
+  by another element (occluded MDI children) with `uia_occluded` counting them.
 - MCP tools refuse arguments they don't declare instead of dropping them: the
   call returns an error whose text is JSON with `reason: "unknown_args"`,
   `unknown_args` and `valid_args`, and nothing runs. That includes
@@ -155,9 +159,27 @@ every json in a large output directory.
   only keys, or with only a hover, `act` fails with
   `reason: "hold_key_needs_pointer_step"`. For a key chord use
   `--key ctrl+pagedown` instead.
-- `--replace` (MCP `replace=true`) sends `ctrl+a` right before each `--type`, so
-  the text replaces what the field holds instead of being inserted at the caret:
+- `--replace` (MCP `replace=true`) clears the focused edit before each
+  `--type`, then types. It tries ValuePattern.SetValue(""), then EM_SETSEL +
+  WM_CLEAR on a WinForms Edit, then Home, Shift+End, Delete. It does not send
+  Ctrl+A (a classic WinForms TextBox ignores that, so the text used to be
+  appended). If the field can be read back and is still not empty, the act
+  stops with `reason: "replace_failed"` and does not type.
   `act --norm 491,63 --type https://example.org --replace --key enter --go`.
+- `--via paste|keys` (MCP `via`) chooses how `--type` / `text` is entered.
+  `paste` (default) puts the text on the clipboard and sends Ctrl+V, then
+  restores the previous Unicode clipboard text (best effort). Clipboard
+  failures return `ok: false` and `reason: "clipboard_failed"`; the helper
+  runs in a child process so a native clipboard fault cannot kill the server.
+  `keys` (CLI `--slow-type` is the same) sends each character with SendInput
+  unicode — use it when a DataGridView cell ignores Ctrl+V because it is not
+  in edit mode.
+- `--ime off` (MCP `ime="off"`) switches the **target window** to an English
+  layout and closes its IME for that act, then restores both. It does not
+  change the system default. Every act on a window stamp reports `ime`
+  (`hkl_hex`, `lang_id`, `ime_open`, `ime_active`). When an IME is active and
+  the chain types or taps keys, the result includes an `ime_active` warning:
+  the IME can swallow keys while each step still says `tapped: true`.
 - Mouse input goes to the window on top at that point, and keys go to the
   window in front, even when the stamped window is behind another one. So with
   `--go` on a window stamp, each step is checked right before it is sent:
@@ -204,7 +226,11 @@ every json in a large output directory.
   resized, too old) only fail a dry run with `--strict-stamp`, but every result
   reports `stamp_ok` and, when false, `stamp_error`.
 - On `--go`, `foreground_click_count` counts the SendInput clicks actually sent
-  (0 when the run is refused); `planned_foreground_click_count` is the plan.
+  (0 when the run is refused). A dry run also leaves it at 0; the plan is
+  `planned_foreground_click_count`. Concurrent `--go` / `go=true` acts in one
+  process run one at a time. A live act lists top-level windows that appeared
+  during the call in `new_windows` (`hwnd`, `title`, `class`) and the foreground
+  window after the act in `after`.
 - `--method uia` without the `uia` extra exits with code 3 and prints the same
   `missing_extra` / `install` fields as `perceive --uia`. `--method auto`
   without it falls back to input and says so in `warnings`.

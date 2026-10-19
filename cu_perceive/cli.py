@@ -143,13 +143,25 @@ def main(argv: list[str] | None = None) -> int:
         help="contact method: input (SendInput, default) | post (HWND PostMessage, S1) | uia (UIA patterns, S2) | auto (S3: uia if hit+pattern else input; left click only)",
     )
     a.add_argument("--double", action="store_true")
-    a.add_argument("--type", "--text", dest="text", help="paste text (clipboard + Ctrl+V). CLI: --type or --text; MCP field is text")
+    a.add_argument("--type", "--text", dest="text", help="type text. Default pastes (clipboard + Ctrl+V) and restores the previous clipboard text. CLI: --type or --text; MCP field is text")
+    a.add_argument(
+        "--via",
+        choices=["paste", "keys"],
+        default=None,
+        help='how --type/--text is entered: paste (default, clipboard + Ctrl+V) or keys (SendInput unicode per character; use this when a grid cell ignores Ctrl+V)',
+    )
     a.add_argument(
         "--replace",
         action="store_true",
-        help="select all (ctrl+a) right before each --type so the text replaces the field instead of inserting at the caret",
+        help="clear the focused edit before each --type (ValuePattern, EM_SETSEL, or Home+Shift+End+Delete — not Ctrl+A, which a classic WinForms TextBox ignores) and check it is empty",
     )
-    a.add_argument("--slow-type", action="store_true", help="per-char SendInput instead of paste")
+    a.add_argument("--slow-type", action="store_true", help="per-char SendInput instead of paste (same as --via keys)")
+    a.add_argument(
+        "--ime",
+        choices=["off"],
+        default=None,
+        help='off: for --go, switch the target window to an English layout and close its IME, then restore both. An active IME is always reported (ime_active warning)',
+    )
     a.add_argument("--key", help="tap keys: enter,tab,pagedown,f5,1, or chords like ctrl+c / ctrl+shift+t (all names: see below)")
     a.add_argument("--drag", help="hold-drag window pixels polyline: x1,y1,x2,y2;x3,y3")
     a.add_argument("--drag-norm", dest="drag_norm", help="hold-drag 0-1000 polyline: 200,300;400,280")
@@ -407,6 +419,7 @@ def main(argv: list[str] | None = None) -> int:
             extras=extras,
             uia_name=uia_names or None,
             replace=bool(args.replace),
+            input_via=getattr(args, "via", None),
         )
         if path_specs:
             specs = path_specs + specs
@@ -437,6 +450,7 @@ def main(argv: list[str] | None = None) -> int:
                 stamp_json_path=str(path) if path else None,
                 focus=bool(args.focus),
                 stamp_source=("explicit" if (args.stamp or args.json) else "latest") if path else None,
+                ime=getattr(args, "ime", None),
             )
         except (MethodError, RuntimeError, FileNotFoundError, OSError, KeyError, ValueError) as e:
             err = {

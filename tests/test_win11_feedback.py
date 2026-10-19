@@ -155,8 +155,10 @@ class TestReplace(_TmpDir):
         specs = parse_steps(norm="491,63", text="https://example.org", key="enter", replace=True)
         self.assertEqual(
             [(s["kind"], s.get("key") or s.get("text")) for s in specs],
-            [("norm", None), ("key", "ctrl+a"), ("type", "https://example.org"), ("key", "enter")],
+            [("norm", None), ("type", "https://example.org"), ("key", "enter")],
         )
+        self.assertTrue(specs[1]["replace"])
+        self.assertNotIn("replace", specs[2])
 
     def test_default_unchanged(self):
         specs = parse_steps(norm="491,63", text="x")
@@ -167,21 +169,26 @@ class TestReplace(_TmpDir):
         rc, out, _ = _run_cli(["act", "--json", str(p), "--norm", "491,63", "--type", "URL", "--replace", "--key", "enter"])
         self.assertEqual(rc, 0, out)
         steps = json.loads(out)["steps"]
-        self.assertEqual([s["via"] for s in steps], ["norm", "key", "type", "key"])
-        self.assertEqual(steps[1]["key"], "ctrl+a")
-        self.assertTrue(steps[1]["replace"] and steps[2]["replace"])
+        self.assertEqual([s["via"] for s in steps], ["norm", "type", "key"])
+        self.assertTrue(steps[1]["replace"])
+        self.assertEqual(steps[1]["replace_via"], "clear_edit")
+        self.assertNotIn("replace", steps[2])
 
     def test_live_order_select_all_then_paste(self):
         calls = []
         with mock.patch("cu_perceive.input.click_xy", side_effect=lambda *a, **k: calls.append("click")), \
                 mock.patch("cu_perceive.input.tap_key", side_effect=lambda k: calls.append(f"key:{k}")), \
                 mock.patch("cu_perceive.input.enter_text", side_effect=lambda t, via="paste": calls.append(f"type:{t}")), \
+                mock.patch("cu_perceive.input.clear_field_for_replace",
+                           side_effect=lambda **k: calls.append("clear") or {
+                               "ok": True, "method": "value_pattern", "empty": True, "verified": True}), \
                 mock.patch("cu_perceive.windows.window_at_point", return_value=77), \
                 mock.patch("cu_perceive.windows.foreground_matches", return_value=(True, 77)), \
                 mock.patch("time.sleep"):
             out = run_chain(_screen_frame(), parse_steps(norm="491,63", text="URL", key="enter", replace=True), dry_run=False)
         self.assertTrue(out["ok"], out)
-        self.assertEqual(calls, ["click", "key:ctrl+a", "type:URL", "key:enter"])
+        self.assertEqual(calls, ["click", "clear", "type:URL", "key:enter"])
+        self.assertEqual(out["steps"][1]["replace_clear"]["method"], "value_pattern")
 
 
 class TestActUiaMissing(_TmpDir):
@@ -230,7 +237,8 @@ class TestTruthfulClickCount(unittest.TestCase):
 
     def test_dry_run_reports_plan(self):
         out = run_chain(_screen_frame(), parse_steps(norm="1,1;2,2"), dry_run=True)
-        self.assertEqual(out["foreground_click_count"], 2)
+        self.assertEqual(out["foreground_click_count"], 0)
+        self.assertFalse(out["foreground_used"])
         self.assertEqual(out["planned_foreground_click_count"], 2)
 
     def test_go_counts_clicks_sent(self):

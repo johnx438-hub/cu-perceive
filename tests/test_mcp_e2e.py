@@ -142,6 +142,8 @@ class TestMcpServerE2E(unittest.TestCase):
         act = next(t for t in res["result"]["tools"] if t["name"] == "act")
         self.assertIn("replace", act["inputSchema"]["properties"])
         self.assertIn("focus", act["inputSchema"]["properties"])
+        self.assertIn("via", act["inputSchema"]["properties"])
+        self.assertIn("ime", act["inputSchema"]["properties"])
 
     def test_perceive_image_then_dry_run_act(self):
         content = self._call("perceive_window", {"image": str(self.png), "map_inline": True})
@@ -156,9 +158,11 @@ class TestMcpServerE2E(unittest.TestCase):
         self.assertTrue(act["ok"], act)
         self.assertTrue(act["dry_run"])
         vias = [s["via"] for s in act["steps"]]
-        self.assertEqual(vias, ["norm", "key", "type"])
-        self.assertEqual(act["steps"][1]["key"], "ctrl+a")
-        self.assertEqual(act["foreground_click_count"], 1)
+        self.assertEqual(vias, ["norm", "type"])
+        self.assertTrue(act["steps"][1]["replace"])
+        self.assertEqual(act["steps"][1]["replace_via"], "clear_edit")
+        self.assertEqual(act["foreground_click_count"], 0)
+        self.assertEqual(act["planned_foreground_click_count"], 1)
         self.assertEqual(act["stamp_source"], "explicit")
 
         keys = json.loads(self._call("act", {"stamp": payload["stamp"], "text": "hi", "go": True})[0]["text"])

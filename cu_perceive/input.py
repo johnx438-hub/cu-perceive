@@ -1,7 +1,9 @@
-"""Low-level mouse/keyboard. Unicode type, drag, wheel. No IME."""
+"""Low-level mouse/keyboard. Unicode type, drag, wheel. IME switching lives in ime.py."""
 from __future__ import annotations
 
 import ctypes
+import json
+import os
 import sys
 import time
 from ctypes import wintypes
@@ -337,45 +339,248 @@ def _vk_up(vk: int) -> None:
     _send(INPUT(type=INPUT_KEYBOARD, union=INPUT_UNION(ki=KEYBDINPUT(vk, 0, KEYEVENTF_KEYUP, 0, 0))))
 
 
-def clipboard_get() -> str | None:
-    import win32clipboard
-    import win32con
-    win32clipboard.OpenClipboard()
+class ClipboardError(RuntimeError):
+    """A clipboard read/write failed. Callers turn this into ok=false; it must not kill the process."""
+
+    def __init__(self, message: str, *, reason: str = "clipboard_failed"):
+        super().__init__(message)
+        self.reason = reason
+
+
+CLIPBOARD_OPEN_TRIES = 8
+CLIPBOARD_OPEN_BASE_S = 0.02
+CLIPBOARD_OPEN_MAX_S = 0.20
+# pywin32 311 SetClipboardData(CF_UNICODETEXT, str) treats a digit-only str as a HANDLE.
+# "4" heap-corrupts the process (0xC0000374). Never pass str; pass UTF-16-LE + NUL.
+
+
+def unicode_clipboard_bytes(text: str) -> bytes:
+    """CF_UNICODETEXT bytes: UTF-16-LE and a terminating NUL wchar."""
+    return str(text).encode("utf-16-le") + b"\x00\x00"
+
+
+def _clipboard_backoff(attempt: int) -> None:
+    time.sleep(min(CLIPBOARD_OPEN_MAX_S, CLIPBOARD_OPEN_BASE_S * (2 ** max(0, int(attempt)))))
+
+
+def _close_clipboard(win32clipboard) -> None:
     try:
-        if win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
-            return win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
-        return None
-    finally:
         win32clipboard.CloseClipboard()
+    except Exception:
+        pass
+
+
+def _set_unicode_clipboard(win32clipboard, win32con, text: str) -> None:
+    """Place Unicode text on an open clipboard. str is never given to SetClipboardData."""
+    payload = unicode_clipboard_bytes(text)
+    try:
+        win32clipboard.SetClipboardData(win32con.CF_UNICODETEXT, payload)
+    except TypeError:
+        setter = getattr(win32clipboard, "SetClipboardText", None)
+        if setter is None:
+            raise
+        setter(str(text), win32con.CF_UNICODETEXT)
+
+
+def _with_open_clipboard(fn, *, tries: int = CLIPBOARD_OPEN_TRIES):
+    """OpenClipboard with backoff. Retries access-denied races. Raises ClipboardError."""
+    import win32clipboard
+
+    last: Exception | None = None
+    attempts = max(1, int(tries))
+    for i in range(attempts):
+        opened = False
+        try:
+            win32clipboard.OpenClipboard(None)
+            opened = True
+            return fn(win32clipboard)
+        except ClipboardError:
+            raise
+        except Exception as e:
+            last = e
+            if i + 1 >= attempts:
+                break
+        finally:
+            if opened:
+                _close_clipboard(win32clipboard)
+        _clipboard_backoff(i)
+    raise ClipboardError(f"clipboard operation failed: {last}")
+
+
+def clipboard_set_inprocess(text: str) -> None:
+    """Set CF_UNICODETEXT in this process. Raises ClipboardError. Used by the helper child and tests."""
+    import win32con
+
+    def write(cb) -> None:
+        cb.EmptyClipboard()
+        _set_unicode_clipboard(cb, win32con, "" if text is None else str(text))
+
+    _with_open_clipboard(write)
+
+
+def clipboard_get_inprocess() -> str | None:
+    """CF_UNICODETEXT, or None when that format is not on the clipboard. Raises ClipboardError."""
+    import win32con
+
+    def read(cb):
+        if not cb.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
+            return None
+        data = cb.GetClipboardData(win32con.CF_UNICODETEXT)
+        if data is None:
+            return None
+        if isinstance(data, bytes):
+            return data.decode("utf-16-le", "replace").rstrip("\x00")
+        return str(data)
+
+    return _with_open_clipboard(read)
+
+
+def _clipboard_inprocess(op: str, text: str | None) -> dict:
+    try:
+        if op == "get":
+            return {"ok": True, "text": clipboard_get_inprocess()}
+        if op == "set":
+            clipboard_set_inprocess("" if text is None else str(text))
+            return {"ok": True}
+        return {"ok": False, "reason": "clipboard_failed", "error": f"bad clipboard op {op!r}"}
+    except ClipboardError as e:
+        return {"ok": False, "reason": e.reason, "error": str(e)}
+    except Exception as e:
+        return {"ok": False, "reason": "clipboard_failed", "error": f"{type(e).__name__}: {e}"}
+
+
+def _parse_clipboard_stdout(raw: bytes) -> dict | None:
+    text = (raw or b"").decode("utf-8", "replace").strip()
+    if not text:
+        return None
+    try:
+        data = json.loads(text.splitlines()[-1])
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _clipboard_subprocess(op: str, text: str | None) -> dict:
+    """Run the clipboard op in a child so a native fault (heap corruption) cannot kill the server."""
+    import subprocess
+
+    payload = json.dumps({"op": op, "text": text}, ensure_ascii=False).encode("utf-8")
+    env = os.environ.copy()
+    env["CU_PERCEIVE_CLIPBOARD_CHILD"] = "1"
+    kwargs: dict = {
+        "input": payload,
+        "capture_output": True,
+        "timeout": 12,
+        "env": env,
+    }
+    if sys.platform == "win32":
+        kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+    try:
+        proc = subprocess.run([sys.executable, "-m", "cu_perceive.clipboard_worker"], **kwargs)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "reason": "clipboard_failed", "error": "clipboard helper timed out"}
+    except Exception as e:
+        return {"ok": False, "reason": "clipboard_failed", "error": f"clipboard helper failed to start: {e}"}
+    parsed = _parse_clipboard_stdout(proc.stdout or b"")
+    if proc.returncode != 0 or parsed is None:
+        if parsed is not None and not parsed.get("ok"):
+            parsed.setdefault("reason", "clipboard_failed")
+            return parsed
+        err = (proc.stderr or b"").decode("utf-8", "replace").strip()[-400:]
+        detail = f"clipboard helper exited {proc.returncode}"
+        if err:
+            detail = f"{detail}: {err}"
+        return {"ok": False, "reason": "clipboard_failed", "error": detail}
+    if not parsed.get("ok"):
+        parsed.setdefault("reason", "clipboard_failed")
+    return parsed
+
+
+def clipboard_rpc(op: str, text: str | None = None) -> dict:
+    """Clipboard get/set that always returns {ok: bool}. A native crash stays in the helper process."""
+    child = os.environ.get("CU_PERCEIVE_CLIPBOARD_CHILD") == "1"
+    inproc = child or os.environ.get("CU_PERCEIVE_CLIPBOARD_INPROCESS") == "1"
+    if inproc:
+        return _clipboard_inprocess(op, text)
+    return _clipboard_subprocess(op, text)
+
+
+def clipboard_get() -> str | None:
+    """Best-effort Unicode clipboard read. Raises ClipboardError on failure (does not crash)."""
+    got = clipboard_rpc("get")
+    if not got.get("ok"):
+        raise ClipboardError(got.get("error") or "clipboard_get failed", reason=got.get("reason") or "clipboard_failed")
+    return got.get("text")
 
 
 def clipboard_set(text: str) -> None:
-    import win32clipboard
-    import win32con
-    win32clipboard.OpenClipboard()
-    try:
-        win32clipboard.EmptyClipboard()
-        win32clipboard.SetClipboardData(win32con.CF_UNICODETEXT, text)
-    finally:
-        win32clipboard.CloseClipboard()
+    """Best-effort Unicode clipboard write. Raises ClipboardError on failure (does not crash)."""
+    put = clipboard_rpc("set", "" if text is None else str(text))
+    if not put.get("ok"):
+        raise ClipboardError(put.get("error") or "clipboard_set failed", reason=put.get("reason") or "clipboard_failed")
 
 
-def paste_text(text: str, restore: bool = True) -> dict:
-    """Put text on clipboard, Ctrl+V, optionally put the old clip back."""
-    old = clipboard_get() if restore else None
-    clipboard_set(text)
-    time.sleep(0.05)
+def _ctrl_v() -> None:
     _vk_down(VK["ctrl"])
     time.sleep(0.02)
-    tap_key("v") if False else None
     _send(INPUT(type=INPUT_KEYBOARD, union=INPUT_UNION(ki=KEYBDINPUT(0x56, 0, 0, 0, 0))))
     _send(INPUT(type=INPUT_KEYBOARD, union=INPUT_UNION(ki=KEYBDINPUT(0x56, 0, KEYEVENTF_KEYUP, 0, 0))))
     time.sleep(0.02)
     _vk_up(VK["ctrl"])
     time.sleep(0.08)
-    if restore and old is not None:
-        clipboard_set(old)
-    return {"ok": True, "via": "clipboard", "n": len(text), "restored": bool(restore and old is not None)}
+
+
+def paste_text(text: str, restore: bool = True) -> dict:
+    """Clipboard + Ctrl+V. Saves and restores the previous Unicode text, best effort.
+
+    Every failure returns ok=false and reason=clipboard_failed. A native clipboard fault
+    is contained in the helper process and comes back as that result, not a dead server.
+    """
+    text = "" if text is None else str(text)
+    saved = None
+    save_ok = False
+    save_error = None
+    if restore:
+        got = clipboard_rpc("get")
+        if got.get("ok"):
+            saved = got.get("text")
+            save_ok = True
+        else:
+            save_error = got.get("error") or "could not read the clipboard"
+    put = clipboard_rpc("set", text)
+    if not put.get("ok"):
+        return {
+            "ok": False,
+            "via": "clipboard",
+            "reason": put.get("reason") or "clipboard_failed",
+            "error": put.get("error") or "clipboard_set failed",
+            "n": len(text),
+            "restored": False,
+        }
+    send_error = None
+    try:
+        time.sleep(0.05)
+        _ctrl_v()
+    except Exception as e:
+        send_error = e
+    restored = False
+    restore_error = None
+    # Best effort: put the user's previous Unicode text back. Non-text clipboard data
+    # cannot be saved this way. A failed restore does not undo a paste that already landed.
+    if restore and save_ok and saved is not None:
+        back = clipboard_rpc("set", saved)
+        restored = bool(back.get("ok"))
+        if not restored:
+            restore_error = back.get("error") or "could not restore the clipboard"
+    out = {"ok": send_error is None, "via": "clipboard", "n": len(text), "restored": restored}
+    if send_error is not None:
+        out["reason"] = "clipboard_failed"
+        out["error"] = f"paste failed: {send_error}"
+    if save_error:
+        out["clipboard_save_error"] = save_error
+    if restore_error:
+        out["clipboard_restore_error"] = restore_error
+    return out
 
 
 def type_keys(text: str, gap: float = 0.012) -> dict:
@@ -383,9 +588,218 @@ def type_keys(text: str, gap: float = 0.012) -> dict:
 
 
 def enter_text(text: str, via: str = "paste") -> dict:
+    """Paste (default) or per-character SendInput unicode (via='keys'). Never raises for clipboard errors."""
     if via == "keys":
-        return type_text(text)
+        try:
+            result = type_text(text)
+        except Exception as e:
+            return {"ok": False, "reason": "input_failed", "error": str(e), "via": "keys"}
+        result["via"] = "keys"
+        return result
     return paste_text(text)
+
+
+# Classic WinForms TextBox ignores Ctrl+A. Clear with ValuePattern, EM_SETSEL, or a key chord.
+EM_SETSEL = 0x00B1
+WM_CLEAR = 0x0303
+WM_GETTEXTLENGTH = 0x000E
+_EDIT_CLASS_MARKERS = ("edit", "richedit")
+
+
+def _class_is_edit(class_name: str | None) -> bool:
+    name = (class_name or "").lower()
+    return any(mark in name for mark in _EDIT_CLASS_MARKERS)
+
+
+def _send_message_w(hwnd: int, msg: int, wparam: int, lparam: int) -> int:
+    if user32 is None:
+        raise OSError("SendMessage needs Windows")
+    user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    user32.SendMessageW.restype = wintypes.LPARAM
+    return int(user32.SendMessageW(int(hwnd), int(msg), int(wparam), int(lparam)))
+
+
+def _gettext_length(hwnd: int) -> int | None:
+    try:
+        return int(_send_message_w(int(hwnd), WM_GETTEXTLENGTH, 0, 0))
+    except Exception:
+        return None
+
+
+def _window_class_name(hwnd: int) -> str:
+    if user32 is None or not hwnd:
+        return ""
+    user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.GetClassNameW.restype = ctypes.c_int
+    buf = ctypes.create_unicode_buffer(256)
+    n = user32.GetClassNameW(int(hwnd), buf, 256)
+    return buf.value if n else ""
+
+
+def _foreground_focus_hwnd() -> int:
+    """hwndFocus of the foreground thread (GetGUIThreadInfo). 0 when it cannot be read."""
+    if user32 is None:
+        return 0
+
+    class GUITHREADINFO(ctypes.Structure):
+        _fields_ = (
+            ("cbSize", wintypes.DWORD),
+            ("flags", wintypes.DWORD),
+            ("hwndActive", wintypes.HWND),
+            ("hwndFocus", wintypes.HWND),
+            ("hwndCapture", wintypes.HWND),
+            ("hwndMenuOwner", wintypes.HWND),
+            ("hwndMoveSize", wintypes.HWND),
+            ("hwndCaret", wintypes.HWND),
+            ("rcCaret", wintypes.RECT),
+        )
+
+    info = GUITHREADINFO()
+    info.cbSize = ctypes.sizeof(GUITHREADINFO)
+    user32.GetGUIThreadInfo.argtypes = [wintypes.DWORD, ctypes.POINTER(GUITHREADINFO)]
+    user32.GetGUIThreadInfo.restype = wintypes.BOOL
+    if not user32.GetGUIThreadInfo(0, ctypes.byref(info)):
+        return 0
+    return int(info.hwndFocus or 0)
+
+
+def _discover_focused_edit() -> tuple[object | None, int, str]:
+    """(ValuePattern or None, edit hwnd, class name). Best effort; never raises."""
+    pattern = None
+    hwnd = 0
+    try:
+        import uiautomation as auto
+
+        ctrl = auto.GetFocusedControl()
+        if ctrl is not None:
+            try:
+                hwnd = int(getattr(ctrl, "NativeWindowHandle", 0) or 0)
+            except Exception:
+                hwnd = 0
+            try:
+                pattern = ctrl.GetPattern(auto.PatternId.ValuePattern)
+            except Exception:
+                pattern = None
+    except Exception:
+        pattern = None
+    if not hwnd:
+        try:
+            hwnd = _foreground_focus_hwnd()
+        except Exception:
+            hwnd = 0
+    class_name = ""
+    try:
+        class_name = _window_class_name(hwnd) if hwnd else ""
+    except Exception:
+        class_name = ""
+    return pattern, hwnd, class_name
+
+
+def _pattern_value(pattern) -> str | None:
+    try:
+        value = getattr(pattern, "Value", None)
+    except Exception:
+        return None
+    if value is None:
+        return None
+    return str(value)
+
+
+def clear_field_for_replace(
+    *,
+    pattern=None,
+    hwnd: int = 0,
+    class_name: str | None = None,
+    send_message=None,
+    text_length=None,
+    allow_keyboard: bool | None = None,
+    discover: bool | None = None,
+) -> dict:
+    """Empty the focused edit before a replace-type.
+
+    WinForms TextBox ignores Ctrl+A, so this does not send it. Order:
+    ValuePattern.SetValue('') -> EM_SETSEL(0,-1)+WM_CLEAR on an Edit hwnd ->
+    Home, Shift+End, Delete. When the field can be read back and is still
+    non-empty, ok=false and reason=replace_failed (the caller must not type).
+    """
+    notes: list[str] = []
+    if discover is None:
+        discover = pattern is None and not hwnd and send_message is None and text_length is None and class_name is None
+    if discover:
+        pattern, hwnd, class_name = _discover_focused_edit()
+        if send_message is None and user32 is not None:
+            send_message = _send_message_w
+        if text_length is None and user32 is not None:
+            text_length = _gettext_length
+    if allow_keyboard is None:
+        allow_keyboard = user32 is not None
+
+    if pattern is not None:
+        try:
+            pattern.SetValue("")
+            current = _pattern_value(pattern)
+            if current == "":
+                return {"ok": True, "method": "value_pattern", "empty": True, "verified": True}
+            if current is not None:
+                notes.append(f"ValuePattern.SetValue left {current!r}")
+        except Exception as e:
+            notes.append(f"ValuePattern.SetValue failed: {e}")
+
+    if hwnd and send_message is not None and _class_is_edit(class_name):
+        try:
+            send_message(int(hwnd), EM_SETSEL, 0, -1)
+            send_message(int(hwnd), WM_CLEAR, 0, 0)
+            n = text_length(int(hwnd)) if text_length is not None else None
+            if n == 0:
+                return {"ok": True, "method": "em_setsel", "empty": True, "verified": True}
+            if n is not None:
+                notes.append(f"EM_SETSEL left {n} chars")
+        except Exception as e:
+            notes.append(f"EM_SETSEL failed: {e}")
+
+    if not allow_keyboard:
+        return {
+            "ok": True,
+            "method": "unavailable",
+            "empty": None,
+            "verified": False,
+            "notes": notes,
+        }
+
+    try:
+        tap_key("home")
+        tap_combo("shift+end")
+        tap_key("delete")
+    except Exception as e:
+        return {
+            "ok": False,
+            "reason": "replace_failed",
+            "error": f"keyboard clear failed: {e}",
+            "notes": notes,
+            "empty": None,
+            "verified": False,
+        }
+
+    current = _pattern_value(pattern) if pattern is not None else None
+    n = None
+    if text_length is not None and hwnd:
+        try:
+            n = text_length(int(hwnd))
+        except Exception:
+            n = None
+    if current == "" or n == 0:
+        return {"ok": True, "method": "home_shift_end", "empty": True, "verified": True, "notes": notes}
+    if (current not in (None, "")) or (n not in (None, 0)):
+        return {
+            "ok": False,
+            "reason": "replace_failed",
+            "error": "field still has text after ValuePattern, EM_SETSEL, and Home+Shift+End+Delete",
+            "method": "home_shift_end",
+            "empty": False,
+            "verified": True,
+            "notes": notes,
+        }
+    return {"ok": True, "method": "home_shift_end", "empty": None, "verified": False, "notes": notes}
 
 MOUSEEVENTF_RIGHTDOWN = 0x0008
 MOUSEEVENTF_RIGHTUP = 0x0010

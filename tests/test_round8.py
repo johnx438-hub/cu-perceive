@@ -126,7 +126,8 @@ class TestCompact(unittest.TestCase):
             "stamp": "s", "items": [{"id": 1, "text": "OK", "kind": "ocr", "box": [1, 2, 3, 4], "center": [2, 3],
                                      "norm": [100, 200, 300, 400], "screen": [5, 6]}],
             "uia": True, "uia_count": 1, "uia_nodes": [{"id": 1, "name": "File", "control_type": "MenuItem",
-                                           "norm": [0, 0, 100, 50], "clickable": True, "patterns": ["Invoke"]}],
+                                           "norm": [0, 0, 100, 50], "clickable": True, "patterns": ["Invoke"],
+                                           "value": "XS-0001"}],
             "source": "image", "coord_space": "screen", "hwnd": None, "png": "p", "json": "j", "map": None,
         }
         with mock.patch("cu_perceive.core.perceive", return_value=out):
@@ -135,7 +136,8 @@ class TestCompact(unittest.TestCase):
         self.assertTrue(payload["compact"])
         self.assertEqual(payload["items"], [{"id": 1, "text": "OK", "kind": "ocr", "center_norm": [200, 300]}])
         self.assertEqual(payload["uia_nodes"],
-                         [{"id": 1, "name": "File", "control_type": "MenuItem", "center_norm": [50, 25]}])
+                         [{"id": 1, "name": "File", "control_type": "MenuItem", "center_norm": [50, 25],
+                           "value": "XS-0001"}])
 
     def test_default_is_full(self):
         out = {"stamp": "s", "items": [{"id": 1, "text": "OK", "kind": "ocr", "norm": [1, 2, 3, 4]}],

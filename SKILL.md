@@ -74,15 +74,16 @@ OCR / UIA / YOLO 是可选包（`[ocr]` / `[uia]` / `[yolo]`），第一次用�
    - **E3 同 stamp 多步** — 稳定 UI：一次 `perceive` 后用**同一 stamp** 规划多步 `act`（先 dry-run 列出，用户 一次批准再串行 `--go`）。已有 `--steps "norm:a:b,norm:c:d,..."` 或 `--norm "a,b;c,d"` 即可链式；不要另写点击引擎。动画/弹层场景不要硬套。
      - 每次 act（含 dry）返回 `stamp_check` / `stamp_reuse` / `step_count`。`--go` 时 stamp 坏了（窗挪了、最小化、hwnd 没了、**hwnd 被别的进程复用 / pid 或进程创建时间不符 / 旧 stamp 没有 identity**、超 `--max-age`、或 `verify_light` ROI stamp）→ `ok=false` **不点**，强制重 perceive。`--go` 时每一步执行前还会再核一次 identity。
      - **窗口没了或 identity 不符（hwnd 复用 / pid / 创建时间 / 旧 stamp 无 identity）时 dry-run 也 `ok=false`。** 其它坏 stamp（挪了、改大小、超龄）dry-run 仍可 ok，但顶层总有 `stamp_ok`，坏时有 `stamp_error`；要 dry 也 fail-closed 加 `--strict-stamp`。
-     - `--go` 时 `foreground_click_count` 只数真正发出的 SendInput 点击（被拒为 0）；计划值在 `planned_foreground_click_count`。
+     - `--go` 时 `foreground_click_count` 只数真正发出的 SendInput 点击（被拒为 0）；dry-run 也是 0，计划值在 `planned_foreground_click_count`。同一进程里并发的 `go=true` 会排队，不会交错。live 结果带 `new_windows`（这次新出现的顶层窗 `{hwnd, title, class}`）和 `after`（结束后的前台窗）。
      - **ROI / `verify_light` stamp 只用于点后复验，不能拿来多步规划**（须全窗 stamp）。
      - CLI：`act --max-age SEC`（可选）、`act --strict-stamp`。MCP：`max_age_sec` / `strict_stamp` 已透传。
 
    - **实验 `method=post|uia|auto`**：`post`=HWND PostMessage 单点；`uia`=UIA Invoke/Toggle/Expand/Select（无 pattern 则 fail-closed，不退 post/input）；`auto`=命中 stamp 上可 Invoke 等 → uia，否则 input（永不选 post；软 miss 同点再探一次；dry-run 报 `chosen_method` + `uia_reprobe`/`uia_first` + `foreground_used` / `foreground_click_count`）。均仅 left 单点 norm/xy/ids；drag/path 等请显式 `method=input`。没装 `uia` extra 时 `--method uia` 退出码 3 并给 `missing_extra` / `install`（同 `perceive --uia`）；`auto` 退回 input 并在 `warnings` 里说明。
    - 链修饰键：`--hold-key ctrl`（MCP `hold_key`，接受 `ctrl`/`control`/`shift`/`alt`）在链的第一个点击/拖/滚时按下，链结束（含失败）再松开；同一次调用里必须有 norm/xy/ids 点击、拖动或滚轮（只有 hover 也不行），否则 `reason: hold_key_needs_pointer_step`（组合键用 `--key ctrl+pagedown`）。`--go` 时只在 stamp 窗在前台时才按（见下方检查），不在前台加 `--focus`。不是 `--hold`（那是鼠标长按）。Explorer/Office/列表多选：`--hold-key ctrl` + 多个 `--norm`/`--ids`，界面要落稳再加 `--gap`。Shift+click 头尾可以两次点击、不设 hold_key；需要时再用 `--hold-key shift`。
    - 会动的选中（动画/弹起）用 `--gap 0.4`；按钮、丝带、浏览器标签保持默认 0.12，不要全局加大。
-   - 键：`--type` / `--text` 剪贴板+Ctrl+V 并还原（MCP 字段是 `text`）；`--key` 可写多次并按出现顺序执行，也可 `ctrl+a,enter`。键名：`a`-`z`、`0`-`9`、`f1`-`f24`、`num0`-`num9`、`enter` `tab` `esc` `space` `backspace` `delete` `insert` `home` `end` `pageup` `pagedown` `up` `down` `left` `right` `ctrl` `shift` `alt` `win` `menu` `capslock` `numlock` `scrolllock` `printscreen` `pause`、标点 `comma` `period` `minus` `equals` `semicolon` `slash` `backslash` `quote` `backquote` `bracketleft` `bracketright`、`volumeup` `volumedown` `volumemute`。不分大小写，`_`/`-` 忽略，`page_down`/`PgDn`/`Return`/`Escape`/`del` 也认；`+` 两边的空格忽略（`ctrl + end`），`page down` 算一个键，`tab enter` 是两个。未知键名连 dry-run 都 `ok:false` + `reason: unknown_key` + `valid_keys`。
-   - **已有字的输入框用 `--replace`（MCP `replace=true`）。** 它在每次 `--type` 前先按 ctrl+a，粘贴就替换原文；不加时 click+type 会插到光标处（实测 about:blank 变成 `chrome://blankhttps//...`）。一次做完：`act --norm 491,63 --type URL --replace --key enter --go`。
+   - 键：`--type` / `--text` 默认剪贴板+Ctrl+V，并尽量还原原来的 Unicode 剪贴板（MCP 字段是 `text`，`via=paste|keys`；`keys` / `--slow-type` / `--via keys` 是逐字符 SendInput，表格没进编辑态时 Ctrl+V 会被丢掉，用这个）。剪贴板失败返回 `ok:false` + `reason:clipboard_failed`，操作在子进程里，原生崩溃不会打死 MCP 服务。`--key` 可写多次并按出现顺序执行，也可 `ctrl+a,enter`。键名：`a`-`z`、`0`-`9`、`f1`-`f24`、`num0`-`num9`、`enter` `tab` `esc` `space` `backspace` `delete` `insert` `home` `end` `pageup` `pagedown` `up` `down` `left` `right` `ctrl` `shift` `alt` `win` `menu` `capslock` `numlock` `scrolllock` `printscreen` `pause`、标点 `comma` `period` `minus` `equals` `semicolon` `slash` `backslash` `quote` `backquote` `bracketleft` `bracketright`、`volumeup` `volumedown` `volumemute`。不分大小写，`_`/`-` 忽略，`page_down`/`PgDn`/`Return`/`Escape`/`del` 也认；`+` 两边的空格忽略（`ctrl + end`），`page down` 算一个键，`tab enter` 是两个。未知键名连 dry-run 都 `ok:false` + `reason: unknown_key` + `valid_keys`。
+   - **已有字的输入框用 `--replace`（MCP `replace=true`）。** 它在每次 `--type` 前清空焦点上的 Edit：先 ValuePattern.SetValue("")，不行就对 WinForms Edit 发 EM_SETSEL+WM_CLEAR，再不行就 Home、Shift+End、Delete。**不发 Ctrl+A**（经典 TextBox 不认，会变成追加，`WEB-02WEB-02`）。读得回内容且仍非空则 `reason:replace_failed`，不再打字。不加 replace 时 click+type 会插到光标处。一次做完：`act --norm 491,63 --type URL --replace --key enter --go`。
+   - **输入法**：结果里的 `ime` 是目标窗口线程的键盘布局（`hkl_hex` / `ime_open` / `ime_active`）。微软拼音这类 IME 开着时，按键会被吞掉但每步仍是 `tapped:true`，这时有 `ime_active` 警告。`ime=off`（CLI `--ime off`）只在这一次 act 里把**那个窗口**切到英文并关掉 IME，结束再还原，不改系统默认。
    - **被挡住的窗口可以 perceive，但 `--go` 不会把输入送进别的窗口。** 窗口 stamp 上每一步发送前都核：点击 / 拖动起点和终点 / 滚轮的那个屏幕点，最上层窗口必须是 stamp 窗（或它拥有的对话框、弹窗、菜单），否则 `ok=false` + `pointer_refused_step` + `point_window`（真正在那里的 hwnd 和标题）；每个 `--type`/`--key` 前 stamp 窗（或它拥有的窗，比如刚点开的对话框）必须在前台（点击之后也核），否则 `keyboard_refused_step`。`--hold-key` 也算按键：在第一个点击/拖/滚的点通过后、且 stamp 窗（或它拥有的窗）在前台时才按下，否则 `hold_key_refused_step`，一个键都不按。被拒那步及之后都不发。要先把它拉到前台加 `--focus`（MCP `focus=true`）：拉前台后再核 identity 和点/前台，仍被挡（比如置顶窗）照样拒绝。dry-run 的 `occluded_points` 列出现在被挡的点并给警告。只管 `method=input` 和 auto 里选了 input 的步；uia / post 不变。屏幕 stamp 没有窗口可核：键必须同一次 act 里先点，且只在那次点到的窗口在前台时发送。
    - **ids 不是静默聚焦**：同一次 `act` 里 `ids`/`norm`/`xy` 会先真正点击，再 `text` 粘贴。点的必须是可编辑框本身；点到标签/按钮再 type 不会自动聚焦输入框。`scroll`+位置会变成 hover 不点击，此时同链 `text` 也不会靠 ids 聚焦。
    - `--button right`；`--hover`；`--scroll down:3` / `up:3`（优先这样写；MCP `scroll` 可以是数字或字符串）。裸数字带符号：负数 = 往下（页面底部），**正数 = 往上**，裸正数会给 warning
@@ -112,8 +113,9 @@ OCR / UIA / YOLO 是可选包（`[ocr]` / `[uia]` / `[yolo]`），第一次用�
 | 滚 | `--scroll -3` / `down:3` | `scroll`: `-3` / `down:3` / `up:3` |
 | 长按 | `--hold 1.8` | `hold`（秒，配合 xy/norm/ids） |
 | 链修饰键 | `--hold-key ctrl` | `hold_key`（`ctrl`/`control`/`shift`/`alt`，不是鼠标长按） |
-| 打字 | `--type` / `--text` | `text` |
-| 先全选再打字 | `--replace` | `replace=true` |
+| 打字 | `--type` / `--text` / `--via paste\|keys` | `text` + `via=paste\|keys`（默认 paste） |
+| 清空再打字 | `--replace` | `replace=true`（ValuePattern / EM_SETSEL / Home+Shift+End，不是 Ctrl+A） |
+| 输入法 | `--ime off` | `ime=off`（仅这一次，之后还原；结果里有 `ime` / `ime_active`） |
 | 读哪张图 | `map` | `map`（默认 jpeg-1280 内联，`map_inline=false` 只路径） |
 | 出图目录 | `--out` | `out_dir`。写进 WSL workspace 用 UNC `\\wsl.localhost\Ubuntu\home\<user>\...`，不要 `/home/<user>`（会落到 `C:\home\<user>`）。`/mnt/c/...` 仍可用。另有 `map_wsl` |
 | 拉前台再抓 | `--focus` | `focus=true`（默认 false，不抢前台） |
@@ -145,7 +147,7 @@ MCP 默认带压缩图；要全分辨率走磁盘路径。CLI 仍用 map 路径�
 - 桌面 `act`：`dry_run=true` 优先于 `go=true`（只做 dry run，带 warning）；只传 `dry_run=false` 不会发送，要发送就传 `go=true`。
 - 浏览器写操作（`browser_act`，以及 `browser_session` 的 start/stop、`browser_tabs` 的 create/close/select/borrow/return）默认执行。`dry_run=true` 只返回计划的 `bsk` 命令。`go` 不拦。要恢复「默认 dry-run、`go=true` 才执行」，设 `CU_PERCEIVE_BSK_REQUIRE_GO=1`。
 - 坐标可以是字符串 `"640,500"` / `"177,752;500,200"`，也可以是数组 `norm=[640,500]`、`xy=[[10,20],[30,40]]`。给 4 个数（OCR item / UIA node 的 `norm` 框 left,top,right,bottom）就点框中心并带 warning。鼠标键是 `button="left|right|middle"`，没有 `click=`。`step_px` 只管拖动平滑度，跟滚动距离无关。
-- `perceive_window(compact=true)` 只返回 `{id, text, kind, center_norm}`，`center_norm` 直接给 `act(norm=...)`。stamp 超过 120 秒会有 `stamp_stale` warning，要硬拒绝就传 `max_age_sec`。
+- `perceive_window(compact=true)` 的 item 是 `{id, text, kind, center_norm}`，UIA 节点同样短，但带 `value`（只读格子、标签、对话框正文都留着，过长会截断）。被别的 MDI 子窗挡住的节点不列出（`uia_occluded` 计数）。`center_norm` 直接给 `act(norm=...)`。stamp 超过 120 秒会有 `stamp_stale` warning，要硬拒绝就传 `max_age_sec`。
 - 参数里以 `_` 开头的键（如 `_meta`）直接忽略，不报错。
 - `scroll` 单位是滚轮格数（一格约三行），不是像素；超过 50 格按 50 格发，返回 `scroll_clamped: true` + warning。
 - OCR/YOLO 每次调用有超时（`CU_PERCEIVE_DETECT_TIMEOUT`，默认 30 秒，新 worker 第一次 3 倍）。超时就杀掉 worker 重开，perceive 照样返回 stamp，只是没有识别结果并带 warning。不开 ocr/yolo 的 perceive 不会等 worker。

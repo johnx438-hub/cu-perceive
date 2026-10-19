@@ -384,6 +384,27 @@ def public_element_info(
 
 UIA_MAX_NODES = 200
 UIA_MAX_DEPTH = 16
+UIA_VALUE_MAX = 120
+# Name/value nodes that are not already preferred (Text, DataItem, ...).
+# Kept so a text-only reader can see labels, message-box bodies, and grid cells,
+# without letting them crowd out buttons.
+UIA_CONTENT_MAX = 80
+
+# Read-only grid cells, lookup rows, labels, message text. Edit is already preferred.
+CONTENT_CONTROL_TYPES: frozenset[str] = frozenset(
+    {
+        "Text",
+        "TextControl",
+        "DataItem",
+        "DataItemControl",
+        "Document",
+        "DocumentControl",
+        "Edit",
+        "EditControl",
+        "ListItem",
+        "ListItemControl",
+    }
+)
 
 # Prefer these control types (with or without "Control" suffix).
 PREFERRED_CONTROL_TYPES: frozenset[str] = frozenset(
@@ -459,6 +480,41 @@ def _ctype_preferred(ctype: str) -> bool:
     return bool(ctype) and ctype in PREFERRED_CONTROL_TYPES
 
 
+def _ctype_base(ctype: str) -> str:
+    c = (ctype or "").strip()
+    if c.endswith("Control"):
+        return c[: -len("Control")]
+    return c
+
+
+def _ctype_content(ctype: str) -> bool:
+    if not ctype:
+        return False
+    if ctype in CONTENT_CONTROL_TYPES:
+        return True
+    return _ctype_base(ctype) in {"Text", "DataItem", "Document", "Edit", "ListItem"}
+
+
+def truncate_uia_value(value, limit: int = UIA_VALUE_MAX) -> str | None:
+    """ValuePattern text, capped so one cell cannot dominate the payload."""
+    if value is None:
+        return None
+    s = str(value).replace("\r\n", "\n").replace("\r", "\n")
+    cap = max(1, int(limit))
+    if len(s) <= cap:
+        return s
+    if cap <= 3:
+        return s[:cap]
+    return s[: cap - 3] + "..."
+
+
+def content_only_uia_node(control_type: str, patterns) -> bool:
+    """True for a name/value node that is not already kept as an action or preferred type."""
+    if pick_preferred_action(patterns) is not None or _ctype_preferred(control_type):
+        return False
+    return _ctype_content(control_type)
+
+
 def should_keep_uia_node(
     *,
     name: str,
@@ -467,8 +523,11 @@ def should_keep_uia_node(
     norm: list[int] | None,
     offscreen: bool = False,
     skip_empty_name: bool = False,
+    value: str | None = None,
+    content_kept: int = 0,
+    content_cap: int | None = UIA_CONTENT_MAX,
 ) -> bool:
-    """Filter for compact perceive --uia list (caps applied by caller)."""
+    """Filter for compact perceive --uia list (caps applied here for content-only nodes)."""
     if offscreen:
         return False
     if not norm or len(norm) != 4:
@@ -481,16 +540,109 @@ def should_keep_uia_node(
     if nx2 <= 0 or ny2 <= 0 or nx1 >= 1000 or ny1 >= 1000:
         return False
     name_s = (name or "").strip()
-    if skip_empty_name and not name_s:
+    value_s = (value or "").strip() if value is not None else ""
+    if skip_empty_name and not name_s and not value_s:
         return False
     has_pat = pick_preferred_action(patterns) is not None
-    if has_pat or _ctype_preferred(control_type):
+    preferred = _ctype_preferred(control_type)
+    if has_pat or preferred:
         # Still drop nameless panes even if somehow typed preferred? preferred types ok empty.
-        if not name_s and not has_pat and not _ctype_preferred(control_type):
+        if not name_s and not has_pat and not preferred:
             return False
         return True
-    # Non-preferred type without action pattern: skip (keeps payload bounded).
+    # Text / DataItem / readonly-looking content: keep when there is a name or a value.
+    if _ctype_content(control_type) and (name_s or value_s):
+        if content_cap is not None and int(content_kept) >= int(content_cap):
+            return False
+        return True
     return False
+
+
+def _runtime_id(control) -> tuple | None:
+    try:
+        rid = control.GetRuntimeId()
+    except Exception:
+        return None
+    if not rid:
+        return None
+    try:
+        return tuple(rid)
+    except TypeError:
+        return None
+
+
+def _same_uia(a, b) -> bool:
+    if a is b:
+        return True
+    ida, idb = _runtime_id(a), _runtime_id(b)
+    return bool(ida and idb and ida == idb)
+
+
+def _uia_is_descendant(ancestor, node, *, limit: int = 32) -> bool:
+    """True when ``node`` is under ``ancestor`` (a hit on a child is not occlusion)."""
+    cur = node
+    for _ in range(limit):
+        try:
+            parent = cur.GetParentControl()
+        except Exception:
+            return False
+        if parent is None:
+            return False
+        if _same_uia(parent, ancestor):
+            return True
+        cur = parent
+    return False
+
+
+def control_center_occluded(control, bbox, *, hit_at) -> bool:
+    """True when ElementFromPoint at the bbox center is some other control.
+
+    Used to drop UIA nodes that belong to an MDI child covered by another child.
+    ``hit_at(x, y)`` returns the topmost control or None. A failed hit-test is
+    not occlusion (the node stays). A hit on this control or its descendant stays.
+    """
+    if not bbox or len(bbox) < 4 or hit_at is None:
+        return False
+    left, top, right, bottom = (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
+    if right <= left or bottom <= top:
+        return False
+    cx = (left + right) // 2
+    cy = (top + bottom) // 2
+    try:
+        hit = hit_at(cx, cy)
+    except Exception:
+        return False
+    if hit is None:
+        return False
+    if _same_uia(hit, control) or _uia_is_descendant(control, hit):
+        return False
+    return True
+
+
+def read_control_value(control) -> tuple[str | None, bool | None]:
+    """(ValuePattern.Value truncated, IsReadOnly or None). Never raises."""
+    try:
+        auto = _auto()
+        pat = control.GetPattern(auto.PatternId.ValuePattern)
+    except Exception:
+        return None, None
+    if pat is None:
+        return None, None
+    value = None
+    readonly = None
+    try:
+        raw = pat.Value
+        if raw is not None:
+            value = truncate_uia_value(raw)
+    except Exception:
+        value = None
+    try:
+        flag = getattr(pat, "IsReadOnly", None)
+        if flag is not None:
+            readonly = bool(flag)
+    except Exception:
+        readonly = None
+    return value, readonly
 
 
 def _control_offscreen(control) -> bool:
@@ -569,9 +721,17 @@ def collect_uia_nodes(
     nodes: list[dict[str, Any]] = []
     visited = 0
     truncated = False
+    occluded_n = 0
+    content_kept = 0
+
+    def hit_at(x: int, y: int):
+        try:
+            return auto.ControlFromPoint(int(x), int(y))
+        except Exception:
+            return None
 
     def walk(ctrl, depth: int) -> None:
-        nonlocal truncated, visited
+        nonlocal truncated, visited, occluded_n, content_kept
         if truncated:
             return
         if depth > int(max_depth):
@@ -608,6 +768,8 @@ def collect_uia_nodes(
                 patterns = list_available_patterns(ctrl)
             except Exception:
                 patterns = []
+            value, readonly = read_control_value(ctrl)
+            content_only = content_only_uia_node(ctype, patterns)
             if should_keep_uia_node(
                 name=name,
                 control_type=ctype,
@@ -615,23 +777,36 @@ def collect_uia_nodes(
                 norm=norm,
                 offscreen=off,
                 skip_empty_name=skip_empty_name,
+                value=value,
+                content_kept=content_kept if content_only else 0,
             ):
-                preferred = pick_preferred_action(patterns)
-                node: dict[str, Any] = {
-                    "id": len(nodes) + 1,
-                    "name": name,
-                    "control_type": ctype,
-                    "norm": list(norm) if norm else None,
-                    "clickable": preferred is not None,
-                }
-                if patterns:
-                    node["patterns"] = patterns
-                if preferred:
-                    node["preferred_action"] = preferred
-                nodes.append(node)
-                if len(nodes) >= int(max_nodes):
-                    truncated = True
-                    return
+                # MDI children stacked under the active one still walk as on-screen.
+                # Drop a node whose center is covered by a different element.
+                if bbox is not None and control_center_occluded(ctrl, bbox, hit_at=hit_at):
+                    occluded_n += 1
+                else:
+                    preferred = pick_preferred_action(patterns)
+                    node: dict[str, Any] = {
+                        "id": len(nodes) + 1,
+                        "name": name,
+                        "control_type": ctype,
+                        "norm": list(norm) if norm else None,
+                        "clickable": preferred is not None,
+                    }
+                    if patterns:
+                        node["patterns"] = patterns
+                    if preferred:
+                        node["preferred_action"] = preferred
+                    if value is not None:
+                        node["value"] = value
+                    if readonly:
+                        node["readonly"] = True
+                    nodes.append(node)
+                    if content_only:
+                        content_kept += 1
+                    if len(nodes) >= int(max_nodes):
+                        truncated = True
+                        return
         except Exception:
             pass
         try:
@@ -659,10 +834,13 @@ def collect_uia_nodes(
         "uia_count": len(nodes),
         "uia_visited": visited,
         "uia_truncated": truncated,
+        "uia_occluded": occluded_n,
         "caps": {
             "max_nodes": int(max_nodes),
             "max_depth": int(max_depth),
             "skip_empty_name": bool(skip_empty_name),
+            "value_max": UIA_VALUE_MAX,
+            "content_max": UIA_CONTENT_MAX,
         },
     }
 

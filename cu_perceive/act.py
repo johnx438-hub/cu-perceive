@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -9,7 +10,10 @@ from .config import out_dir as _config_out_dir
 from .keys import split_key_list
 
 DEFAULT_OUT = _config_out_dir()
-REPLACE_SELECT_KEY = "ctrl+a"
+# go=true acts share one process-wide lock so parallel MCP calls cannot interleave SendInput.
+LIVE_ACT_LOCK = threading.Lock()
+_live_lock_state = threading.local()
+_ime_restore = threading.local()
 
 
 def read_frame(path: Path) -> dict:
@@ -425,6 +429,18 @@ def coerce_ids(ids) -> str | None:
     return s or None
 
 
+def normalize_input_via(raw) -> str:
+    """'paste' (clipboard + Ctrl+V) or 'keys' (SendInput KEYEVENTF_UNICODE per character)."""
+    if raw in (None, ""):
+        return "paste"
+    s = str(raw).strip().lower()
+    if s == "paste":
+        return "paste"
+    if s == "keys":
+        return "keys"
+    raise ValueError('via must be "paste" or "keys" (got %r)' % (raw,))
+
+
 def parse_steps(
     steps: str | None = None,
     ids: str | int | list | None = None,
@@ -443,9 +459,10 @@ def parse_steps(
     extras: list | None = None,
     uia_name: str | list | None = None,
     replace: bool = False,
+    input_via: str | None = None,
 ) -> list[dict]:
-    """Flat act fields -> ordered specs. replace=True puts a ctrl+a select-all before
-    every type step so the paste replaces the field's text instead of inserting at the caret."""
+    """Flat act fields -> ordered specs. replace=True marks each type step to clear the
+    edit first (ValuePattern / EM_SETSEL / Home+Shift+End), not Ctrl+A."""
     out: list[dict] = []
     xy, norm = coerce_points(xy), coerce_points(norm)
     drag, drag_norm = coerce_points(drag), coerce_points(drag_norm)
@@ -503,7 +520,7 @@ def parse_steps(
                 out.append({"kind": "type", "text": e.get("text") or "", "input_via": e.get("input_via") or "paste"})
     else:
         if text:
-            out.append({"kind": "type", "text": text, "input_via": "keys" if False else "paste"})
+            out.append({"kind": "type", "text": text, "input_via": "paste"})
         if key:
             for k in split_key_list(key):
                 out.append({"kind": "key", "key": k})
@@ -520,14 +537,15 @@ def parse_steps(
             n = n.strip()
             if n:
                 out.append({"kind": "uia_name", "query": n})
-    if replace:
-        with_select: list[dict] = []
+    if input_via not in (None, ""):
+        mode = normalize_input_via(input_via)
         for s in out:
             if s.get("kind") == "type":
-                with_select.append({"kind": "key", "key": REPLACE_SELECT_KEY, "replace": True})
+                s["input_via"] = mode
+    if replace:
+        for s in out:
+            if s.get("kind") == "type":
                 s["replace"] = True
-            with_select.append(s)
-        out = with_select
     if float(hold or 0) > 0:
         for s in out:
             if s.get("kind") in ("id", "xy", "norm", "uia_name"):
@@ -623,6 +641,7 @@ def plan_steps(frame: dict, specs: list[dict]) -> list[dict]:
             step = {"via": "type", "text": spec["text"], "input_via": spec.get("input_via") or "paste"}
             if spec.get("replace"):
                 step["replace"] = True
+                step["replace_via"] = "clear_edit"
             steps.append(step)
         elif kind == "key":
             from .keys import check_key_spec
@@ -1132,10 +1151,11 @@ def check_stamp(
 def apply_foreground_accounting(out: dict) -> None:
     """Mark SendInput / true-cursor usage on click steps and the act JSON.
 
-    Mutates out["steps"] (per-step foreground_used = planned) and sets top-level
-    planned_foreground_click_count. foreground_used / foreground_click_count are the
-    planned values on a dry run; on --go they start at 0/False and count only clicks
-    actually sent (_count_live_click), so a refused --go reports 0.
+    Mutates out["steps"] (per-step foreground_used = whether that click would use
+    SendInput) and sets planned_foreground_click_count. On a dry run nothing is
+    sent, so foreground_used / foreground_click_count are false / 0. On --go they
+    start at 0/False and count only clicks actually sent (_count_live_click), so a
+    refused --go reports 0.
     Only via in id/xy/norm count as clicks. Effective method is chosen_method when
     out["method"]=="auto" (missing chosen -> input); otherwise out["method"].
     input -> True; post/uia -> False.
@@ -1154,12 +1174,9 @@ def apply_foreground_accounting(out: dict) -> None:
         if used:
             count += 1
     out["planned_foreground_click_count"] = count
-    if out.get("dry_run", True):
-        out["foreground_used"] = count > 0
-        out["foreground_click_count"] = count
-    else:
-        out["foreground_used"] = False
-        out["foreground_click_count"] = 0
+    # Dry-run and not-yet-sent --go both report 0. The plan is planned_foreground_click_count.
+    out["foreground_used"] = False
+    out["foreground_click_count"] = 0
 
 
 def _count_live_click(out: dict) -> None:
@@ -1504,7 +1521,107 @@ def _implicit_stamp_error(frame: dict, stamp_source: str | None) -> str | None:
     )
 
 
-def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: bool = False, gap: float = 0.12, hold_key: str | None = None, method: str | None = None, max_age_sec: float | None = None, strict_stamp: bool = False, stamp_json_path: str | Path | None = None, origin_slop_px: int = 8, focus: bool = False, stamp_source: str | None = None) -> dict:
+def diff_new_windows(before: list[dict] | None, after: list[dict] | None) -> list[dict]:
+    """Top-level windows present in after but not before: {hwnd, title, class}."""
+    if before is None or after is None:
+        return []
+    seen: set[int] = set()
+    for w in before:
+        try:
+            seen.add(int(w.get("hwnd") or 0))
+        except (TypeError, ValueError):
+            continue
+    out: list[dict] = []
+    for w in after:
+        try:
+            hwnd = int(w.get("hwnd") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not hwnd or hwnd in seen:
+            continue
+        out.append({"hwnd": hwnd, "title": w.get("title") or "", "class": w.get("class") or ""})
+    return out
+
+
+def _snapshot_windows() -> list[dict] | None:
+    try:
+        from .windows import top_level_brief
+
+        return top_level_brief()
+    except Exception:
+        return None
+
+
+def _attach_new_windows(out: dict, before: list[dict] | None) -> None:
+    after = _snapshot_windows()
+    if before is not None and after is not None:
+        out["new_windows"] = diff_new_windows(before, after)
+    else:
+        out["new_windows"] = []
+    try:
+        from .windows import foreground_brief
+
+        fore = foreground_brief()
+    except Exception:
+        fore = None
+    if fore:
+        out["after"] = fore
+
+
+def _note_ime(out: dict, frame: dict, steps: list[dict], ime_mode: str | None) -> None:
+    """Record the target thread's layout. Warn when an IME would swallow keys."""
+    hwnd = (frame or {}).get("hwnd")
+    if not hwnd:
+        if ime_mode == "off":
+            out["warnings"] = (out.get("warnings") or []) + [
+                'ime=off needs a window stamp; this stamp has no hwnd, so the layout was not changed'
+            ]
+        return
+    from .ime import probe_ime
+
+    info = probe_ime(int(hwnd))
+    if not info.get("ok"):
+        return
+    out["ime"] = {k: info.get(k) for k in ("hkl_hex", "lang_id", "ime_open", "ime_active", "thread_id")}
+    keyboard = any(s.get("via") in ("type", "key") for s in steps)
+    if info.get("ime_active") and keyboard:
+        out["warnings"] = (out.get("warnings") or []) + [
+            f"ime_active: target thread layout {info.get('hkl_hex')} (lang {info.get('lang_id')}, "
+            f"ime_open={info.get('ime_open')}). An IME can swallow keys while each step still reports "
+            'tapped=true. Pass ime="off" to switch that window to English for this act and restore it after.'
+        ]
+    if ime_mode == "off" and out.get("dry_run"):
+        out["warnings"] = (out.get("warnings") or []) + [
+            "ime=off will switch this window to an English layout and close its IME for the act, then restore both"
+        ]
+
+
+def _suspend_ime_for_act(out: dict, frame: dict, steps: list[dict], ime_mode: str | None) -> dict | None:
+    """Switch the stamp window to English. Returns an error dict to return, or None to continue."""
+    if ime_mode != "off" or out.get("dry_run"):
+        return None
+    hwnd = (frame or {}).get("hwnd")
+    if not hwnd:
+        if any(s.get("via") in KEYBOARD_VIAS for s in steps):
+            out["ok"] = False
+            out["reason"] = "ime_failed"
+            out["error"] = "ime=off needs a window stamp so the target window's layout can be switched"
+            return out
+        return None
+    from .ime import ImeError, suspend_ime
+
+    try:
+        _ime_restore.state = suspend_ime(int(hwnd))
+        out["ime_suspended"] = True
+    except ImeError as e:
+        out["ok"] = False
+        out["reason"] = "ime_failed"
+        out["error"] = str(e)
+        return out
+    return None
+
+
+def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: bool = False, gap: float = 0.12, hold_key: str | None = None, method: str | None = None, max_age_sec: float | None = None, strict_stamp: bool = False, stamp_json_path: str | Path | None = None, origin_slop_px: int = 8, focus: bool = False, stamp_source: str | None = None, ime: str | None = None) -> dict:
     """Plan specs against frame; dry_run=False sends input.
 
     stamp_source: "explicit" (--stamp/--json), "latest" (newest stamp picked implicitly)
@@ -1515,7 +1632,54 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
     the stamp window or one it owns, and before each type/key step that the stamp window
     is in the foreground. Otherwise the step is refused. focus: bring the stamp window
     forward instead, re-check identity, then re-check the point or foreground.
+
+    ime="off" switches the stamp window to English (and closes its IME) for a live act,
+    then restores it. Concurrent dry_run=False calls take LIVE_ACT_LOCK for the whole act.
     """
+    from .ime import normalize_ime
+
+    try:
+        ime_mode = normalize_ime(ime)
+    except ValueError as e:
+        return {
+            "ok": False,
+            "dry_run": bool(dry_run),
+            "error": str(e),
+            "reason": "bad_args",
+            "steps": [],
+            "hint": 'omit ime, or pass ime="off" to switch the target window to English for this act',
+        }
+    if not dry_run and not getattr(_live_lock_state, "held", False):
+        before = _snapshot_windows()
+        with LIVE_ACT_LOCK:
+            _live_lock_state.held = True
+            _ime_restore.state = None
+            out = None
+            try:
+                out = run_chain(
+                    frame, specs, dry_run=dry_run, double=double, gap=gap, hold_key=hold_key,
+                    method=method, max_age_sec=max_age_sec, strict_stamp=strict_stamp,
+                    stamp_json_path=stamp_json_path, origin_slop_px=origin_slop_px,
+                    focus=focus, stamp_source=stamp_source, ime=ime,
+                )
+            finally:
+                state = getattr(_ime_restore, "state", None)
+                _ime_restore.state = None
+                _live_lock_state.held = False
+                if state is not None and isinstance(out, dict):
+                    from .ime import restore_ime
+
+                    rest = restore_ime(state)
+                    out["ime_restored"] = bool(rest.get("ok"))
+                    if not rest.get("ok"):
+                        out["warnings"] = (out.get("warnings") or []) + [
+                            f"ime restore failed: {rest.get('error') or 'unknown'}"
+                        ]
+                if isinstance(out, dict):
+                    _attach_new_windows(out, before)
+            return out if isinstance(out, dict) else {
+                "ok": False, "dry_run": False, "error": "act returned nothing", "steps": [],
+            }
     base = {
         "ok": False,
         "dry_run": bool(dry_run),
@@ -1711,6 +1875,7 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
         return out
     implicit_err = _implicit_stamp_error(frame or {}, stamp_source)
     unguarded = unguarded_keyboard_steps(steps) if method_n == "input" else []
+    _note_ime(out, frame or {}, steps, ime_mode)
     if dry_run:
         warns = []
         if implicit_err:
@@ -1754,6 +1919,12 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
             s.pop("_uia_control", None)
             s.pop("_uia_action", None)
         return out
+    ime_err = _suspend_ime_for_act(out, frame or {}, steps, ime_mode)
+    if ime_err:
+        for s in steps:
+            s.pop("_uia_control", None)
+            s.pop("_uia_action", None)
+        return ime_err
     if method_n == "auto":
         # Live auto: execute chosen path only. No mid-go fallback uia->input.
         from .uia import UiaError, invoke_control
@@ -1902,7 +2073,9 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
             if n + 1 < len(steps):
                 time.sleep(gap)
         return out
-    from .input import click_xy, drag_path, enter_text, hover_xy, key_down, key_up, scroll_xy, tap_key
+    from .input import (
+        clear_field_for_replace, click_xy, drag_path, enter_text, hover_xy, key_down, key_up, scroll_xy, tap_key,
+    )
     held = False
     clicked = False
     clicked_window: int | None = None
@@ -1954,9 +2127,46 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                     scroll_xy(step["notches"])
                 step["scrolled"] = True
             elif via == "type":
-                enter_text(step["text"], via=step.get("input_via") or "paste")
+                if step.get("replace"):
+                    try:
+                        cleared = clear_field_for_replace()
+                    except Exception as e:
+                        cleared = {"ok": False, "reason": "replace_failed", "error": str(e)}
+                    step["replace_clear"] = {
+                        k: cleared.get(k)
+                        for k in ("ok", "method", "empty", "verified", "reason", "error")
+                        if k in cleared
+                    }
+                    if not cleared.get("ok"):
+                        out["ok"] = False
+                        out["reason"] = cleared.get("reason") or "replace_failed"
+                        out["error"] = cleared.get("error") or "replace could not clear the field before typing"
+                        return out
+                    if cleared.get("verified") is False:
+                        out["warnings"] = (out.get("warnings") or []) + [
+                            "replace could not read the field back to confirm it was empty before typing"
+                        ]
+                try:
+                    typed = enter_text(step["text"], via=step.get("input_via") or "paste")
+                except Exception as e:
+                    typed = {"ok": False, "reason": "clipboard_failed", "error": str(e)}
+                if isinstance(typed, dict) and typed.get("ok") is False:
+                    step["typed"] = False
+                    out["ok"] = False
+                    out["reason"] = typed.get("reason") or "clipboard_failed"
+                    out["error"] = typed.get("error") or "text input failed"
+                    return out
                 step["typed"] = True
                 step["input_via"] = step.get("input_via") or "paste"
+                if isinstance(typed, dict):
+                    if "restored" in typed:
+                        step["clipboard_restored"] = bool(typed.get("restored"))
+                    for key, label in (
+                        ("clipboard_restore_error", "clipboard restore failed"),
+                        ("clipboard_save_error", "clipboard was not saved before paste"),
+                    ):
+                        if typed.get(key):
+                            out["warnings"] = (out.get("warnings") or []) + [f"{label}: {typed[key]}"]
             elif via == "key":
                 tap_key(step["key"])
                 step["tapped"] = True

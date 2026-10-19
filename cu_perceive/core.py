@@ -530,7 +530,7 @@ def perceive(
                 uia_nodes = list(uia_res.get("uia_nodes") or [])
                 uia_meta = {
                     k: uia_res[k]
-                    for k in ("uia_count", "uia_visited", "uia_truncated", "caps")
+                    for k in ("uia_count", "uia_visited", "uia_truncated", "uia_occluded", "caps")
                     if k in uia_res
                 }
                 uia_meta["uia_ms"] = uia_ms
