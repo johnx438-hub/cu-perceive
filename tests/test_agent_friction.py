@@ -146,13 +146,18 @@ class TestHoldKeyNeedsPointer(_Input):
 
 
 class TestToolDescriptions(unittest.TestCase):
-    def test_act_starts_with_cheat_sheet(self):
-        first, second = _tool_doc("act").splitlines()[:2]
-        for part in ('norm="x,y"', "xy=", "ids=", 'scroll="down:3"', "negative/down = wheel down",
-                     "drag_norm=", "replace=true", "key=", "pagedown", "hold_key=", "focus=true", "go=true"):
-            self.assertIn(part, first)
-        self.assertEqual(second.strip(),
-                         "perceive_window does not focus; act go needs the window in front or focus=true.")
+    def test_act_first_200_chars_survive_truncation(self):
+        head = _tool_doc("act")[:200]
+        for part in ("go=true", "dry run", "focus=true", 'scroll="down:5"', "bare 5 = UP", 'key="enter"',
+                     "pagedown", 'norm="x,y"', "hwnd="):
+            self.assertIn(part, head)
+
+    def test_act_cheat_sheet_and_no_focus_line_follow(self):
+        lines = [ln.strip() for ln in _tool_doc("act").splitlines()]
+        for part in ('norm="x,y"', "xy=", "ids=", 'scroll="down:3"', "negative = down, positive = UP",
+                     "drag_norm=", "replace=true", "key=", "hold_key=", "focus=true", "go=true"):
+            self.assertIn(part, lines[1])
+        self.assertEqual(lines[2], "perceive_window does not focus; act go needs the window in front or focus=true.")
 
     def test_perceive_window_says_no_focus_first(self):
         self.assertEqual(_tool_doc("perceive_window").splitlines()[0],

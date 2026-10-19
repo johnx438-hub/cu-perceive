@@ -159,6 +159,16 @@ class TestMcpServerE2E(unittest.TestCase):
         self.assertEqual(keys["keyboard_refused_step"], 0)
         self.assertNotIn("typed", keys["steps"][0])
 
+    def test_scroll_int_and_json_path_stamp(self):
+        payload = json.loads(self._call("perceive_window", {"image": str(self.png), "map_inline": False})[0]["text"])
+        for scroll, notches in ((5, 5), (-5, -5), ("down:5", -5)):
+            act = json.loads(self._call("act", {"stamp": payload["json"], "norm": "500,500", "scroll": scroll})[0]["text"])
+            self.assertTrue(act["ok"], act)
+            self.assertEqual([s["notches"] for s in act["steps"] if s["via"] == "scroll"], [notches])
+            self.assertEqual(act["json"], payload["json"])
+        up = json.loads(self._call("act", {"stamp": payload["stamp"], "norm": "500,500", "scroll": 5})[0]["text"])
+        self.assertTrue(any("scrolls UP" in w for w in up.get("warnings", [])), up)
+
     def test_rejects_foreign_host_header(self):
         body = {"jsonrpc": "2.0", "id": 999, "method": "tools/list", "params": {}}
         with self.assertRaises(urllib.error.HTTPError) as cm:
