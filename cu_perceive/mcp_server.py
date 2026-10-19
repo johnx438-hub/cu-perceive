@@ -242,16 +242,27 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         return fn
 
     @_tool
-    def windows(title: str = "", exe: str = "", hwnd: int = 0, map: bool = True, map_inline: bool = True):
+    def windows(title: str = "", exe: str = "", hwnd: int = 0, map: bool = True, map_inline: bool = True, query: str = ""):
         """Desktop window list + ruler map (0-1000, screen space). Read the image to pick hwnd.
         hwnd 0 / empty title+exe = all windows (+ optional map). map_inline=false = JSON only.
         title and/or exe set (no hwnd): returns windows[] of ALL matches (browser multi-window safe),
         plus window=picked by pick_rule (non-minimized, then EnumWindows z-top, then area — not guaranteed foreground).
-        hwnd set: one row in windows[] / window. Does not click."""
+        hwnd set: one row in windows[] / window. Does not click.
+        query: case-insensitive substring of title OR exe (title matches first); cannot be combined with title/exe."""
         hwnd_n = _nz_int(hwnd)
-        if hwnd_n or title or exe:
+        query_n = (_nz_str(query) or "").strip()
+        if query_n and (title or exe):
+            return {"ok": False, "reason": "bad_args", "error": "query cannot be combined with title or exe",
+                    "hint": "pass query alone, or title/exe"}
+        if hwnd_n or title or exe or query_n:
             if hwnd_n:
                 rows = find_windows(hwnd=hwnd_n)
+            elif query_n:
+                rows, seen = [], set()
+                for w in find_windows(title=query_n) + find_windows(exe=query_n):
+                    if w and int(w.get("hwnd") or 0) not in seen:
+                        seen.add(int(w.get("hwnd") or 0))
+                        rows.append(w)
             else:
                 rows = find_windows(title=title or "", exe=exe or "")
             slim = [
@@ -313,6 +324,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         ocr/uia/yolo are optional extras; if missing the reply has ok=false and the exact pip command in "install".
         ocr/yolo run in a worker process with a timeout (CU_PERCEIVE_DETECT_TIMEOUT, default 30 s): a hung worker is
         restarted and the stamp comes back without detections plus a warning. Unknown arguments are refused (reason=unknown_args).
+        compact=true without uia=true adds uia_nodes_omitted=true and a warning (UIA stays opt-in).
         compact=true: items as {id, text, kind, center_norm}; uia_nodes keep name, control_type, center_norm, value, and readonly (null when a DataItem/DataGrid provider cannot say; a cell value of "(null)" is omitted). Text/DataItem/Edit content stays. Occluded nodes are omitted (uia_occluded); an empty runtime id is not occlusion. A walk that times out returns partial nodes and uia_timeout. center_norm goes straight into act norm.
         E2 light verify: roi="L,T,W,H" or roi_norm="CX,CY[,HALF]" (mutually exclusive) crops after full grab; map 0-1000 is ROI-local.
         out_dir optional: Windows path or /mnt/c/... ; response also has map_wsl / png_wsl (lowercase drive)."""
@@ -395,6 +407,13 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
                 payload["error"] = out["error"]
         if compact:
             _compact_rows(payload)
+            if not uia:
+                payload["uia_nodes_omitted"] = True
+                payload["warnings"] = (payload.get("warnings") or []) + [
+                    "compact=true without uia=true: uia_nodes are not included (UIA is opt-in); pass uia=true "
+                    "for Chrome/Electron/WinForms controls"
+                    + ("" if payload.get("items") else ", and ocr=true for text ids")
+                ]
         return _with_map(payload, payload["map"], map_inline)
 
     @_tool
@@ -434,6 +453,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         dry_run=true forces a dry run even with go=true; dry_run=false alone does not send (go=true does).
         Unknown arguments (steps=[...], x=, action=, ...) are refused with reason=unknown_args and valid_args; nothing runs.
         Refusals return ok=false with reason (code), hint (next step) and blocking_window {hwnd, title}.
+        ids are OCR item ids. When the stamp has no OCR items (ocr=false) an id is matched against uia_nodes (step id_source="uia"). An id that matches neither is reason=bad_ids with hint, item_ids and uia_ids; a uia_name that does not resolve is reason=uia_not_found.
 
         Plan/run against a stamp. go default false. Prefer norm (map 0-1000) or xy.
 

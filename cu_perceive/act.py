@@ -188,11 +188,53 @@ def screen_xy(frame: dict, item: dict) -> tuple[int, int]:
     return window_to_screen(frame, cx, cy)
 
 
+class BadIdsError(KeyError, ValueError):
+    """An act id that is not an item of the stamp. run_chain turns it into reason=bad_ids."""
+
+    def __init__(self, message: str, *, frame: dict | None = None, id_=None):
+        super().__init__(message)
+        self.message = message
+        self.id = id_
+        frame = frame or {}
+        self.item_ids = [it.get("id") for it in frame.get("items") or []]
+        self.uia_ids = [n.get("id") for n in frame.get("uia_nodes") or []]
+
+    def __str__(self) -> str:
+        return self.message
+
+    def hint(self) -> str:
+        if self.id is not None and self.id in self.uia_ids:
+            return (
+                f"id {self.id} is a UIA node id, but ids refer to OCR items when the stamp has them; "
+                f"pass uia_name=\"#{self.id}\" (or the node's center_norm as norm)"
+            )
+        if not self.item_ids:
+            return (
+                "this stamp has no OCR items (perceive ran with ocr=false); click by norm (center_norm), "
+                "by uia_name, or perceive again with ocr=true"
+            )
+        return "use an id from this stamp's items, or click by norm (center_norm) or uia_name"
+
+
 def item_by_id(frame: dict, id_: int) -> dict:
     for it in (frame or {}).get("items") or []:
         if int(it["id"]) == int(id_):
             return it
-    raise KeyError(f"id {id_} not in frame {(frame or {}).get('stamp')}")
+    raise BadIdsError(f"id {id_} not in frame {(frame or {}).get('stamp')}", frame=frame, id_=int(id_))
+
+
+def _uia_node_for_id(frame: dict, id_: int) -> dict | None:
+    """When the stamp has no OCR items, an act id may name a UIA node (compact rows share ids)."""
+    frame = frame or {}
+    if frame.get("items"):
+        return None
+    for n in frame.get("uia_nodes") or []:
+        try:
+            if int(n.get("id")) == int(id_) and n.get("norm"):
+                return n
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 def pairs(s: str) -> list[list[int]]:
@@ -575,6 +617,11 @@ def plan_steps(frame: dict, specs: list[dict]) -> list[dict]:
     for spec in specs:
         kind = spec.get("kind")
         if kind == "id":
+            node = _uia_node_for_id(frame, spec["id"])
+            if node is not None:
+                spec = {**spec, "kind": "uia_name", "query": f"#{int(spec['id'])}", "id_source": "uia"}
+                kind = "uia_name"
+        if kind == "id":
             it = item_by_id(frame, spec["id"])
             sx, sy = screen_xy(frame, it)
             last_screen = [sx, sy]
@@ -660,7 +707,7 @@ def plan_steps(frame: dict, specs: list[dict]) -> list[dict]:
             q = spec.get("query") or spec.get("uia_name") or ""
             resolved = resolve_uia_target(frame, str(q))
             if not resolved.get("ok"):
-                raise ValueError(resolved.get("error") or f"UIA resolve failed for {q!r}")
+                raise UiaTargetError(resolved.get("error") or f"UIA resolve failed for {q!r}")
             nx, ny = resolved["norm"]
             x, y = norm_to_window(frame, nx, ny)
             sx, sy = window_to_screen(frame, x, y)
@@ -677,6 +724,9 @@ def plan_steps(frame: dict, specs: list[dict]) -> list[dict]:
                 "hover": bool(spec.get("hover")),
                 "hold": float(spec.get("hold") or 0),
             }
+            if spec.get("id_source"):
+                step["id"] = int(spec["query"].lstrip("#"))
+                step["id_source"] = spec["id_source"]
             if spec.get("hover"):
                 step["via"] = "hover"
             steps.append(step)
@@ -684,6 +734,10 @@ def plan_steps(frame: dict, specs: list[dict]) -> list[dict]:
             raise ValueError(spec)
     return steps
 
+
+
+class UiaTargetError(ValueError):
+    """uia_name did not resolve to exactly one node of the stamp."""
 
 
 METHODS = frozenset({"input", "post", "uia", "auto"})
@@ -2005,6 +2059,24 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
             "reason": "unknown_key",
             "hint": "use one of valid_keys, e.g. key=\"pagedown\" or key=\"ctrl+end\"",
             "valid_keys": key_names(),
+        }
+    except BadIdsError as e:
+        return {
+            **base,
+            "method": method_n,
+            "error": str(e),
+            "reason": "bad_ids",
+            "hint": e.hint(),
+            "item_ids": e.item_ids[:50],
+            "uia_ids": e.uia_ids[:50],
+        }
+    except UiaTargetError as e:
+        return {
+            **base,
+            "method": method_n,
+            "error": str(e),
+            "reason": "uia_not_found",
+            "hint": "perceive with uia=true and pass a name from uia_nodes, \"Name@ControlType\" or \"#id\"; or click by norm",
         }
     except ValueError as e:
         return {**base, "method": method_n, "error": str(e)}
