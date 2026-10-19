@@ -327,7 +327,8 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         compact=true without uia=true adds uia_nodes_omitted=true and a warning (UIA stays opt-in).
         compact=true: items as {id, text, kind, center_norm}; uia_nodes keep name, control_type, center_norm, value, and readonly (null when a DataItem/DataGrid provider cannot say; a cell value of "(null)" is omitted). Text/DataItem/Edit content stays. Occluded nodes are omitted (uia_occluded); an empty runtime id is not occlusion. A walk that times out returns partial nodes and uia_timeout. center_norm goes straight into act norm.
         E2 light verify: roi="L,T,W,H" or roi_norm="CX,CY[,HALF]" (mutually exclusive) crops after full grab; map 0-1000 is ROI-local.
-        out_dir optional: Windows path or /mnt/c/... ; response also has map_wsl / png_wsl (lowercase drive)."""
+        out_dir optional: Windows path or /mnt/c/... ; response also has map_wsl / png_wsl (lowercase drive).
+        A stamp written to a custom out_dir is registered under the default dir, so act finds it by bare stamp name, by hwnd, and as the latest stamp."""
         hwnd_n = _nz_int(hwnd)
         title_n = _nz_str(title)
         exe_n = _nz_str(exe)
@@ -471,7 +472,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         ids: comma string / int / list; needs prior ocr/yolo perceive.
         text=paste+restore by default (via="paste"|"keys"; keys = SendInput unicode, for a grid cell that ignores Ctrl+V). key like ctrl+c (comma-separated ok). Unknown key -> ok=false, reason=unknown_key, valid_keys.
         Clipboard errors return ok=false reason=clipboard_failed (the server stays up). Previous clipboard text is restored; an empty clipboard is emptied again. Paste is staged before replace clears the field.
-        After typing, typed_verified is true/false/null from a read-back of the target window's focused element. A mismatch is reason=typed_mismatch (never ok=true). A provider value of "(null)" reads back as empty. Password edits (UIA IsPassword or ES_PASSWORD) skip that read-back: typed_verified is null and typed_note says so. A mask template with no letters or digits (____-__-__) counts as empty.
+        After typing, typed_verified is true/false/null from a read-back of the target window's focused element. A mismatch is reason=typed_mismatch (never ok=true). A non-native control (Monaco/CodeMirror) that reads back empty is not a mismatch: typed_verified=null with warning readback_unavailable; a different non-empty value still is typed_mismatch. A provider value of "(null)" reads back as empty. Password edits (UIA IsPassword or ES_PASSWORD) skip that read-back: typed_verified is null and typed_note says so. A mask template with no letters or digits (____-__-__) counts as empty.
         ime="off" closes the target IME and switches that window to an already-installed Latin layout (never loads a new one), then verifies and restores. A handled ime=off does not also warn ime_active.
         Before any clear or type, the top-level window that owns keyboard focus (GA_ROOT of hwndFocus) must be the stamp hwnd. An owned modal dialog is reason=focus_outside and nothing is cleared. blocking_window then names that top-level dialog {hwnd, title, class, focus_hwnd} and the hint says to close or dismiss it first.
         When the clipboard holds non-text data (image, files, rich text) that cannot be restored, paste is skipped and the text is typed with keys; the step reports clipboard_preserved=true and a warning.
@@ -484,8 +485,11 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
           (case-insensitive; page_down / PgDn / Return / Escape / del also work).
         ids+text in ONE call: ids are real clicks first, then text - NOT a silent focus flag.
         Order is click(s) -> text -> key. replace=true clears the focused edit before the text
-        (End+Shift+Home+Delete for an edit or masked edit — SetValue("") does not clear a
-        WinForms MaskedTextBox — else ValuePattern or EM_SETSEL; not Ctrl+A) and checks the field is empty before typing.
+        (single-line edit or masked edit: End+Shift+Home+Delete — SetValue("") does not clear a
+        WinForms MaskedTextBox — else ValuePattern or EM_SETSEL; multiline / code editor (ES_MULTILINE,
+        line breaks, browser textarea, Monaco, Document): EM_SETSEL+WM_CLEAR or Ctrl+A, Delete) and checks the
+        field is empty before typing. replace_clear.empty is true only when that is really read back;
+        a control that exposes no value gives empty=null, verified=false, readback="unavailable" and a warning.
         go=true on a window stamp: each click / drag start+end / scroll point must be on the stamp
         window (or a window it owns) and each text/key needs it in the foreground, even after a
         click; otherwise ok=false (pointer_refused_step + point_window, or keyboard_refused_step).

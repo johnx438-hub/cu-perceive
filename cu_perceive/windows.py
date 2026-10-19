@@ -655,6 +655,7 @@ def windows_map(out_dir: str | None = None, rows: list[dict] | None = None) -> d
             "json": str(js),
         }
         stamps.commit(js, json.dumps(payload, ensure_ascii=False, indent=2))
+        stamps.register(js)
     except BaseException:
         stamps.release(js)
         try:

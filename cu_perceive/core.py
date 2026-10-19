@@ -581,6 +581,7 @@ def perceive(
         stamps.commit(js, json.dumps(payload, ensure_ascii=False, indent=2))
         if payload.get("hwnd"):
             stamps.note_latest(dest, payload["hwnd"], js)
+        stamps.register(js, payload.get("hwnd"))
         return payload
     except BaseException:
         stamps.release(js)
