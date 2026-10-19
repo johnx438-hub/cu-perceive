@@ -25,7 +25,7 @@
 - agent 纯脑力报成百上千个坐标
 - 游戏挂机、绕检测、无人值守乱画
 - 默认开启或替换现有 `act` 语义
-- 云电脑桌面（仍只 ARCHER Windows）
+- 云电脑桌面（仍只本机 Windows）
 
 ## `path_extract`（视觉软件，非 LLM）
 
@@ -63,7 +63,7 @@
 }
 ```
 
-实现建议（ARCHER，可放 `cu_perceive/path_extract.py` 或 `scripts/`）：
+实现建议（Windows 主机，可放 `cu_perceive/path_extract.py` 或 `scripts/`）：
 
 - OpenCV：灰度 → 阈值/自适应 → `findContours` → 抽稀 → 映射到 0–1000
 - **不**依赖 RapidOCR / ScreenParser / YOLO weights

@@ -1,18 +1,29 @@
-"""Start an app by name (apps.json) or exe path. No secrets."""
+"""Start an app by name (apps.json) or exe path. No secrets.
+
+apps.json: CU_PERCEIVE_APPS, else <data dir>/apps.json, else the packaged
+apps.default.json. ``exe`` values may use %ENV% / ~ (expanded at launch).
+"""
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
 from pathlib import Path
 
-APPS = Path(r"C:\Users\jawn\src\cu-perceive\apps.json")
+from . import config
+
+APPS = config.apps_file()
 
 
 def list_apps() -> list[dict]:
     if not APPS.exists():
         return []
     return json.loads(APPS.read_text(encoding="utf-8"))
+
+
+def _expand(p: str) -> str:
+    return os.path.expandvars(os.path.expanduser(p))
 
 
 def launch(app: str | None = None, exe: str | None = None) -> dict:
@@ -27,9 +38,9 @@ def launch(app: str | None = None, exe: str | None = None) -> dict:
         exe = rec.get("exe") or rec.get("app_path")
     if not exe:
         raise ValueError("launch needs --app or --exe")
-    path = Path(exe)
+    path = Path(_expand(exe))
     if not path.exists():
-        raise FileNotFoundError(exe)
+        raise FileNotFoundError(str(path))
     subprocess.Popen([str(path)], cwd=str(path.parent))
     time.sleep(1.2)
     from .windows import find_window

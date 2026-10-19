@@ -1,14 +1,15 @@
-"""Window list/find and hwnd capture. Harvested from Enikk Win32 helpers, not the game layer."""
+"""Window list/find, identity and hwnd capture. Win32 helpers come from vendored Enikk."""
 from __future__ import annotations
 
 import json
-import sys
-from datetime import datetime
 from pathlib import Path
 
-ENIKK_ROOT = Path(r"C:\Users\jawn\src\enikk")
-if str(ENIKK_ROOT) not in sys.path:
-    sys.path.insert(0, str(ENIKK_ROOT))
+
+def _window_service():
+    from ._vendor.enikk.window import WindowService
+
+    return WindowService()
+
 
 _SKIP_CLASS = frozenset({
     "Progman",
@@ -61,6 +62,7 @@ def list_windows(include_minimized: bool = True) -> list[dict]:
                 "hwnd": int(hwnd),
                 "title": title,
                 "pid": int(pid),
+                "ctime": _ctime_str(int(pid)),
                 "exe": exe,
                 "exe_path": exe_path,
                 "class": cls,
@@ -141,10 +143,12 @@ def find_window(title: str = "", exe: str = "", hwnd: int | None = None) -> dict
         for w in wins:
             if int(w["hwnd"]) == hwnd:
                 return w
-        from enikk.game.window import WindowService
-        if WindowService().is_valid(hwnd):
+        if _window_service().is_valid(hwnd):
+            from . import _win32
+            pid = _win32.window_pid(hwnd)
             return {
-                "hwnd": hwnd, "title": "", "exe": "", "pid": 0,
+                "hwnd": hwnd, "title": "", "exe": "", "pid": pid,
+                "ctime": _ctime_str(pid),
                 "exe_path": "", "rect": [0, 0, 0, 0], "minimized": False,
                 "minimized_unknown": True,
             }
@@ -154,6 +158,66 @@ def find_window(title: str = "", exe: str = "", hwnd: int | None = None) -> dict
     return ranked[0] if ranked else None
 
 
+def _ctime_str(pid: int) -> str | None:
+    """Process creation FILETIME as a decimal string (exceeds JS safe-int range)."""
+    if not pid:
+        return None
+    try:
+        from . import _win32
+        ct = _win32.process_creation_time(int(pid))
+    except Exception:
+        return None
+    return str(ct) if ct else None
+
+
+def window_identity(hwnd: int) -> dict:
+    """{hwnd, pid, ctime} for a live hwnd. pid/ctime None when they can't be read."""
+    from . import _win32
+
+    hwnd = int(hwnd)
+    pid = _win32.window_pid(hwnd)
+    return {"hwnd": hwnd, "pid": pid or None, "ctime": _ctime_str(pid)}
+
+
+def verify_window_identity(hwnd, pid, ctime) -> str | None:
+    """Fail-closed HWND + PID + process-creation-time check. None = same window; else why not.
+
+    Catches a closed window whose HWND was reused by another process, and a PID
+    reused by a restarted process.
+    """
+    from . import _win32
+
+    try:
+        hwnd_i = int(hwnd)
+    except (TypeError, ValueError):
+        return f"bad hwnd {hwnd!r}; re-perceive"
+    try:
+        pid_i = int(pid) if pid not in (None, "") else 0
+        ctime_i = int(ctime) if ctime not in (None, "") else 0
+    except (TypeError, ValueError):
+        return f"bad stamp identity pid={pid!r} ctime={ctime!r}; re-perceive"
+    if pid_i <= 0 or ctime_i <= 0:
+        return "stamp has no process identity (pid + creation time); re-perceive this window"
+    try:
+        if not _win32.is_window(hwnd_i):
+            return f"hwnd {hwnd_i} no longer exists; re-perceive"
+        live_pid = _win32.window_pid(hwnd_i)
+        if live_pid != pid_i:
+            return (
+                f"hwnd {hwnd_i} now belongs to pid {live_pid}, stamp was pid {pid_i} "
+                "(HWND reused by another process); re-perceive"
+            )
+        live_ct = _win32.process_creation_time(live_pid)
+    except Exception as e:
+        return f"identity check failed: {e}; re-perceive"
+    if not live_ct:
+        return f"cannot read creation time of pid {pid_i}; identity unverified (fail closed) — re-perceive"
+    if int(live_ct) != ctime_i:
+        return (
+            f"pid {pid_i} is a different process than at perceive time "
+            "(creation time changed; PID reused); re-perceive"
+        )
+    return None
 
 
 
@@ -208,6 +272,46 @@ def is_sentinel_origin(origin: dict | None) -> bool:
 
 
 RESTORE_SETTLE_S = 0.30
+OFFSCREEN_PARK = -10000
+MIN_CLIENT_PX = 8
+SMALL_CLIENT_PX = 80
+
+
+def capture_geometry_problem(origin: dict | None, image_size: tuple[int, int] | None = None) -> tuple[str | None, str | None]:
+    """(error, warning) for a pinned capture's client geometry.
+
+    error: the window is parked off-screen (left/top <= -10000, e.g. a "ghost" window
+    that is not iconic but sits at -32000), or its client area / image is degenerate
+    (under MIN_CLIENT_PX on a side, e.g. 144x1). Such a frame is useless to plan on.
+    warning: a client area under SMALL_CLIENT_PX on a side; act treats such stamps as
+    minimized stubs and refuses them.
+    """
+    if not origin:
+        return "window has no client area", None
+    try:
+        left, top = int(origin.get("left", 0)), int(origin.get("top", 0))
+        w, h = int(origin.get("width", 0)), int(origin.get("height", 0))
+    except (TypeError, ValueError):
+        return f"window client geometry is unreadable ({origin!r})", None
+    if image_size is not None:
+        w, h = min(w, int(image_size[0])), min(h, int(image_size[1]))
+    if left <= OFFSCREEN_PARK or top <= OFFSCREEN_PARK:
+        return (
+            f"window is parked off-screen at ({left},{top}) with a {w}x{h} client area: it is not "
+            "minimized but is not on any monitor (a 'ghost' window, often after minimizing it while "
+            "one of its dialogs was open); restore it or move it onto a monitor, then perceive again"
+        ), None
+    if w < MIN_CLIENT_PX or h < MIN_CLIENT_PX:
+        return (
+            f"window client area is only {w}x{h} px, too small to perceive; restore or resize it, "
+            "then perceive again"
+        ), None
+    if w < SMALL_CLIENT_PX or h < SMALL_CLIENT_PX:
+        return None, (
+            f"window client area is only {w}x{h} px; act treats stamps under {SMALL_CLIENT_PX} px "
+            "on a side as minimized stubs and will refuse them"
+        )
+    return None, None
 
 
 def desktop_capture_sizes() -> set[tuple[int, int]]:
@@ -249,14 +353,14 @@ def capture_looks_implausible(arr, origin: dict | None = None) -> bool:
 def live_geom(hwnd: int) -> tuple[dict | None, dict | None]:
     """Client origin + window row as they are now. Never restores / force_foreground.
 
-    Stamp validation uses this. Capture/perceive uses refresh_geom (may restore).
+    Stamp validation and default (no-focus) perceive use this.
     """
     hwnd = int(hwnd)
     return client_origin(hwnd), find_window(hwnd=hwnd)
 
 
 def refresh_geom(hwnd: int) -> tuple[dict | None, dict | None]:
-    """Client origin + window row after restore. Capture/perceive only — not stamp check.
+    """Client origin + window row after restore. Only for perceive focus=true.
 
     Iconic / sentinel hwnds are force_foreground'd so the next grab is live.
     Stamp validation must use live_geom + is_hwnd_minimized (no restore).
@@ -267,16 +371,78 @@ def refresh_geom(hwnd: int) -> tuple[dict | None, dict | None]:
     origin = client_origin(hwnd)
     was_iconic = bool(win32gui.IsIconic(hwnd))
     if was_iconic or is_sentinel_origin(origin):
-        from enikk.game.window import WindowService
-        WindowService().force_foreground(hwnd)
+        _window_service().force_foreground(hwnd)
         time.sleep(RESTORE_SETTLE_S if was_iconic else 0.15)
         origin = client_origin(hwnd)
     return origin, find_window(hwnd=hwnd)
 
 
+def force_foreground(hwnd: int) -> bool:
+    """Restore + raise + focus. Only on explicit request (perceive focus=true)."""
+    return bool(_window_service().force_foreground(int(hwnd)))
+
+
+def foreground_matches(hwnd: int) -> tuple[bool, int]:
+    """(True, fg) when the keyboard-focus window belongs to hwnd: hwnd itself, a
+    window it owns (its dialogs and popups), or one of its popup menus.
+
+    The same set of windows as point_owner, so a key after a click into an owned
+    dialog goes through. Another top-level window of the same app (not owned by
+    hwnd) does not match. Raises _win32.Win32Unavailable off Windows.
+    """
+    from . import _win32
+
+    fg = _win32.foreground_window()
+    if not fg or not hwnd:
+        return False, fg
+    return owned_by(_win32.root_window(fg) or fg, int(hwnd)), fg
+
+
+MENU_CLASS = "#32768"
+_MAX_OWNER_DEPTH = 32
+
+
+def window_at_point(x: int, y: int) -> int:
+    """Top-level window that a mouse event at screen (x, y) would go to, 0 if none."""
+    from . import _win32
+
+    at = _win32.window_from_point(int(x), int(y))
+    return (_win32.root_window(at) or at) if at else 0
+
+
+def owned_by(window: int, hwnd: int) -> bool:
+    """window is hwnd's top-level window, owned (directly or not) by it, or one of
+    its popup menus (menus have no owner but run on the owning window's thread)."""
+    from . import _win32
+
+    if not window or not hwnd:
+        return False
+    target = _win32.root_window(int(hwnd)) or int(hwnd)
+    cur = int(window)
+    for _ in range(_MAX_OWNER_DEPTH):
+        if not cur:
+            break
+        if cur == target:
+            return True
+        cur = _win32.owner_window(cur)
+    return _win32.class_name(window) == MENU_CLASS and _win32.window_thread(window) == _win32.window_thread(target)
+
+
+def point_owner(hwnd: int, x: int, y: int) -> tuple[bool, dict]:
+    """(ok, info): ok when a mouse event at (x, y) would reach hwnd or a window it owns.
+
+    info = {hwnd, title} of the top-level window actually at the point. Raises
+    _win32.Win32Unavailable off Windows.
+    """
+    from . import _win32
+
+    at = window_at_point(x, y)
+    info = {"hwnd": at, "title": _win32.window_title(at) if at else ""}
+    return owned_by(at, hwnd), info
+
+
 def client_origin(hwnd: int) -> dict | None:
-    from enikk.game.window import WindowService
-    region = WindowService().get_client_region(int(hwnd))
+    region = _window_service().get_client_region(int(hwnd))
     if region is None:
         return None
     return {
@@ -287,21 +453,49 @@ def client_origin(hwnd: int) -> dict | None:
     }
 
 
+def capture_window_image(hwnd: int, origin: dict, *, capture: str = "auto", focused: bool = False):
+    """Client-area grab of hwnd sized to ``origin``. Never focuses or restores.
+
+    capture='auto' runs WGC -> PrintWindow (dwm is experimental, opt-in only). When ``focused`` (the
+    caller already brought the window to front) the legacy screen-region grab is
+    a last resort. Returns capture.CaptureResult; raises capture.CaptureError /
+    WindowMinimizedError.
+    """
+    from .capture import CaptureError, capture_screen_region, capture_window, parse_capture_choice
+
+    order = parse_capture_choice(capture)
+    if order == ("screen",):
+        if not focused:
+            raise CaptureError(
+                "capture=screen grabs whatever is on screen at the window rect; "
+                "it needs focus=true (window brought to front)"
+            )
+        return capture_screen_region(origin)
+    out_size = (int(origin["width"]), int(origin["height"]))
+    try:
+        return capture_window(int(hwnd), out_size, order=order)
+    except CaptureError as e:
+        if not focused or type(e) is not CaptureError or capture not in (None, "", "auto"):
+            raise
+        res = capture_screen_region(origin)
+        res.attempts = e.attempts + res.attempts
+        return res
+
+
 def capture_hwnd(hwnd: int, activate: bool = False):
-    from enikk.game.capture import CaptureService
+    """Back-compat: BGR ndarray of hwnd's client area, or None. activate=True focuses first."""
     import time
-    import win32gui
     hwnd = int(hwnd)
-    was_iconic = bool(win32gui.IsIconic(hwnd))
-    if not (was_iconic or activate):
-        return CaptureService().capture(hwnd, activate=False)
-    # Restore / pin-to-front: first frame can be wallpaper, the window
-    # sitting on top (e.g. Chrome over Steam CEF), or a PrintWindow empty.
-    # Always discard it. Do not gate on capture_looks_implausible.
-    CaptureService().capture(hwnd, activate=True)
-    time.sleep(RESTORE_SETTLE_S)
-    again = CaptureService().capture(hwnd, activate=False)
-    return again
+    if activate:
+        force_foreground(hwnd)
+        time.sleep(RESTORE_SETTLE_S)
+    origin = client_origin(hwnd)
+    if origin is None:
+        return None
+    try:
+        return capture_window_image(hwnd, origin, focused=activate).image
+    except Exception:
+        return None
 
 
 def virtual_screen() -> tuple[int, int, int, int]:
@@ -355,19 +549,28 @@ def windows_map(out_dir: str | None = None, rows: list[dict] | None = None) -> d
         label = f"#{i} {w.get('hwnd')}"
         cv2.putText(bgr, label, (x1 + 4, max(16, y1 + 16)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
     stamped = draw_grid(bgr)
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    from . import stamps
+
+    stamp, js = stamps.allocate(dest, ".windows.json")
     mapp = dest / f"{stamp}.windows.map.png"
-    js = dest / f"{stamp}.windows.json"
-    cv2.imwrite(str(mapp), stamped)
-    payload = {
-        "stamp": stamp,
-        "width": vw,
-        "height": vh,
-        "origin": {"left": left, "top": top},
-        "coord_space": "screen",
-        "windows": mapped,
-        "map": str(mapp),
-        "json": str(js),
-    }
-    js.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        cv2.imwrite(str(mapp), stamped)
+        payload = {
+            "stamp": stamp,
+            "width": vw,
+            "height": vh,
+            "origin": {"left": left, "top": top},
+            "coord_space": "screen",
+            "windows": mapped,
+            "map": str(mapp),
+            "json": str(js),
+        }
+        stamps.commit(js, json.dumps(payload, ensure_ascii=False, indent=2))
+    except BaseException:
+        stamps.release(js)
+        try:
+            mapp.unlink()
+        except OSError:
+            pass
+        raise
     return payload

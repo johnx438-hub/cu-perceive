@@ -6,15 +6,24 @@ import types
 import unittest
 from unittest import mock
 
-# Stamp tests mock win32 APIs; provide a stub so they import on non-Windows.
-if "win32gui" not in sys.modules:
-    _win32gui = types.ModuleType("win32gui")
-    _win32gui.IsWindow = lambda hwnd: True
-    _win32gui.IsIconic = lambda hwnd: False
-    _win32gui.GetWindowPlacement = lambda hwnd: (0, 1, (0, 0), (0, 0), (0, 0, 0, 0))
-    sys.modules["win32gui"] = _win32gui
+# Stamp tests mock win32 APIs; provide a stub on non-Windows, scoped to this module
+# so other test files keep seeing no win32gui.
+_win32gui = types.ModuleType("win32gui")
+_win32gui.IsWindow = lambda hwnd: True
+_win32gui.IsIconic = lambda hwnd: False
+_win32gui.GetWindowPlacement = lambda hwnd: (0, 1, (0, 0), (0, 0), (0, 0, 0, 0))
+_modules_patch = mock.patch.dict(sys.modules, {} if "win32gui" in sys.modules else {"win32gui": _win32gui})
 
-from cu_perceive.act import check_stamp, parse_steps, run_chain
+
+def setUpModule():
+    _modules_patch.start()
+
+
+def tearDownModule():
+    _modules_patch.stop()
+
+
+from cu_perceive.act import check_stamp, parse_steps, run_chain  # noqa: E402
 from cu_perceive.windows import is_hwnd_minimized, live_geom
 
 
@@ -27,9 +36,19 @@ def _frame(**extra):
         "width": 800,
         "height": 600,
         "items": [],
+        "identity": {"hwnd": 42, "pid": 4242, "ctime": "133000000000000000"},
     }
     base.update(extra)
     return base
+
+
+class _IdentityOk(unittest.TestCase):
+    """Live identity matches the stamp; these tests exercise the other checks."""
+
+    def setUp(self):
+        p = mock.patch("cu_perceive.windows.verify_window_identity", return_value=None)
+        self.verify_identity = p.start()
+        self.addCleanup(p.stop)
 
 
 class TestIsHwndMinimized(unittest.TestCase):
@@ -67,7 +86,7 @@ class TestLiveGeomNoRestore(unittest.TestCase):
         _find.assert_called_once_with(hwnd=42)
 
 
-class TestCheckStamp(unittest.TestCase):
+class TestCheckStamp(_IdentityOk):
     @mock.patch("win32gui.IsWindow", return_value=True)
     @mock.patch("cu_perceive.windows.is_hwnd_minimized", return_value=False)
     @mock.patch("cu_perceive.windows.refresh_geom")
@@ -186,8 +205,9 @@ class TestCheckStamp(unittest.TestCase):
         placement.assert_not_called()
 
 
-class TestRunChainStampCheck(unittest.TestCase):
+class TestRunChainStampCheck(_IdentityOk):
     def setUp(self):
+        super().setUp()
         self.frame = _frame()
 
     @mock.patch("cu_perceive.act.check_stamp")

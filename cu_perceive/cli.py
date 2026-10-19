@@ -4,6 +4,8 @@ import argparse
 import json
 import sys
 
+from .capture import CAPTURE_CHOICES
+
 
 def _act_type_key_order(argv: list[str] | None) -> list[dict] | None:
     """Keep --key/--type/--text in the order they were typed so the first key is not dropped."""
@@ -32,12 +34,26 @@ def _slim_win(w: dict) -> dict:
         "title": w.get("title"),
         "exe": w.get("exe"),
         "pid": w.get("pid"),
+        "ctime": w.get("ctime"),
         "rect": w.get("rect"),
         "minimized": w.get("minimized"),
     }
 
 
+def utf8_stdio() -> None:
+    """Emit UTF-8 on stdout/stderr whatever the console code page is (cp1252 cannot
+    encode CJK window titles). Consumers should decode the output as UTF-8."""
+    for stream in (sys.stdout, sys.stderr):
+        enc = (getattr(stream, "encoding", None) or "").lower().replace("-", "")
+        if enc != "utf8" and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+            except (ValueError, OSError):
+                pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    utf8_stdio()
     parser = argparse.ArgumentParser(prog="cu-perceive")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -47,7 +63,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--hwnd", type=int, help="capture this window client area")
     p.add_argument("--title", help="find window by title substring")
     p.add_argument("--exe", help="find window by exe name substring")
-    p.add_argument("--focus", action="store_true", help="bring the window to front before capture")
+    p.add_argument(
+        "--focus",
+        action="store_true",
+        help="restore + raise the window before capture. Default: capture in place (works behind other windows; minimized -> ok=false)",
+    )
+    p.add_argument(
+        "--capture",
+        choices=CAPTURE_CHOICES,
+        default=None,
+        help="auto = WGC -> PrintWindow (default, or CU_PERCEIVE_CAPTURE); one backend to force it; screen = legacy grab, needs --focus; dwm = experimental, returns black on Windows 11",
+    )
     p.add_argument("--ocr", action="store_true", help="also run OCR and write .anno.png + item ids")
     p.add_argument("--yolo", action="store_true", help="ScreenParser boxes as items (class name as text). Default off")
     p.add_argument("--uia", action="store_true", help="S4: also walk UIA tree under pinned window; additive uia_nodes with 0-1000 norm. Default off")
@@ -71,7 +97,10 @@ def main(argv: list[str] | None = None) -> int:
     w.add_argument("--no-map", action="store_true", help="json only, skip the desktop ruler map")
 
     a = sub.add_parser("act", help="click ids from a perceive frame (chain, one shot)")
-    a.add_argument("--stamp", help="perceive stamp, default latest json")
+    a.add_argument(
+        "--stamp",
+        help="perceive stamp, default latest perceive json (--go then needs a window stamp with identity)",
+    )
     a.add_argument("--json", help="path to perceive json")
     a.add_argument("--ids", help="comma ids from anno, e.g. 14,9,16")
     a.add_argument("--xy", help="window pixels: 183,542;400,300")
@@ -86,12 +115,24 @@ def main(argv: list[str] | None = None) -> int:
     )
     a.add_argument("--go", action="store_true", help="actually click; default is dry-run")
     a.add_argument(
+        "--focus",
+        action="store_true",
+        help="with --go, bring the stamp window to the front (identity re-checked) when a click/drag/scroll "
+        "point is covered by another window or a --type/--key would go to another window; without it those "
+        "steps are refused",
+    )
+    a.add_argument(
         "--method",
         default="input",
         help="contact method: input (SendInput, default) | post (HWND PostMessage, S1) | uia (UIA patterns, S2) | auto (S3: uia if hit+pattern else input; left click only)",
     )
     a.add_argument("--double", action="store_true")
     a.add_argument("--type", "--text", dest="text", help="paste text (clipboard + Ctrl+V). CLI: --type or --text; MCP field is text")
+    a.add_argument(
+        "--replace",
+        action="store_true",
+        help="select all (ctrl+a) right before each --type so the text replaces the field instead of inserting at the caret",
+    )
     a.add_argument("--slow-type", action="store_true", help="per-char SendInput instead of paste")
     a.add_argument("--key", help="tap keys: enter,tab,esc,backspace, or chords like ctrl+c")
     a.add_argument("--drag", help="hold-drag window pixels polyline: x1,y1,x2,y2;x3,y3")
@@ -171,23 +212,41 @@ def main(argv: list[str] | None = None) -> int:
     m = sub.add_parser("mcp", help="serve streamable-http MCP on this machine")
     m.add_argument("--host", default="127.0.0.1")
     m.add_argument("--port", type=int, default=8771)
+    m.add_argument(
+        "--allow-host",
+        dest="allow_host",
+        action="append",
+        default=None,
+        help="extra Host name to accept besides loopback (repeatable; also CU_PERCEIVE_ALLOWED_HOSTS=a,b)",
+    )
 
     args = parser.parse_args(argv)
     if args.cmd == "perceive":
         from .core import perceive
-        out = perceive(
-            image=args.image,
-            out_dir=args.out,
-            hwnd=args.hwnd,
-            title=args.title,
-            exe=args.exe,
-            focus=args.focus,
-            ocr=args.ocr,
-            yolo=args.yolo,
-            uia=bool(getattr(args, "uia", False)),
-            roi=getattr(args, "roi", None),
-            roi_norm=getattr(args, "roi_norm", None),
-        )
+        from .extras import MissingExtraError
+        try:
+            out = perceive(
+                image=args.image,
+                out_dir=args.out,
+                hwnd=args.hwnd,
+                title=args.title,
+                exe=args.exe,
+                focus=args.focus,
+                ocr=args.ocr,
+                yolo=args.yolo,
+                uia=bool(getattr(args, "uia", False)),
+                roi=getattr(args, "roi", None),
+                roi_norm=getattr(args, "roi_norm", None),
+                capture=getattr(args, "capture", None),
+            )
+        except MissingExtraError as e:
+            print(json.dumps(e.to_dict(), ensure_ascii=False))
+            print(str(e), file=sys.stderr)
+            return 3
+        if out.get("ok") is False and not out.get("stamp"):
+            print(json.dumps(out, ensure_ascii=False))
+            print(out.get("error") or "perceive failed", file=sys.stderr)
+            return 1
         slim = {
             "stamp": out["stamp"],
             "count": len(out["items"]),
@@ -206,6 +265,9 @@ def main(argv: list[str] | None = None) -> int:
             "anno": out.get("anno"),
             "json": out["json"],
         }
+        for k in ("identity", "capture", "focused", "warnings"):
+            if k in out:
+                slim[k] = out[k]
         if out.get("verify_light"):
             slim["verify_light"] = True
             slim["roi"] = out.get("roi")
@@ -327,6 +389,7 @@ def main(argv: list[str] | None = None) -> int:
             hold=args.hold,
             extras=extras,
             uia_name=uia_names or None,
+            replace=bool(args.replace),
         )
         if path_specs:
             specs = path_specs + specs
@@ -351,6 +414,8 @@ def main(argv: list[str] | None = None) -> int:
                 max_age_sec=getattr(args, "max_age", None),
                 strict_stamp=bool(getattr(args, "strict_stamp", False)),
                 stamp_json_path=str(path) if path else None,
+                focus=bool(args.focus),
+                stamp_source=("explicit" if (args.stamp or args.json) else "latest") if path else None,
             )
         except (MethodError, RuntimeError, FileNotFoundError, OSError, KeyError, ValueError) as e:
             err = {
@@ -365,9 +430,13 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(err, ensure_ascii=False))
             print(str(e), file=sys.stderr)
             return 1
-        out["json"] = str(path)
+        out["json"] = str(path) if path else None
+        if out.get("missing_extra"):
+            print(json.dumps(out, ensure_ascii=False))
+            print(out.get("error") or "missing extra", file=sys.stderr)
+            return 3
         if warnings:
-            out["warnings"] = warnings
+            out["warnings"] = (out.get("warnings") or []) + warnings
         if args.path:
             out["experimental"] = True
             out["path_file"] = str(args.path)
@@ -414,7 +483,7 @@ def main(argv: list[str] | None = None) -> int:
         return code
     if args.cmd == "mcp":
         from .mcp_server import serve
-        serve(host=args.host, port=args.port)
+        serve(host=args.host, port=args.port, allowed_hosts=args.allow_host)
         return 0
     return 2
 

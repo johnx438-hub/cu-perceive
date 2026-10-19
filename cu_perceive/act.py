@@ -5,7 +5,53 @@ import json
 import time
 from pathlib import Path
 
-DEFAULT_OUT = Path(r"C:\Users\jawn\agent-bus\archive\shots\perceive")
+from .config import out_dir as _config_out_dir
+
+DEFAULT_OUT = _config_out_dir()
+REPLACE_SELECT_KEY = "ctrl+a"
+
+
+def read_frame(path: Path) -> dict:
+    """Parse one stamp JSON. ValueError (not a bare JSONDecodeError) when empty or partial."""
+    text = Path(path).read_text(encoding="utf-8")
+    if not text.strip():
+        raise ValueError(f"stamp json is empty (still being written?): {path}; retry or re-perceive")
+    try:
+        frame = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"stamp json is unreadable ({e}): {path}; retry or re-perceive") from e
+    if not isinstance(frame, dict):
+        raise ValueError(f"stamp json is not an object: {path}; re-perceive")
+    return frame
+
+
+def _is_perceive_stamp_json(p: Path) -> bool:
+    """<stamp>.json from perceive. Excludes <stamp>.windows.json desktop maps."""
+    from . import stamps
+
+    return p.suffix == ".json" and bool(stamps.STAMP_RE.match(p.name[: -len(".json")]))
+
+
+def latest_frame(out_dir: Path | None = None) -> tuple[dict, Path | None]:
+    """Newest readable perceive stamp; skips windows maps and empty / partial files."""
+    out_dir = Path(out_dir or DEFAULT_OUT)
+    cands = []
+    for p in out_dir.glob("*.json"):
+        if not _is_perceive_stamp_json(p):
+            continue
+        try:
+            cands.append((p.stat().st_mtime, p))
+        except OSError:
+            continue
+    if not cands:
+        return {}, None
+    cands.sort(key=lambda t: t[0], reverse=True)
+    for _, p in cands:
+        try:
+            return read_frame(p), p
+        except (OSError, ValueError):
+            continue
+    raise ValueError(f"no readable perceive stamp in {out_dir}; re-perceive or pass --stamp")
 
 
 def load_frame(stamp: str | None = None, json_path: str | None = None) -> tuple[dict, Path | None]:
@@ -13,14 +59,14 @@ def load_frame(stamp: str | None = None, json_path: str | None = None) -> tuple[
         path = Path(json_path)
     elif stamp:
         path = DEFAULT_OUT / f"{stamp}.json"
+        windows_map = DEFAULT_OUT / f"{stamp}.windows.json"
+        if not path.is_file() and windows_map.is_file():
+            path = windows_map
     else:
-        cands = list(DEFAULT_OUT.glob("*.json"))
-        if not cands:
-            return {}, None
-        path = max(cands, key=lambda p: p.stat().st_mtime)
+        return latest_frame()
     if not path.is_file():
         raise FileNotFoundError(f"stamp json not found: {path}")
-    return json.loads(path.read_text(encoding="utf-8")), path
+    return read_frame(path), path
 
 
 def window_to_screen(frame: dict, x: int, y: int) -> tuple[int, int]:
@@ -262,7 +308,10 @@ def parse_steps(
     hold: float = 0,
     extras: list | None = None,
     uia_name: str | list | None = None,
+    replace: bool = False,
 ) -> list[dict]:
+    """Flat act fields -> ordered specs. replace=True puts a ctrl+a select-all before
+    every type step so the paste replaces the field's text instead of inserting at the caret."""
     out: list[dict] = []
     if steps:
         for raw in steps.replace(" ", "").split(","):
@@ -334,6 +383,14 @@ def parse_steps(
             n = n.strip()
             if n:
                 out.append({"kind": "uia_name", "query": n})
+    if replace:
+        with_select: list[dict] = []
+        for s in out:
+            if s.get("kind") == "type":
+                with_select.append({"kind": "key", "key": REPLACE_SELECT_KEY, "replace": True})
+                s["replace"] = True
+            with_select.append(s)
+        out = with_select
     if float(hold or 0) > 0:
         for s in out:
             if s.get("kind") in ("id", "xy", "norm", "uia_name"):
@@ -426,9 +483,15 @@ def plan_steps(frame: dict, specs: list[dict]) -> list[dict]:
         elif kind == "scroll":
             steps.append({"via": "scroll", "notches": int(spec["notches"]), "screen": last_screen})
         elif kind == "type":
-            steps.append({"via": "type", "text": spec["text"], "input_via": spec.get("input_via") or "paste"})
+            step = {"via": "type", "text": spec["text"], "input_via": spec.get("input_via") or "paste"}
+            if spec.get("replace"):
+                step["replace"] = True
+            steps.append(step)
         elif kind == "key":
-            steps.append({"via": "key", "key": spec["key"]})
+            step = {"via": "key", "key": spec["key"]}
+            if spec.get("replace"):
+                step["replace"] = True
+            steps.append(step)
         elif kind == "wait":
             steps.append({"via": "wait", "sec": float(spec["sec"])})
         elif kind == "uia_name":
@@ -696,17 +759,16 @@ def normalize_hold_key(hold_key: str | None) -> str | None:
 
 
 def _parse_stamp_age_sec(stamp: str | None, json_path: str | Path | None = None) -> float | None:
-    """Age in seconds from stamp YYYYMMDD-HHMMSS, else json file mtime. None if unknown."""
+    """Age in seconds from stamp YYYYMMDD-HHMMSS[-mmm][-N], else json file mtime. None if unknown."""
     from datetime import datetime
     import time as _time
 
+    from .stamps import parse_time
+
     if stamp:
-        s = str(stamp).strip()
-        try:
-            dt = datetime.strptime(s, "%Y%m%d-%H%M%S")
+        dt = parse_time(str(stamp))
+        if dt is not None:
             return max(0.0, (datetime.now() - dt).total_seconds())
-        except ValueError:
-            pass
     if json_path:
         p = Path(json_path)
         try:
@@ -715,6 +777,34 @@ def _parse_stamp_age_sec(stamp: str | None, json_path: str | Path | None = None)
         except OSError:
             pass
     return None
+
+
+def _needs_window_checks(frame: dict) -> bool:
+    coord = frame.get("coord_space")
+    return coord == "window" or (frame.get("hwnd") is not None and coord != "screen")
+
+
+def stamp_identity_error(frame: dict | None) -> str | None:
+    """HWND + PID + process creation time on the stamp vs live. None = same window.
+
+    Screen-space stamps carry no window and pass. Window stamps without an
+    identity block (older stamps) fail closed.
+    """
+    frame = frame or {}
+    if not _needs_window_checks(frame):
+        return None
+    hwnd = frame.get("hwnd")
+    ident = frame.get("identity") or {}
+    if not ident:
+        return "stamp has no window identity (perceived by an older cu-perceive); re-perceive"
+    try:
+        if int(ident.get("hwnd")) != int(hwnd):
+            return f"stamp identity hwnd {ident.get('hwnd')!r} != stamp hwnd {hwnd!r}; re-perceive"
+    except (TypeError, ValueError):
+        return f"bad stamp identity hwnd {ident.get('hwnd')!r}; re-perceive"
+    from .windows import verify_window_identity
+
+    return verify_window_identity(hwnd, ident.get("pid"), ident.get("ctime"))
 
 
 def check_stamp(
@@ -789,11 +879,19 @@ def check_stamp(
 
             if not win32gui.IsWindow(hwnd_i):
                 out["ok"] = False
+                out["identity_ok"] = False
                 out["error"] = f"hwnd {hwnd_i} no longer exists; re-perceive"
                 return out
         except Exception as e:
             out["ok"] = False
             out["error"] = f"hwnd check failed: {e}; re-perceive"
+            return out
+
+        id_err = stamp_identity_error(frame)
+        out["identity_ok"] = id_err is None
+        if id_err:
+            out["ok"] = False
+            out["error"] = id_err
             return out
 
         origin = frame.get("origin")
@@ -875,10 +973,12 @@ def check_stamp(
 def apply_foreground_accounting(out: dict) -> None:
     """Mark SendInput / true-cursor usage on click steps and the act JSON.
 
-    Mutates out["steps"] and sets top-level foreground_used /
-    foreground_click_count. Only via in id/xy/norm count as clicks.
-    Effective method is chosen_method when out["method"]=="auto"
-    (missing chosen -> input); otherwise out["method"].
+    Mutates out["steps"] (per-step foreground_used = planned) and sets top-level
+    planned_foreground_click_count. foreground_used / foreground_click_count are the
+    planned values on a dry run; on --go they start at 0/False and count only clicks
+    actually sent (_count_live_click), so a refused --go reports 0.
+    Only via in id/xy/norm count as clicks. Effective method is chosen_method when
+    out["method"]=="auto" (missing chosen -> input); otherwise out["method"].
     input -> True; post/uia -> False.
     """
     method = out.get("method")
@@ -894,11 +994,299 @@ def apply_foreground_accounting(out: dict) -> None:
         step["foreground_used"] = used
         if used:
             count += 1
-    out["foreground_used"] = count > 0
-    out["foreground_click_count"] = count
+    out["planned_foreground_click_count"] = count
+    if out.get("dry_run", True):
+        out["foreground_used"] = count > 0
+        out["foreground_click_count"] = count
+    else:
+        out["foreground_used"] = False
+        out["foreground_click_count"] = 0
 
 
-def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: bool = False, gap: float = 0.12, hold_key: str | None = None, method: str | None = None, max_age_sec: float | None = None, strict_stamp: bool = False, stamp_json_path: str | Path | None = None, origin_slop_px: int = 8) -> dict:
+def _count_live_click(out: dict) -> None:
+    out["foreground_click_count"] = int(out.get("foreground_click_count") or 0) + 1
+    out["foreground_used"] = True
+
+
+def _identity_abort(out: dict, frame: dict, steps: list[dict], n: int) -> bool:
+    """Re-check stamp identity right before live step n. True = aborted (out updated)."""
+    err = stamp_identity_error(frame)
+    if err is None:
+        return False
+    out["ok"] = False
+    out["error"] = f"window identity check before step {n} failed: {err}"
+    out["identity_abort_step"] = n
+    for s in steps:
+        s.pop("_uia_control", None)
+        s.pop("_uia_action", None)
+    return True
+
+
+KEYBOARD_VIAS = ("type", "key")
+FOCUSING_VIAS = ("id", "xy", "norm", "drag")
+FOCUS_SETTLE_S = 0.15
+
+
+def unguarded_keyboard_steps(steps: list[dict]) -> list[int]:
+    """Indices of type/key steps with no click or drag earlier in the chain.
+
+    Keys go to whatever window has keyboard focus; only an earlier click/drag in the
+    same chain puts that focus on the stamp window.
+    """
+    found: list[int] = []
+    clicked = False
+    for n, step in enumerate(steps):
+        via = step.get("via")
+        if via in FOCUSING_VIAS:
+            clicked = True
+        elif via in KEYBOARD_VIAS and not clicked:
+            found.append(n)
+    return found
+
+
+def _has_window(frame: dict) -> bool:
+    return bool(frame.get("hwnd")) and _needs_window_checks(frame)
+
+
+KEYBOARD_SETTLE_TRIES = 10
+KEYBOARD_SETTLE_S = 0.05
+
+
+def _bring_forward(frame: dict, out: dict) -> str | None:
+    """--focus: raise the stamp window, then re-check its identity. None = done."""
+    hwnd = int(frame["hwnd"])
+    from .windows import force_foreground
+
+    try:
+        force_foreground(hwnd)
+    except Exception as e:
+        return f"--focus could not bring stamp window {hwnd} forward ({e})"
+    out["focused_window"] = True
+    time.sleep(FOCUS_SETTLE_S)
+    err = stamp_identity_error(frame)
+    if err:
+        return f"window identity check after --focus failed: {err}"
+    return None
+
+
+def _foreground_ok(target: int, *, settle: bool) -> tuple[bool, int]:
+    """foreground_matches(target); with settle, give a just-sent click time to activate."""
+    from .windows import foreground_matches
+
+    tries = KEYBOARD_SETTLE_TRIES if settle else 1
+    ok, fg = False, 0
+    for i in range(tries):
+        ok, fg = foreground_matches(int(target))
+        if ok:
+            break
+        if i + 1 < tries:
+            time.sleep(KEYBOARD_SETTLE_S)
+    return ok, fg
+
+
+def _keyboard_target_error(
+    frame: dict, *, focus: bool, out: dict, clicked_window: int | None = None, settle: bool = False
+) -> str | None:
+    """None when keys sent now would reach the intended window. Fails closed.
+
+    The intended window is the stamp window, or for a screen-space stamp the window
+    an earlier click in this chain landed on (clicked_window). With focus (window
+    stamps only), brings the stamp window forward, then re-checks identity and foreground.
+    """
+    frame = frame or {}
+    window_stamp = _has_window(frame)
+    if window_stamp:
+        target, label = int(frame["hwnd"]), f"stamp window {frame['hwnd']}"
+    elif clicked_window:
+        target, label = int(clicked_window), f"clicked window {clicked_window}"
+    else:
+        return (
+            "keyboard step without a preceding click needs a window stamp: keys go to the "
+            "foreground window and this stamp has no window to check against; add a click on "
+            "the target field, or perceive the window (--hwnd/--title/--exe) and pass --stamp"
+        )
+    try:
+        ok, fg = _foreground_ok(target, settle=settle)
+    except Exception as e:
+        return f"could not read the foreground window ({e}); keyboard step refused"
+    if ok:
+        return None
+    if not focus or not window_stamp:
+        hint = (
+            "add a click on the target field, or pass --focus (MCP focus=true) to bring the "
+            "stamp window forward first"
+            if window_stamp
+            else "re-run once that window is in front"
+        )
+        return f"{label} is not in the foreground (foreground hwnd {fg}), so keys would go to another window; {hint}"
+    err = _bring_forward(frame, out)
+    if err:
+        return err + "; keyboard step refused"
+    try:
+        ok, fg = _foreground_ok(target, settle=False)
+    except Exception as e:
+        return f"could not read the foreground window after --focus ({e}); keyboard step refused"
+    if not ok:
+        return f"{label} is still not in the foreground after --focus (foreground hwnd {fg}); keyboard step refused"
+    return None
+
+
+def _keyboard_refuse(out: dict, n: int, err: str) -> dict:
+    out["ok"] = False
+    out["error"] = f"keyboard step {n} refused: {err}"
+    out["keyboard_refused_step"] = n
+    return out
+
+
+def _hold_refuse(out: dict, n: int, hold: str, err: str) -> dict:
+    """The --hold-key modifier goes to the foreground window, like any key."""
+    out["ok"] = False
+    out["error"] = f"--hold-key {hold} refused before step {n} (a held modifier goes to the foreground window): {err}"
+    out["hold_key_refused_step"] = n
+    return out
+
+
+def step_points(step: dict) -> list[tuple[str, list]]:
+    """Screen points where a pointer step's mouse events land: (label, [x, y]).
+
+    Clicks: the click point. Drags: start and end. Scroll: the hover point, or [] when
+    the wheel goes to the current cursor (resolved live). Hover/type/key/wait: none.
+    """
+    via = step.get("via")
+    if via in ("id", "xy", "norm") and step.get("screen"):
+        return [("click", list(step["screen"]))]
+    if via == "drag" and step.get("screen_points"):
+        pts = step["screen_points"]
+        return [("drag start", list(pts[0])), ("drag end", list(pts[-1]))]
+    if via == "scroll" and step.get("screen"):
+        return [("scroll", list(step["screen"]))]
+    return []
+
+
+POINTER_VIAS = ("id", "xy", "norm", "drag", "scroll")
+
+
+def _point_target_error(frame: dict, step: dict, *, focus: bool, out: dict) -> tuple[str | None, dict | None]:
+    """(error, window_info) for a live pointer step on a window stamp; (None, None) = all
+    of its points reach the stamp window (or a window it owns). Fails closed.
+
+    Screen-space stamps have no window to compare with and pass.
+    """
+    frame = frame or {}
+    if not _has_window(frame):
+        return None, None
+    hwnd = int(frame["hwnd"])
+    from .windows import point_owner
+
+    def check() -> tuple[str | None, dict | None, bool]:
+        points = step_points(step)
+        if step.get("via") == "scroll" and not points:
+            from . import _win32
+
+            points = [("scroll (cursor)", list(_win32.cursor_pos()))]
+        for label, (x, y) in points:
+            ok, info = point_owner(hwnd, int(x), int(y))
+            if not ok:
+                return (
+                    f"{label} point ({int(x)},{int(y)}) is covered by hwnd {info.get('hwnd')} "
+                    f"{info.get('title')!r}, not stamp window {hwnd}",
+                    {**info, "point": [int(x), int(y)], "what": label},
+                    True,
+                )
+        return None, None, False
+
+    try:
+        err, info, covered = check()
+    except Exception as e:
+        return f"could not check which window is under the target point ({e})", None
+    if not covered:
+        return None, None
+    if not focus:
+        return err + "; bring that window to the front (--focus / MCP focus=true) or re-perceive", info
+    ferr = _bring_forward(frame, out)
+    if ferr:
+        return ferr, info
+    try:
+        err2, info2, covered = check()
+    except Exception as e:
+        return f"could not check which window is under the target point after --focus ({e})", None
+    if covered:
+        return err2 + " even after --focus", info2
+    return None, None
+
+
+def _pointer_refuse(out: dict, n: int, err: str, info: dict | None) -> dict:
+    out["ok"] = False
+    out["error"] = f"pointer step {n} refused: {err}"
+    out["pointer_refused_step"] = n
+    if info:
+        out["point_window"] = info
+    return out
+
+
+def _clicked_window(step: dict) -> int | None:
+    """Top-level window under a click on a screen-space stamp (keyboard target later)."""
+    pts = step_points(step)
+    if not pts:
+        return None
+    try:
+        from .windows import window_at_point
+
+        return window_at_point(int(pts[0][1][0]), int(pts[0][1][1])) or None
+    except Exception:
+        return None
+
+
+def occluded_points(frame: dict, steps: list[dict], *, method: str) -> list[dict] | None:
+    """Planned pointer points that are currently covered by another window (dry run).
+
+    None when it can't be checked (off Windows, screen-space stamp, post/uia).
+    """
+    frame = frame or {}
+    if not _has_window(frame) or method in ("post", "uia"):
+        return None
+    from .windows import point_owner
+
+    found: list[dict] = []
+    try:
+        for n, step in enumerate(steps):
+            if method == "auto" and (step.get("chosen_method") or "input") != "input":
+                continue
+            for label, (x, y) in step_points(step):
+                ok, info = point_owner(int(frame["hwnd"]), int(x), int(y))
+                if not ok:
+                    found.append({"step": n, "what": label, "point": [int(x), int(y)], **info})
+    except Exception:
+        return None
+    return found
+
+
+def _implicit_stamp_error(frame: dict, stamp_source: str | None) -> str | None:
+    """--go on the latest stamp (no --stamp/--json) needs a window stamp with identity."""
+    if stamp_source != "latest":
+        return None
+    frame = frame or {}
+    if _has_window(frame) and frame.get("identity"):
+        return None
+    stamp = frame.get("stamp") or "<stamp>"
+    return (
+        f"act without --stamp picked the latest stamp {stamp}, which has no window identity "
+        f"(screen-space or older stamp); pass --stamp {stamp} (MCP stamp=...) or --json to act on it"
+    )
+
+
+def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: bool = False, gap: float = 0.12, hold_key: str | None = None, method: str | None = None, max_age_sec: float | None = None, strict_stamp: bool = False, stamp_json_path: str | Path | None = None, origin_slop_px: int = 8, focus: bool = False, stamp_source: str | None = None) -> dict:
+    """Plan specs against frame; dry_run=False sends input.
+
+    stamp_source: "explicit" (--stamp/--json), "latest" (newest stamp picked implicitly)
+    or None.
+
+    Live input (method=input, and auto steps that chose input) on a window stamp checks,
+    before each click / drag start and end / scroll, that the window under the point is
+    the stamp window or one it owns, and before each type/key step that the stamp window
+    is in the foreground. Otherwise the step is refused. focus: bring the stamp window
+    forward instead, re-check identity, then re-check the point or foreground.
+    """
     if not specs:
         return {
             "ok": False,
@@ -933,6 +1321,23 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                 "steps": [],
                 "error": err,
             }
+    from . import extras
+
+    uia_missing = method_n in ("uia", "auto") and bool(extras.missing_modules("uia"))
+    if method_n == "uia" and uia_missing:
+        try:
+            extras.require("uia")
+        except extras.MissingExtraError as e:
+            return {
+                **e.to_dict(),
+                "dry_run": bool(dry_run),
+                "method": method_n,
+                "stamp": (frame or {}).get("stamp"),
+                "hwnd": (frame or {}).get("hwnd"),
+                "coord_space": (frame or {}).get("coord_space"),
+                "origin": (frame or {}).get("origin"),
+                "steps": [],
+            }
     try:
         steps = plan_steps(frame or {}, specs)
     except ValueError as e:
@@ -958,8 +1363,15 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
         "origin": (frame or {}).get("origin"),
         "steps": steps,
     }
+    if stamp_source:
+        out["stamp_source"] = stamp_source
     if hold:
         out["hold_key"] = hold
+    if uia_missing and method_n == "auto":
+        out["warnings"] = [
+            "uia extra not installed, so method=auto cannot probe UIA and uses input; install: "
+            + extras.install_command("uia")
+        ]
     if method_n == "post":
         try:
             enrich_post_steps(frame or {}, steps, double=double)
@@ -1017,7 +1429,13 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
     out["stamp_reuse"] = True
     out["step_count"] = len(steps)
     stamp_bad = not stamp_check.get("ok")
-    if stamp_bad and (not dry_run or strict_stamp):
+    out["stamp_ok"] = not stamp_bad
+    if stamp_bad:
+        out["stamp_error"] = stamp_check.get("error") or "stamp check failed; re-perceive"
+    # A plan for a window that is gone or now belongs to another process is wrong, so
+    # identity failures fail the dry run too; moved/aged stamps only with strict_stamp.
+    wrong_window = stamp_check.get("identity_ok") is False
+    if stamp_bad and (not dry_run or strict_stamp or wrong_window):
         out["ok"] = False
         out["error"] = stamp_check.get("error") or "stamp check failed; re-perceive"
         if method_n in ("uia", "auto"):
@@ -1025,11 +1443,49 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                 s.pop("_uia_control", None)
                 s.pop("_uia_action", None)
         return out
+    implicit_err = _implicit_stamp_error(frame or {}, stamp_source)
+    unguarded = unguarded_keyboard_steps(steps) if method_n == "input" else []
     if dry_run:
+        warns = []
+        if implicit_err:
+            warns.append(implicit_err + "; --go will refuse")
+        if unguarded:
+            if _has_window(frame or {}):
+                warns.append(
+                    f"keyboard step(s) {unguarded} have no preceding click: --go sends them only "
+                    f"if stamp window {(frame or {}).get('hwnd')} is in the foreground "
+                    "(--focus brings it forward), otherwise refuses"
+                )
+            else:
+                warns.append(
+                    f"keyboard step(s) {unguarded} have no preceding click and this stamp has no "
+                    "window: --go will refuse; add a click on the target field"
+                )
+        occluded = occluded_points(frame or {}, steps, method=method_n)
+        if occluded is not None:
+            out["occluded_points"] = occluded
+        if occluded:
+            where = ", ".join(
+                f"step {o['step']} {o['what']} ({o['point'][0]},{o['point'][1]}) under hwnd {o['hwnd']} {o['title']!r}"
+                for o in occluded
+            )
+            warns.append(
+                f"planned point(s) currently covered by another window: {where}; --go will refuse "
+                "unless --focus brings the stamp window forward"
+            )
+        if warns:
+            out["warnings"] = (out.get("warnings") or []) + warns
         if method_n in ("uia", "auto"):
             for s in steps:
                 s.pop("_uia_control", None)
                 s.pop("_uia_action", None)
+        return out
+    if implicit_err:
+        out["ok"] = False
+        out["error"] = implicit_err
+        for s in steps:
+            s.pop("_uia_control", None)
+            s.pop("_uia_action", None)
         return out
     if method_n == "auto":
         # Live auto: execute chosen path only. No mid-go fallback uia->input.
@@ -1037,6 +1493,8 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
         from .input import click_xy
 
         for n, step in enumerate(steps):
+            if _identity_abort(out, frame or {}, steps, n):
+                return out
             via = step["via"]
             if via not in ("id", "xy", "norm"):
                 out["ok"] = False
@@ -1076,6 +1534,12 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
             else:
                 step.pop("_uia_control", None)
                 step.pop("_uia_action", None)
+                err, info = _point_target_error(frame or {}, step, focus=focus, out=out)
+                if err:
+                    for s in steps:
+                        s.pop("_uia_control", None)
+                        s.pop("_uia_action", None)
+                    return _pointer_refuse(out, n, err, info)
                 click_xy(
                     step["screen"][0],
                     step["screen"][1],
@@ -1084,6 +1548,7 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                     hold=float(step.get("hold") or 0),
                 )
                 step["clicked"] = True
+                _count_live_click(out)
             if n + 1 < len(steps):
                 time.sleep(gap)
         for s in steps:
@@ -1095,6 +1560,8 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
         from .uia import UiaError, invoke_control
 
         for n, step in enumerate(steps):
+            if _identity_abort(out, frame or {}, steps, n):
+                return out
             via = step["via"]
             if via not in ("id", "xy", "norm"):
                 out["ok"] = False
@@ -1141,6 +1608,8 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
         from .input import post_click_xy
         hwnd = int((frame or {}).get("hwnd") or 0)
         for n, step in enumerate(steps):
+            if _identity_abort(out, frame or {}, steps, n):
+                return out
             via = step["via"]
             if via not in ("id", "xy", "norm"):
                 out["ok"] = False
@@ -1167,17 +1636,42 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                 time.sleep(gap)
         return out
     from .input import click_xy, drag_path, enter_text, hover_xy, key_down, key_up, scroll_xy, tap_key
+    held = False
+    clicked = False
+    clicked_window: int | None = None
     try:
-        if hold:
-            key_down(hold)
         for n, step in enumerate(steps):
+            if _identity_abort(out, frame or {}, steps, n):
+                return out
             via = step["via"]
+            if via in KEYBOARD_VIAS:
+                err = _keyboard_target_error(
+                    frame or {}, focus=focus, out=out, clicked_window=clicked_window, settle=clicked
+                )
+                if err:
+                    return _keyboard_refuse(out, n, err)
+            elif via in POINTER_VIAS:
+                err, info = _point_target_error(frame or {}, step, focus=focus, out=out)
+                if err:
+                    return _pointer_refuse(out, n, err, info)
+                if via in FOCUSING_VIAS and not _has_window(frame or {}):
+                    clicked_window = _clicked_window(step)
+            if hold and not held and via not in ("hover", "wait"):
+                hold_target = None if _has_window(frame or {}) else _clicked_window(step)
+                err = _keyboard_target_error(frame or {}, focus=focus, out=out, clicked_window=hold_target)
+                if err:
+                    return _hold_refuse(out, n, hold, err)
+                key_down(hold)
+                held = True
+            if via in FOCUSING_VIAS:
+                clicked = True
             if via == "hover":
                 hover_xy(step["screen"][0], step["screen"][1])
                 step["hovered"] = True
             elif via in ("id", "xy", "norm"):
                 click_xy(step["screen"][0], step["screen"][1], double=double, button=step.get("button") or "left", hold=float(step.get("hold") or 0))
                 step["clicked"] = True
+                _count_live_click(out)
             elif via == "wait":
                 time.sleep(float(step["sec"]))
                 step["waited"] = True
@@ -1203,5 +1697,5 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                 time.sleep(gap)
         return out
     finally:
-        if hold:
+        if held:
             key_up(hold)
