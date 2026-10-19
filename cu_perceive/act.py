@@ -1052,6 +1052,24 @@ def stamp_identity_error(frame: dict | None) -> str | None:
     return verify_window_identity(hwnd, ident.get("pid"), ident.get("ctime"))
 
 
+def _note_replacement(out: dict, frame: dict, hwnd: int) -> dict | None:
+    """Fill hwnd_replaced / suggested_hwnd on out when the stamped hwnd was rebuilt."""
+    try:
+        from .windows import hwnd_replacement
+
+        title = (frame.get("window") or {}).get("title") if isinstance(frame.get("window"), dict) else None
+        rep = hwnd_replacement(hwnd, frame.get("identity") or {}, title)
+    except Exception:
+        return None
+    if rep:
+        out["hwnd_replaced"] = bool(rep.get("hwnd_replaced"))
+        out["replaced_why"] = rep.get("why")
+        out["suggested_hwnd"] = rep.get("suggested_hwnd")
+        if rep.get("candidates"):
+            out["replacement_candidates"] = rep["candidates"]
+    return rep
+
+
 def check_stamp(
     frame: dict | None,
     *,
@@ -1126,6 +1144,7 @@ def check_stamp(
                 out["ok"] = False
                 out["identity_ok"] = False
                 out["error"] = f"hwnd {hwnd_i} no longer exists; re-perceive"
+                _note_replacement(out, frame, hwnd_i)
                 return out
         except Exception as e:
             out["ok"] = False
@@ -1137,6 +1156,19 @@ def check_stamp(
         if id_err:
             out["ok"] = False
             out["error"] = id_err
+            _note_replacement(out, frame, hwnd_i)
+            return out
+        rep = _note_replacement(out, frame, hwnd_i)
+        if rep:
+            out["ok"] = False
+            out["identity_ok"] = False
+            if rep.get("hwnd_replaced"):
+                out["error"] = (
+                    f"hwnd {hwnd_i} was replaced ({rep['why']}); suggested_hwnd="
+                    f"{rep.get('suggested_hwnd')} — re-perceive that window"
+                )
+            else:
+                out["error"] = f"hwnd {hwnd_i} is hidden/cloaked; re-perceive"
             return out
 
         origin = frame.get("origin")
@@ -1325,19 +1357,37 @@ KEYBOARD_SETTLE_S = 0.05
 def _bring_forward(frame: dict, out: dict) -> str | None:
     """--focus: raise the stamp window, then re-check its identity. None = done."""
     hwnd = int(frame["hwnd"])
-    from .windows import force_foreground
+    if frame.get("_focus_verified") == hwnd:
+        return None  # already raised and verified earlier in this act call
+    from .windows import focus_and_verify
 
-    try:
-        force_foreground(hwnd)
-    except Exception as e:
-        _set_refusal(out, "focus_failed", "click the stamp window once by hand, then retry")
-        return f"--focus could not bring stamp window {hwnd} forward ({e})"
+    fv = focus_and_verify(hwnd, retries=1)
+    out["foreground_ok"] = fv.get("foreground_ok")
+    out["focus_attempts"] = fv.get("focus_attempts")
+    if fv.get("foreground_ok") is False:
+        out["focused_window"] = False
+        out["foreground_hwnd"] = fv.get("foreground_hwnd")
+        ftitle = fv.get("foreground_title")
+        if ftitle:
+            out["foreground_title"] = ftitle
+        if fv.get("foreground_hwnd"):
+            out["blocking_window"] = {"hwnd": fv.get("foreground_hwnd"), "title": ftitle}
+        _set_refusal(
+            out, "focus_failed",
+            (f"'{ftitle}' kept the foreground; " if ftitle else "")
+            + "click the stamp window once by hand (or close what is in front), then retry",
+        )
+        return (
+            f"focus=true but stamp window {hwnd} is not foreground after "
+            f"{fv.get('focus_attempts')} attempts (foreground={fv.get('foreground_hwnd')}); nothing sent"
+        )
     out["focused_window"] = True
     time.sleep(FOCUS_SETTLE_S)
     err = stamp_identity_error(frame)
     if err:
         _set_refusal(out, "identity_changed", HINT_REPERCEIVE)
         return f"window identity check after --focus failed: {err}"
+    frame["_focus_verified"] = hwnd
     return None
 
 
@@ -2253,7 +2303,13 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
     if stamp_bad and (not dry_run or strict_stamp or wrong_window):
         out["ok"] = False
         out["error"] = stamp_check.get("error") or "stamp check failed; re-perceive"
-        _set_refusal(out, "identity_changed" if wrong_window else "stamp_check_failed", HINT_REPERCEIVE)
+        if stamp_check.get("hwnd_replaced"):
+            out["hwnd_replaced"] = True
+            out["suggested_hwnd"] = stamp_check.get("suggested_hwnd")
+            _set_refusal(out, "hwnd_replaced",
+                         f"window was rebuilt; perceive hwnd={stamp_check.get('suggested_hwnd')} and retry")
+        else:
+            _set_refusal(out, "identity_changed" if wrong_window else "stamp_check_failed", HINT_REPERCEIVE)
         if method_n in ("uia", "auto"):
             for s in steps:
                 s.pop("_uia_control", None)
@@ -2305,6 +2361,17 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
             s.pop("_uia_control", None)
             s.pop("_uia_action", None)
         return out
+    if focus and _has_window(frame or {}):
+        # PR11: focus=true is verified up front (one retry): nothing is sent unless the
+        # stamp window (or a window it owns) really is the foreground window.
+        ferr = _bring_forward(frame or {}, out)
+        if ferr:
+            out["ok"] = False
+            out["error"] = ferr
+            for s in steps:
+                s.pop("_uia_control", None)
+                s.pop("_uia_action", None)
+            return out
     ime_err = _suspend_ime_for_act(out, frame or {}, steps, ime_mode)
     if ime_err:
         for s in steps:

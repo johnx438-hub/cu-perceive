@@ -216,7 +216,14 @@ def window_identity(hwnd: int) -> dict:
 
     hwnd = int(hwnd)
     pid = _win32.window_pid(hwnd)
-    return {"hwnd": hwnd, "pid": pid or None, "ctime": _ctime_str(pid)}
+    out = {"hwnd": hwnd, "pid": pid or None, "ctime": _ctime_str(pid)}
+    try:
+        cls = _win32.class_name(hwnd)
+    except Exception:
+        cls = ""
+    if cls:
+        out["class"] = cls
+    return out
 
 
 def verify_window_identity(hwnd, pid, ctime) -> str | None:
@@ -442,6 +449,106 @@ def refresh_geom(hwnd: int) -> tuple[dict | None, dict | None]:
 def force_foreground(hwnd: int) -> bool:
     """Restore + raise + focus. Only on explicit request (perceive focus=true)."""
     return bool(_window_service().force_foreground(int(hwnd)))
+
+
+FOCUS_VERIFY_SETTLE_S = 0.15
+
+
+def focus_and_verify(hwnd: int, *, retries: int = 1, settle: float | None = None,
+                     raise_fn=None, check_fn=None, sleep=None) -> dict:
+    """force_foreground, then GetForegroundWindow must be hwnd or a window it owns.
+
+    Retries ``retries`` times. Returns {foreground_ok, foreground_hwnd, focus_attempts}
+    (+ foreground_title when wrong). foreground_ok is None when the foreground cannot
+    be read (no Win32), so callers cannot verify and must not claim success either way.
+    """
+    import time as _time
+
+    raise_fn = raise_fn or force_foreground
+    check_fn = check_fn or foreground_matches
+    sleep = sleep or _time.sleep
+    settle = FOCUS_VERIFY_SETTLE_S if settle is None else settle
+    fg = 0
+    errors: list[str] = []
+    attempts = 0
+    for attempts in range(1, int(retries) + 2):
+        try:
+            raise_fn(int(hwnd))
+        except Exception as e:  # keep going: the check below decides
+            errors.append(str(e))
+        sleep(settle)
+        try:
+            ok, fg = check_fn(int(hwnd))
+        except Exception:
+            return {"foreground_ok": None, "foreground_hwnd": None, "focus_attempts": attempts}
+        if ok:
+            return {"foreground_ok": True, "foreground_hwnd": int(fg or 0) or None, "focus_attempts": attempts}
+    out = {"foreground_ok": False, "foreground_hwnd": int(fg or 0) or None, "focus_attempts": attempts}
+    try:
+        from . import _win32
+
+        if fg:
+            out["foreground_title"] = _win32.window_title(int(fg)) or None
+    except Exception:
+        pass
+    if errors:
+        out["focus_errors"] = errors[-2:]
+    return out
+
+
+def replacement_candidates(hwnd: int, pid: int, cls: str | None, title: str | None, rows=None) -> list[dict]:
+    """Visible top-level windows of the same pid that could be the rebuilt window (best first)."""
+    try:
+        rows = rows if rows is not None else list_windows(include_minimized=False)
+    except Exception:
+        return []
+    cands = [r for r in rows if int(r.get("pid") or 0) == int(pid or 0) and int(r.get("hwnd") or 0) != int(hwnd)]
+
+    def score(r):
+        x0, y0, x1, y1 = (r.get("rect") or [0, 0, 0, 0])[:4]
+        return (bool(cls) and r.get("class") == cls, bool(title) and r.get("title") == title, (x1 - x0) * (y1 - y0))
+
+    cands.sort(key=score, reverse=True)
+    return [{k: r.get(k) for k in ("hwnd", "title", "class")} for r in cands[:3]
+            if (cls and r.get("class") == cls) or (title and r.get("title") == title)]
+
+
+def hwnd_replacement(hwnd: int, identity: dict | None, title: str | None = None, *, probe=None, rows=None) -> dict | None:
+    """None = hwnd still is the stamped window. Else {hwnd_replaced, why, suggested_hwnd, candidates}.
+
+    Replaced means: destroyed, class changed, or now hidden/cloaked while another
+    visible window of the same process (same class or title) took its place (an app
+    that rebuilds its top-level window, e.g. Qt/CEF apps switching views).
+    ``probe`` (tests) returns {exists, class, visible, cloaked, title}.
+    """
+    from . import _win32
+
+    identity = identity or {}
+    if probe is None:
+        def probe(h):
+            if not _win32.is_window(h):
+                return {"exists": False}
+            return {"exists": True, "class": _win32.class_name(h), "visible": _win32.is_window_visible(h),
+                    "cloaked": _win32.is_cloaked(h), "title": _win32.window_title(h)}
+    cls = identity.get("class")
+    if not cls:
+        # stamps from before PR11 carry no class: nothing to compare against
+        return None
+    st = probe(int(hwnd))
+    why = None
+    if not st.get("exists"):
+        why = "destroyed"
+    elif cls and st.get("class") and st.get("class") != cls:
+        why = "class_changed"
+    elif not st.get("visible") or st.get("cloaked"):
+        why = "hidden"
+    if not why:
+        return None
+    cands = replacement_candidates(int(hwnd), int(identity.get("pid") or 0), cls, title, rows=rows)
+    if why == "hidden" and not cands:
+        return {"hwnd_replaced": False, "why": "hidden", "suggested_hwnd": None, "candidates": []}
+    return {"hwnd_replaced": True, "why": why, "suggested_hwnd": cands[0]["hwnd"] if cands else None,
+            "candidates": cands}
 
 
 def foreground_matches(hwnd: int) -> tuple[bool, int]:
