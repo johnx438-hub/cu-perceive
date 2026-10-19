@@ -66,7 +66,7 @@ def missing_dependency() -> dict:
 
 
 def parse_json_blob(text: str):
-    """Parse a JSON payload, including one pretty-printed or wrapped in a log line."""
+    """Parse a JSON object or array, including one pretty-printed or wrapped in a log line."""
     raw = (text or "").strip()
     if not raw:
         return None
@@ -74,13 +74,20 @@ def parse_json_blob(text: str):
         return json.loads(raw)
     except json.JSONDecodeError:
         pass
-    start = raw.find("{")
-    end = raw.rfind("}")
-    if start >= 0 and end > start:
+    candidates: list[tuple[int, str]] = []
+    start_obj = raw.find("{")
+    end_obj = raw.rfind("}")
+    if start_obj >= 0 and end_obj > start_obj:
+        candidates.append((start_obj, raw[start_obj : end_obj + 1]))
+    start_arr = raw.find("[")
+    end_arr = raw.rfind("]")
+    if start_arr >= 0 and end_arr > start_arr:
+        candidates.append((start_arr, raw[start_arr : end_arr + 1]))
+    for _, blob in sorted(candidates):
         try:
-            return json.loads(raw[start : end + 1])
+            return json.loads(blob)
         except json.JSONDecodeError:
-            return None
+            continue
     return None
 
 
@@ -99,6 +106,31 @@ def _outcome_hint(reason: str, bsk_hint: str | None) -> str | None:
     if bsk_hint:
         return f"{bsk_hint} {_OUTCOME_HINT}"
     return _OUTCOME_HINT
+
+
+def _usage_error(text: str) -> str | None:
+    """The short clap line from a bsk usage dump, or None when this is not one.
+
+    Clap prints ``error: ...`` plus a ``Usage:`` block and exits 1. The dump is
+    not the message callers should retry against.
+    """
+    raw = text or ""
+    lowered = raw.lower()
+    looks_like_clap = "unexpected argument" in lowered or "unexpected value" in lowered or (
+        "error:" in lowered and "usage:" in lowered
+    )
+    if not looks_like_clap:
+        return None
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith("error:"):
+            message = stripped.split(":", 1)[1].strip()
+            return message or stripped
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith("unexpected argument") or stripped.lower().startswith("unexpected value"):
+            return stripped
+    return "bsk rejected the command line"
 
 
 def interpret_run(run: BskRun) -> dict:
@@ -133,13 +165,26 @@ def interpret_run(run: BskRun) -> dict:
     if run.exit_code == 0:
         if isinstance(parsed, dict):
             return {"ok": True, "dry_run": False, "exit_code": 0, "result": parsed}
+        if isinstance(parsed, list):
+            # session list --json prints the sessions array, not an object.
+            return {"ok": True, "dry_run": False, "exit_code": 0, "result": {"items": parsed}}
         return {
             "ok": False,
             "reason": "bsk_failed",
-            "error": "bsk exited 0 but did not return a JSON object",
-            "hint": "retry browser_status; a working bsk --json prints an object",
+            "error": "bsk exited 0 but did not return JSON",
+            "hint": "retry browser_status; a working bsk --json prints JSON",
             "dry_run": False,
             "exit_code": 0,
+        }
+    usage = _usage_error(run.stderr) or _usage_error(run.stdout)
+    if usage and not isinstance(parsed, dict):
+        return {
+            "ok": False,
+            "reason": "bad_args",
+            "error": usage,
+            "hint": "bsk rejected the command line; values that start with - are passed as --flag=value or after --",
+            "dry_run": False,
+            "exit_code": run.exit_code,
         }
     # Navigate / reload can print a success-shaped body and exit 4 when the
     # lifecycle wait expires. The page may still be usable; surface it as data.

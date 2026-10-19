@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from cu_perceive import mcp_server
-from cu_perceive.browser.backend import BskRun, command_argv, set_backend
+from cu_perceive.browser.backend import BskRun, bsk_on_path, command_argv, set_backend
 from cu_perceive.browser.catalog import (
     ACT_ALIASES,
     ACT_VERBS,
@@ -76,6 +76,13 @@ elif mode == "browser":
     emit({"code": "cdp_failed", "message": "cdp failed", "hint": "retry", "exit_code": 3, "data": {}}, 3)
 elif mode == "version":
     emit({"code": "version_too_old", "message": "extension is old", "hint": "update", "exit_code": 5}, 5)
+elif mode == "clap":
+    sys.stderr.write(
+        "error: unexpected argument '-t' found\n\n"
+        "Usage: bsk fill --session <SESSION> --value <VALUE> [TARGET]\n\n"
+        "For more information, try '--help'.\n"
+    )
+    raise SystemExit(1)
 elif mode == "plain":
     sys.stdout.write("usage: nope\n")
     raise SystemExit(2)
@@ -86,13 +93,29 @@ elif mode == "nav_timeout":
     emit({"tab_id": 1, "url": "https://example.com", "reached": "timeout"}, 4)
 elif args[:2] == ["session", "start"]:
     emit({"session_id": "abcd", "browser_instance_id": "browser-1"}, 0)
+elif args[:2] == ["session", "list"]:
+    sys.stdout.write('[\n  {"session_id": "abcd"}\n]\n')
+    raise SystemExit(0)
 elif "status" in args:
     emit({"daemon": "0.3.3", "protocol": "1.3"}, 0)
 elif "observe" in args or "snapshot" in args:
     text = os.environ.get("BSK_FAKE_OBSERVE", '[button] @e3 "Go"')
-    emit({"text": text, "ref_count": text.count("@e"), "tab_id": 1}, 0)
-elif "click" in args:
-    emit({"tab_id": 1, "x": 1, "y": 2}, 0)
+    body = {"text": text, "ref_count": text.count("@e"), "tab_id": 1}
+    page = os.environ.get("BSK_FAKE_PAGE_URL")
+    if page:
+        body["url"] = page
+    emit(body, 0)
+elif "click" in args or "press" in args or "fill" in args:
+    body = {"tab_id": 1, "x": 1, "y": 2}
+    url = os.environ.get("BSK_FAKE_URL")
+    if url:
+        body["url"] = url
+    previous = os.environ.get("BSK_FAKE_PREVIOUS_URL")
+    if previous:
+        body["previous_url"] = previous
+    if os.environ.get("BSK_FAKE_NAVIGATED") == "1":
+        body["navigated"] = True
+    emit(body, 0)
 else:
     emit({"echo": args}, 0)
 """
@@ -103,9 +126,9 @@ class BrowserCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         home = Path(self.tmp.name)
         self.log = home / "bsk.log"
-        self.bsk = home / "bsk"
-        self.bsk.write_text(f"#!{sys.executable}\n{FAKE_BODY}", encoding="utf-8")
-        self.bsk.chmod(0o755)
+        # A .py file launched by sys.executable. A shebang script is WinError 193 on Windows.
+        self.bsk = home / "bsk.py"
+        self.bsk.write_text(FAKE_BODY, encoding="utf-8")
         self._env = mock.patch.dict(
             os.environ,
             {
@@ -182,6 +205,7 @@ class TestDryRunAndGo(BrowserCase):
         listed = browser_session(action="list")
         self.assertTrue(listed["ok"], listed)
         self.assertFalse(listed["dry_run"])
+        self.assertEqual(listed["result"], {"items": [{"session_id": "abcd"}]})
         self.assertEqual(self.calls()[-1], ["session", "list", "--json"])
 
         warned = browser_session(action="list", go=True)
@@ -196,7 +220,7 @@ class TestDryRunAndGo(BrowserCase):
         self.assertTrue(preview["dry_run"])
         self.assertEqual(preview["ref"], "@e3")
         self.assertEqual(preview["command"][0], str(self.bsk))
-        self.assertEqual(preview["command"][1:], ["click", "--session", "abcd", "@e3", "--json"])
+        self.assertEqual(preview["command"][1:], ["click", "--session", "abcd", "--json", "--", "@e3"])
         self.assertIn("preview only", preview["warnings"][0])
         self.assertEqual(len(self.calls()), 1)
 
@@ -231,7 +255,8 @@ class TestDryRunAndGo(BrowserCase):
         dry = browser_act(verb="click", session="abcd", ref="@e3", observation_id=oid)
         self.assertTrue(dry["ok"], dry)
         self.assertTrue(dry["dry_run"])
-        self.assertEqual(dry["command"][1:], ["click", "--session", "abcd", "@e3", "--json"])
+        self.assertEqual(dry["command"][1:], ["click", "--session", "abcd", "--json", "--", "@e3"])
+        self.assertTrue(any("pass go=true" in note for note in dry.get("warnings") or []))
         self.assertEqual(len(self.calls()), 1)
 
         idle = browser_act(verb="click", session="abcd", ref="@e3", observation_id=oid, dry_run=False)
@@ -271,14 +296,17 @@ class TestDryRunAndGo(BrowserCase):
         self.assertEqual(filled["verb"], "fill")
         self.assertEqual(
             filled["command"][1:],
-            ["fill", "--session", "abcd", "--value", "hello world", "@e3", "--json"],
+            ["fill", "--session", "abcd", "--value=hello world", "--json", "--", "@e3"],
         )
         self.assertTrue(any("runs as fill" in note for note in filled["warnings"]))
 
         pressed = browser_act(
             verb="key", session="abcd", ref="@e3", observation_id=oid, key="Enter", dry_run=True
         )
-        self.assertEqual(pressed["command"][1:], ["press", "--session", "abcd", "--ref", "@e3", "Enter", "--json"])
+        self.assertEqual(
+            pressed["command"][1:],
+            ["press", "--session", "abcd", "--ref", "@e3", "--json", "--", "Enter"],
+        )
 
         wheeled = browser_act(verb="scroll", session="abcd", delta_y=600, dry_run=True)
         self.assertEqual(wheeled["verb"], "wheel")
@@ -310,7 +338,7 @@ class TestDryRunAndGo(BrowserCase):
         self.assertTrue(out["dry_run"], out)
         self.assertEqual(
             out["command"][1:],
-            ["click", "--session", "abcd", "--button", "right", "--click-count", "2", "#go", "--json"],
+            ["click", "--session", "abcd", "--button", "right", "--click-count", "2", "--json", "--", "#go"],
         )
         self.assertTrue(any("selector" in note for note in out["warnings"]))
         self.assertEqual(self.calls(), [])
@@ -320,12 +348,64 @@ class TestDryRunAndGo(BrowserCase):
         self.assertFalse(live["dry_run"])
         self.assertEqual(self.calls(), [out["command"][1:]])
 
+    def test_hyphen_values_are_not_flags(self):
+        obs = self.observe()
+        oid = obs["observation_id"]
+        filled = browser_act(
+            verb="fill", session="abcd", ref="@e3", observation_id=oid, value="-test", dry_run=True
+        )
+        self.assertEqual(
+            filled["command"][1:],
+            ["fill", "--session", "abcd", "--value=-test", "--json", "--", "@e3"],
+        )
+        selected = browser_act(
+            verb="select", session="abcd", ref="@e3", observation_id=oid, value="-opt", dry_run=True
+        )
+        self.assertIn("--value=-opt", selected["command"])
+        opened = browser_tabs(action="create", session="abcd", url="-https://example.com/a?q=1", dry_run=True)
+        self.assertIn("--url=-https://example.com/a?q=1", opened["command"])
+        navigated = browser_act(verb="navigate", session="abcd", url="-https://example.com", dry_run=True)
+        self.assertEqual(
+            navigated["command"][1:],
+            ["navigate", "--session", "abcd", "--json", "--", "-https://example.com"],
+        )
+        pressed = browser_act(verb="key", session="abcd", key="-", dry_run=True)
+        self.assertEqual(pressed["command"][1:], ["press", "--session", "abcd", "--json", "--", "-"])
+
     def test_path_lookup_when_env_is_unset(self):
         os.environ.pop("CU_PERCEIVE_BSK")
-        os.environ["PATH"] = str(self.bsk.parent) + os.pathsep + os.environ.get("PATH", "")
+        home = self.bsk.parent
+        if sys.platform == "win32":
+            # PATH may only yield bsk.exe. A .cmd next to the fake must not be launched.
+            (home / "bsk.cmd").write_text("@echo off\r\n", encoding="utf-8")
+            os.environ["PATH"] = str(home) + os.pathsep + os.environ.get("PATH", "")
+            out = browser_status()
+            self.assertEqual(out["reason"], "missing_dependency")
+            self.assertEqual(self.calls(), [])
+            return
+        shim = home / "bsk"
+        shim.write_text(f"#!{sys.executable}\n{FAKE_BODY}", encoding="utf-8")
+        shim.chmod(0o755)
+        os.environ["PATH"] = str(home) + os.pathsep + os.environ.get("PATH", "")
         out = browser_status()
         self.assertTrue(out["ok"], out)
-        self.assertEqual(out["command"][0], str(self.bsk))
+        self.assertEqual(out["command"][0], str(shim))
+
+    def test_windows_path_accepts_only_bsk_exe(self):
+        home = self.bsk.parent
+        cmd = home / "bsk.cmd"
+        bat = home / "bsk.bat"
+        exe = home / "bsk.exe"
+        cmd.write_text("@echo off\n", encoding="utf-8")
+        bat.write_text("@echo off\n", encoding="utf-8")
+        with mock.patch.object(sys, "platform", "win32"), mock.patch.dict(
+            os.environ, {"PATH": str(home)}, clear=False
+        ):
+            self.assertIsNone(bsk_on_path())
+            exe.write_text("", encoding="utf-8")
+            found = bsk_on_path()
+            self.assertEqual(found, str(exe))
+            self.assertTrue(found.lower().endswith(".exe"))
 
 
 class TestUnknownArgs(BrowserCase):
@@ -411,6 +491,16 @@ class TestErrorMapping(BrowserCase):
             self.assertEqual(out["exit_code"], code, mode)
             self.assertIn("hint", out)
 
+    def test_clap_usage_is_bad_args_without_the_dump(self):
+        os.environ["BSK_FAKE_MODE"] = "clap"
+        out = browser_status()
+        self.assertFalse(out["ok"], out)
+        self.assertEqual(out["reason"], "bad_args")
+        self.assertEqual(out["error"], "unexpected argument '-t' found")
+        self.assertNotIn("Usage:", out["error"])
+        self.assertNotIn("stderr", out)
+        self.assertNotIn("Usage:", json.dumps(out))
+
     def test_input_outcome_unknown_says_not_to_retry_blindly(self):
         obs = self.observe()
         os.environ["BSK_FAKE_MODE"] = "outcome_unknown"
@@ -471,7 +561,10 @@ class TestStaleRef(BrowserCase):
         obs = self.observe()
         nav = browser_act(verb="navigate", session="abcd", url="https://example.com", go=True)
         self.assertTrue(nav["ok"], nav)
-        self.assertEqual(self.calls()[-1], ["navigate", "--session", "abcd", "https://example.com", "--json"])
+        self.assertEqual(
+            self.calls()[-1],
+            ["navigate", "--session", "abcd", "--json", "--", "https://example.com"],
+        )
         after = browser_act(verb="click", session="abcd", ref="@e3", observation_id=obs["observation_id"], go=True)
         self.assertEqual(after["reason"], "stale_observation")
         self.assertIsNone(after["latest_observation_id"])
@@ -483,6 +576,51 @@ class TestStaleRef(BrowserCase):
             verb="click", session="abcd", ref="@e3", observation_id=again["observation_id"], go=True
         )
         self.assertEqual(dropped["reason"], "stale_observation")
+
+    def test_click_that_changes_the_url_drops_refs(self):
+        os.environ["BSK_FAKE_PAGE_URL"] = "https://a.example/"
+        obs = self.observe()
+        os.environ["BSK_FAKE_URL"] = "https://a.example/"
+        same = browser_act(verb="click", session="abcd", ref="@e3", observation_id=obs["observation_id"])
+        self.assertTrue(same["ok"], same)
+        still = browser_act(verb="press", session="abcd", ref="@e3", observation_id=obs["observation_id"], key="Enter")
+        self.assertTrue(still["ok"], still)
+
+        os.environ["BSK_FAKE_URL"] = "https://b.example/"
+        moved = browser_act(verb="fill", session="abcd", ref="@e3", observation_id=obs["observation_id"], value="go")
+        self.assertTrue(moved["ok"], moved)
+        self.assertTrue(any("URL changed" in note for note in moved["warnings"]))
+        stale = browser_act(verb="click", session="abcd", ref="@e3", observation_id=obs["observation_id"])
+        self.assertEqual(stale["reason"], "stale_observation")
+        self.assertIsNone(stale["latest_observation_id"])
+        self.assertEqual(len(self.calls()), 4)
+
+    def test_previous_url_in_the_result_drops_refs(self):
+        obs = self.observe()
+        os.environ["BSK_FAKE_PREVIOUS_URL"] = "https://a.example/"
+        os.environ["BSK_FAKE_URL"] = "https://b.example/"
+        moved = browser_act(verb="click", session="abcd", ref="@e3", observation_id=obs["observation_id"])
+        self.assertTrue(moved["ok"], moved)
+        stale = browser_act(verb="click", session="abcd", ref="@e3", observation_id=obs["observation_id"])
+        self.assertEqual(stale["reason"], "stale_observation")
+        self.assertEqual(self.calls()[-1][0], "click")
+        self.assertEqual(len(self.calls()), 2)
+
+    def test_cursor_page_replaces_refs_because_bsk_does(self):
+        first = self.observe()
+        os.environ["BSK_FAKE_OBSERVE"] = '[link] @e9 "Next"'
+        second = browser_observe(session="abcd", cursor="page-2")
+        self.assertTrue(second["ok"], second)
+        self.assertEqual(second["refs"], ["@e9"])
+        self.assertIn("--cursor=page-2", second["command"])
+        self.assertTrue(any("replaces the ref map" in note for note in second["warnings"]))
+        stale = browser_act(verb="click", session="abcd", ref="@e3", observation_id=first["observation_id"])
+        self.assertEqual(stale["reason"], "stale_observation")
+        also = browser_act(verb="click", session="abcd", ref="@e3", observation_id=second["observation_id"])
+        self.assertEqual(also["reason"], "stale_observation")
+        self.assertEqual(len(self.calls()), 2)
+        live = browser_act(verb="hover", session="abcd", ref="@e9", observation_id=second["observation_id"])
+        self.assertTrue(live["ok"], live)
 
     def test_snapshot_refs_count_as_an_observe(self):
         os.environ["BSK_FAKE_OBSERVE"] = "link @e4"

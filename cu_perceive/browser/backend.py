@@ -48,10 +48,47 @@ class BrowserBackend(Protocol):
 
 
 def command_argv(executable: str, args: list[str]) -> list[str]:
-    """Exact argv a backend run uses, including the trailing ``--json``."""
+    """Exact bsk argv, including ``--json``.
+
+    ``--json`` goes before a ``--`` positional separator. Clap treats every
+    argument after ``--`` as a positional, so the flag cannot follow a url,
+    key, or target.
+    """
     argv = [executable, *args]
     if "--json" not in argv:
-        argv.append("--json")
+        if "--" in argv:
+            argv.insert(argv.index("--"), "--json")
+        else:
+            argv.append("--json")
+    return argv
+
+
+def bsk_on_path() -> str | None:
+    """Resolve ``bsk`` from ``PATH``.
+
+    On Windows only ``bsk.exe`` counts. ``shutil.which`` would also accept
+    ``bsk.cmd`` / ``bsk.bat`` via ``PATHEXT``, and those wrappers are not the
+    CLI.
+    """
+    if sys.platform == "win32":
+        for directory in os.environ.get("PATH", "").split(os.pathsep):
+            if not directory:
+                continue
+            candidate = os.path.join(directory, "bsk.exe")
+            if os.path.isfile(candidate):
+                return candidate
+        return None
+    return shutil.which("bsk")
+
+
+def _spawn_argv(argv: list[str]) -> list[str]:
+    """How to start ``argv``. A ``.py`` fake is handed to this interpreter.
+
+    Windows cannot execute a shebang script (WinError 193). Production
+    ``bsk.exe`` does not use this path.
+    """
+    if argv and argv[0].lower().endswith(".py"):
+        return [sys.executable, *argv]
     return argv
 
 
@@ -91,7 +128,7 @@ class SubprocessBsk:
             if os.path.isfile(path):
                 return path
             return None
-        return shutil.which("bsk")
+        return bsk_on_path()
 
     def run(self, args: list[str], *, timeout: float) -> BskRun:
         exe = self.executable()
@@ -103,7 +140,7 @@ class SubprocessBsk:
             flags["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         try:
             proc = subprocess.run(
-                argv,
+                _spawn_argv(argv),
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 timeout=timeout,

@@ -169,7 +169,7 @@ scroll+位置仍隐含 hover（现纪律）。
 ## 验收（实现后）
 
 1. **浏览器**：perceive Edge → act 点地址栏区 norm → key ctrl+a → type URL → enter；先 dry-run 看出点，再 Shawn 说 `--go` 真跑。
-2. **Office 或记事本**：perceive → 点客户区 → type 一行 → assert 标题仍在。
+2. **单独的测试窗口**（不要用 Win11 记事本：它把文件开成已有窗口的标签，清空了也会提示保存）：perceive → 点客户区 → type 一行 → assert 标题仍在。
 3. 故意用过期 stamp / 最小化窗：必须 `ok:false` + `stopped_at`，不得点到屏外。
 4. dry-run 全程无鼠标点击（可用日志/`clicked` 字段证明）。
 

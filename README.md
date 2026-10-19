@@ -243,10 +243,18 @@ runs. `CU_PERCEIVE_BSK_REQUIRE_GO=1` (also `true`, `yes`, `on`) dry-runs acting
 verbs unless `go=true`, and `dry_run=true` still wins. Desktop `act` keeps its
 own dry-run default and ignores that switch. `browser_act` refuses a ref that
 is not from the latest `browser_observe` for that session
-(`reason: "stale_observation"`). `browser_tabs action=borrow` can ask the user
-to confirm in the browser when the command runs, which is the default. A
-result whose reason is `input_outcome_unknown` means do not retry blindly;
-observe the page and decide from what it shows.
+(`reason: "stale_observation"`). `value` and `url` are passed as
+`--value=<v>` and `--url=<u>`. A positional url, key, or target goes after
+`--`, so a value such as `-test` is not parsed as a flag. `browser_observe`
+with `cursor` reads the next page of the same capture. bsk replaces the ref
+map on that page, so refs from earlier pages are not reused. A click, press,
+or fill whose result reports a different page URL clears the stored refs.
+`session list --json` is a JSON array; the tool returns it as
+`result.items`. `browser_tabs action=borrow` can ask the user to confirm in
+the browser when the command runs, which is the default. A result whose
+reason is `input_outcome_unknown` means do not retry blindly; observe the
+page and decide from what it shows. A bsk usage error is `reason:
+"bad_args"` and the short clap line, not the usage dump.
 
 `bsk` runs on Windows with a connected Chromium-family browser. The tests here
 use a fake executable.
@@ -265,7 +273,7 @@ Nothing machine-specific is hard-coded. Defaults and overrides:
 | Extra MCP Host names (e.g. a tailnet name behind a proxy) | none | `CU_PERCEIVE_ALLOWED_HOSTS=a,b` or `mcp --allow-host a` |
 | WSL distro for UNC paths | `Ubuntu` | `CU_PERCEIVE_WSL_DISTRO` |
 | Capture backend | `auto` | `CU_PERCEIVE_CAPTURE` |
-| `bsk` executable (browser tools) | `bsk` on `PATH` | `CU_PERCEIVE_BSK` |
+| `bsk` executable (browser tools) | `bsk` on `PATH` (`bsk.exe` only on Windows) | `CU_PERCEIVE_BSK` |
 | `bsk` subprocess timeout | 120 seconds | `CU_PERCEIVE_BSK_TIMEOUT` |
 | Browser acting verbs | run unless `dry_run=true` (`go` is ignored) | `CU_PERCEIVE_BSK_REQUIRE_GO=1` dry-runs unless `go=true` |
 
@@ -295,7 +303,9 @@ third-party licenses.
     python -m pytest
 
 The tests mock Win32 and run on Linux. The Windows capture paths need a manual
-check on a real Windows machine.
+check on a real Windows machine. Win11 Notepad opens a file as a tab in an
+existing window and asks to save even after that tab was emptied, so a desktop
+test should launch its own app or window.
 
 ## License
 

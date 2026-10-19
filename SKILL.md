@@ -17,7 +17,7 @@ description: >-
 
 网页里的事（Chrome / Edge 标签页里的页面）用 `browser_*`。它们调用本机的 `bsk` 命令（BrowserSkill CLI，可选，不随 cu-perceive 安装）。桌面程序，以及把浏览器当普通窗口来移动或点标题栏，仍用 `windows` / `perceive_window` / `act`。
 
-`bsk` 用 `CU_PERCEIVE_BSK` 指定，否则从 PATH 找。找不到时返回 `ok:false`、`reason: missing_dependency` 和安装提示，不会自己下载。
+`bsk` 用 `CU_PERCEIVE_BSK` 指定，否则从 PATH 找。Windows 上从 PATH 只认 `bsk.exe`，不认 `.cmd` / `.bat`。找不到时返回 `ok:false`、`reason: missing_dependency` 和安装提示，不会自己下载。
 
 | 工具 | 用途 | 何时真的执行 |
 |---|---|---|
@@ -29,7 +29,7 @@ description: >-
 
 `go` 可以传，但不拦这些调用（沿用桌面 `act` 的 `go=true` 也不会坏）。`CU_PERCEIVE_BSK_REQUIRE_GO=1`（也认 `true` / `yes` / `on`）把写操作改回默认 dry-run、`go=true` 才执行，并且 `dry_run=true` 仍优先。桌面 `act` 仍是默认 dry-run，不读这个开关。
 
-`dry_run=true` 返回将要执行的 `command`（完整 `bsk ... --json` argv）和 `ref`，不启动 `bsk`。`browser_act` 的 ref 必须来自该 session 最近一次 `browser_observe`，并带上那次的 `observation_id`；旧 ref 直接拒绝（`reason: stale_observation`），不会发给 `bsk`。`tab borrow` 执行时可能要用户在浏览器里确认（默认就会执行）。bsk 若返回 `input_outcome_unknown`，不要盲重试，先再 observe。
+`dry_run=true` 返回将要执行的 `command`（完整 `bsk ... --json` argv）和 `ref`，不启动 `bsk`。`value` / `url` 写成 `--value=<v>` / `--url=<u>`；位置参数形式的 url、key、target 放在 `--` 后面，这样 `-test` 这种值不会被 bsk 当成 flag。`browser_act` 的 ref 必须来自该 session 最近一次 `browser_observe`，并带上那次的 `observation_id`；旧 ref 直接拒绝（`reason: stale_observation`），不会发给 `bsk`。`observe` 带 `cursor` 是同一份采集的下一页，但 bsk 会换掉 ref map，上一页的 `@eN` 不能再用。click / press / fill 的结果若表明页面 URL 变了，本地会清掉已存的 ref。`tab borrow` 执行时可能要用户在浏览器里确认（默认就会执行）。bsk 若返回 `input_outcome_unknown`，不要盲重试，先再 observe。
 
 `bsk` 需要 Windows 上已连接的 Chrome 或 Edge。仓库里的测试用假的可执行文件，不启动浏览器。
 
@@ -157,6 +157,7 @@ MCP 默认带压缩图；要全分辨率走磁盘路径。CLI 仍用 map 路径�
 - 云电脑桌面
 - 没说 `--go` 就点或拖桌面（`act`）。网页的 `browser_act` 默认就会执行；只预览要传 `dry_run=true`
 - 用 `act` 去点网页里的链接或表单；那是 `browser_act`，先 `browser_observe`
+- 用 Win11 记事本当桌面测试窗口。它把文件开成已有窗口里的标签，清空了也会问要不要保存。桌面测试用自己的程序或窗口
 - 默认开 OCR 或 YOLO
 - 给游戏挂机写方案
 - 远程 HTTPS 当已接通（Grok Bot 后端不在 tailnet；先 CLI）

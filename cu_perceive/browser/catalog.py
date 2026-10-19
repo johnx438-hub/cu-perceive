@@ -366,12 +366,27 @@ def _append_common(spec: Spec, args: list[str]) -> int:
     return 0
 
 
+def _equals_opt(flag: str, value: str) -> str:
+    """``--flag=value``. A separate argument that starts with ``-`` is a clap flag."""
+    return f"{flag}={value}"
+
+
+def _append_positional(args: list[str], value: str) -> None:
+    """One positional after ``--``. bsk clap accepts that for url, key, and target.
+
+    ``--json`` is inserted before this separator by the backend. Anything after
+    ``--`` is positional, so the flag must not follow the value.
+    """
+    args.append("--")
+    args.append(value)
+
+
 def _append_target(spec: Spec, args: list[str], *, required: bool) -> tuple[str | None, str | None]:
     ref, selector = _target(spec, required=required)
     if ref:
-        args.append(ref)
+        _append_positional(args, ref)
     elif selector:
-        args.append(selector)
+        _append_positional(args, selector)
     return ref, selector
 
 
@@ -449,8 +464,9 @@ def plan_observe(spec: Spec) -> Plan:
         allow |= {"cursor", "probe_hover"}
     session = _check_fields(kind, spec, allow, session="required")
     args = [kind, "--session", session]
-    if kind == "observe" and _text(spec.cursor):
-        args += ["--cursor", _no_injection(_text(spec.cursor), "cursor")]
+    cursor = _text(spec.cursor) if kind == "observe" else ""
+    if cursor:
+        args.append(_equals_opt("--cursor", _no_injection(cursor, "cursor")))
     depth = _pos_int(spec.max_depth, "max_depth")
     if depth is not None:
         args += ["--max-depth", str(depth)]
@@ -460,7 +476,13 @@ def plan_observe(spec: Spec) -> Plan:
     if spec.probe_hover:
         args.append("--probe-hover")
     _append_common(spec, args)
-    return _finish(kind, args, session, None, None, read=True, records=True)
+    plan = _finish(kind, args, session, None, None, read=True, records=True)
+    if cursor:
+        plan.notes.append(
+            "bsk replaces the ref map on each cursor page; refs from earlier pages of this "
+            "observation are not valid. Use this page's refs before continuing"
+        )
+    return plan
 
 
 def plan_session(spec: Spec) -> Plan:
@@ -533,7 +555,7 @@ def plan_tabs(spec: Spec) -> Plan:
         args = ["tab", "create", "--session", session]
         url = _text(spec.url)
         if url:
-            args += ["--url", _no_injection(url, "url")]
+            args.append(_equals_opt("--url", _no_injection(url, "url")))
         if spec.active is False:
             args.append("--no-active")
         return _finish(verb, args, session, None, None, read=False)
@@ -578,7 +600,7 @@ def _plan_fill(spec: Spec) -> Plan:
     if value == "":
         raise plan_error("bad_args", "fill needs value", 'pass value="the text to write"')
     _no_injection(value, "value")
-    args = ["fill", "--session", session, "--value", value]
+    args = ["fill", "--session", session, _equals_opt("--value", value)]
     if spec.clear is False:
         args.append("--no-clear")
     timeout = _append_common(spec, args)
@@ -592,7 +614,7 @@ def _plan_select(spec: Spec) -> Plan:
     if value == "":
         raise plan_error("bad_args", "select needs value (the option value, not its label)", "pass value=")
     _no_injection(value, "value")
-    args = ["select", "--session", session, "--value", value]
+    args = ["select", "--session", session, _equals_opt("--value", value)]
     timeout = _append_common(spec, args)
     ref, selector = _append_target(spec, args, required=True)
     return _finish("select", args, session, ref, selector, read=False, timeout_ms=timeout, observation_id=spec.observation_id)
@@ -611,7 +633,7 @@ def _plan_press(spec: Spec) -> Plan:
     elif selector:
         args += ["--selector", selector]
     timeout = _append_common(spec, args)
-    args.append(key)
+    _append_positional(args, key)
     return _finish("press", args, session, ref, selector, read=False, timeout_ms=timeout, observation_id=spec.observation_id)
 
 
@@ -626,7 +648,8 @@ def _plan_navigate(spec: Spec) -> Plan:
     if wait:
         args += ["--wait-until", wait]
     timeout = _append_common(spec, args)
-    args.append(url)
+    # navigate's url is a positional, not --url (that flag belongs to tab create).
+    _append_positional(args, url)
     return _finish("navigate", args, session, None, None, read=False, timeout_ms=timeout, observation_id=spec.observation_id)
 
 

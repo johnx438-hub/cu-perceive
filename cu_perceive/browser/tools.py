@@ -12,7 +12,7 @@ import os
 from . import catalog
 from .backend import command_argv, get_backend, set_backend, timeout_sec
 from .errors import interpret_run, missing_dependency
-from .ledger import LEDGER, stale_refusal
+from .ledger import LEDGER, action_changed_url, stale_refusal
 
 
 def reset_browser_state() -> None:
@@ -44,17 +44,24 @@ def bsk_require_go() -> bool:
     return os.environ.get("CU_PERCEIVE_BSK_REQUIRE_GO", "").strip().lower() in _REQUIRE_GO_ON
 
 
+_GO_NOTE = "pass go=true to run this command"
+
+
 def _act_send(go: bool, dry_run: bool | None) -> tuple[bool, list[str]]:
     """(run the command, notes). ``dry_run=true`` always previews. ``go`` gates only under the env switch."""
     if dry_run:
         if bsk_require_go() and go:
             return False, ["dry_run=true overrides go=true: this was a dry run, nothing was sent"]
-        return False, ["dry_run=true: preview only, nothing was sent"]
+        notes = ["dry_run=true: preview only, nothing was sent"]
+        if bsk_require_go():
+            notes.append(_GO_NOTE)
+        return False, notes
     if bsk_require_go():
-        notes = []
-        if dry_run is False and not go:
-            notes.append("dry_run=false does not send input; pass go=true to send")
-        return bool(go), notes
+        if not go:
+            if dry_run is False:
+                return False, ["dry_run=false does not send input; pass go=true to send"]
+            return False, [_GO_NOTE]
+        return True, []
     return True, []
 
 
@@ -150,6 +157,14 @@ def _execute(plan: catalog.Plan, *, go: bool, dry_run: bool | None) -> dict:
         interpreted["refs"] = list(obs.refs)
     elif interpreted.get("ok") and plan.invalidates and plan.session:
         LEDGER.forget(plan.session)
+    elif interpreted.get("ok") and plan.verb in {"click", "press", "fill"} and plan.session:
+        latest = LEDGER.latest(plan.session)
+        previous = None if latest is None else latest.page_url
+        if action_changed_url(previous, interpreted.get("result")):
+            LEDGER.forget(plan.session)
+            notes.append(
+                "the page URL changed; stored refs were cleared; call browser_observe before using a ref"
+            )
     extra = _warnings(notes, interpreted.get("warnings"))
     if extra:
         interpreted["warnings"] = extra
@@ -210,8 +225,10 @@ def browser_observe(
 ):
     """Read the session's active tab. kind=observe (default) or snapshot. Runs immediately.
 
-    Returns observation_id and refs (@eN). bsk replaces those refs on the next observe;
-    pass both the ref and this observation_id to browser_act. cursor, max_tokens,
+    Returns observation_id and refs (@eN). A fresh observe replaces those refs.
+    cursor continues the same capture as the next page; bsk replaces the ref map
+    on that page too, so earlier pages' refs are not kept. Pass both the ref and
+    this observation_id to browser_act. cursor, max_tokens,
     max_depth, tab_id, and probe_hover map onto bsk flags. Needs a session from
     browser_session action=start.
     """
