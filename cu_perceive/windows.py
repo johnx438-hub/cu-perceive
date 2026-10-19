@@ -25,6 +25,46 @@ _SKIP_TITLE = (
 )
 
 
+def top_level_brief() -> list[dict] | None:
+    """Visible top-level windows as {hwnd, title, class}. None when the list cannot be read."""
+    try:
+        rows = list_windows(include_minimized=True)
+    except Exception:
+        return None
+    out: list[dict] = []
+    for w in rows:
+        try:
+            out.append({
+                "hwnd": int(w["hwnd"]),
+                "title": w.get("title") or "",
+                "class": w.get("class") or "",
+            })
+        except (TypeError, ValueError, KeyError):
+            continue
+    return out
+
+
+def foreground_brief() -> dict | None:
+    """Foreground window {foreground_hwnd, title, class}. None off Windows."""
+    try:
+        from . import _win32
+
+        fg = int(_win32.foreground_window() or 0)
+    except Exception:
+        return None
+    if not fg:
+        return {"foreground_hwnd": 0, "title": "", "class": ""}
+    try:
+        title = _win32.window_title(fg) or ""
+    except Exception:
+        title = ""
+    try:
+        cls = _win32.class_name(fg) or ""
+    except Exception:
+        cls = ""
+    return {"foreground_hwnd": fg, "title": title, "class": cls}
+
+
 def list_windows(include_minimized: bool = True) -> list[dict]:
     import psutil
     import win32gui
@@ -418,6 +458,33 @@ def foreground_matches(hwnd: int) -> tuple[bool, int]:
     if not fg or not hwnd:
         return False, fg
     return owned_by(_win32.root_window(fg) or fg, int(hwnd)), fg
+
+
+def focus_matches(hwnd: int) -> tuple[bool | None, int]:
+    """(True, focus) when GetGUIThreadInfo's hwndFocus has GA_ROOT == hwnd.
+
+    (None, 0) when focus cannot be read, or hwnd is not a live window (unit-test
+    hwnds). A child edit of hwnd matches. An owned modal dialog does not: its
+    top-level window is the dialog, and typing there would edit the dialog.
+    """
+    from . import _win32
+
+    try:
+        target = int(hwnd)
+        if not target or not _win32.is_window(target):
+            return None, 0
+        focused = _win32.focus_hwnd()
+    except Exception:
+        return None, 0
+    if focused is None:
+        return None, 0
+    if not focused:
+        return False, 0
+    try:
+        root = int(_win32.root_window(int(focused)) or int(focused))
+    except Exception:
+        return None, 0
+    return root == target, int(focused)
 
 
 MENU_CLASS = "#32768"

@@ -58,8 +58,17 @@ class _Live(unittest.TestCase):
             mock.patch("cu_perceive.input.drag_path",
                        side_effect=lambda *a, **k: self.calls.append("drag") or {"samples": 2}),
             mock.patch("cu_perceive.input.tap_key", side_effect=lambda k: self.calls.append(f"key:{k}")),
+            mock.patch("cu_perceive.input.prepare_paste",
+                       side_effect=lambda t: {"ok": True, "staged": True, "save_ok": True,
+                                              "saved": "prev", "text": t, "n": len(str(t))}),
+            mock.patch("cu_perceive.input.finish_paste",
+                       side_effect=lambda s: self.calls.append(f"type:{s.get('text')}") or {
+                           "ok": True, "restored": True, "via": "clipboard"}),
             mock.patch("cu_perceive.input.enter_text",
                        side_effect=lambda t, via="paste": self.calls.append(f"type:{t}")),
+            mock.patch("cu_perceive.input.clear_field_for_replace",
+                       side_effect=lambda **k: self.calls.append("clear") or {
+                           "ok": True, "method": "value_pattern", "empty": True, "verified": True}),
             mock.patch("cu_perceive.input.key_down", side_effect=lambda k: self.calls.append(f"down:{k}")),
             mock.patch("cu_perceive.input.key_up", side_effect=lambda k: self.calls.append(f"up:{k}")),
             mock.patch("time.sleep"),
@@ -108,7 +117,7 @@ class TestKeyboardOnlyGo(_Live):
     def test_allowed_when_stamp_window_in_front(self):
         out = self.go(_window_frame(), text="hello", key="enter", replace=True)
         self.assertTrue(out["ok"], out)
-        self.assertEqual(self.calls, ["key:ctrl+a", "type:hello", "key:enter"])
+        self.assertEqual(self.calls, ["clear", "type:hello", "key:enter"])
         self.assertNotIn("focused_window", out)
 
     def test_click_first_still_checks_foreground(self):
@@ -141,10 +150,10 @@ class TestKeyboardOnlyGo(_Live):
             self.fg = 999
 
         with mock.patch("cu_perceive.input.tap_key", side_effect=tap):
-            out = self.go(_window_frame(), text="hello", replace=True)
+            out = self.go(_window_frame(), key="a,enter")
         self.assertFalse(out["ok"])
         self.assertEqual(out["keyboard_refused_step"], 1)
-        self.assertEqual(self.calls, ["key:ctrl+a"])
+        self.assertEqual(self.calls, ["key:a"])
 
     def test_foreground_unreadable_fails_closed(self):
         with mock.patch("cu_perceive.windows.foreground_matches", side_effect=OSError("no user32")):
@@ -158,7 +167,7 @@ class TestKeyboardOnlyGo(_Live):
         out = self.go(_window_frame(), text="hello", replace=True, focus=True)
         self.assertTrue(out["ok"], out)
         self.assertTrue(out["focused_window"])
-        self.assertEqual(self.calls, [f"focus:{HWND}", "key:ctrl+a", "type:hello"])
+        self.assertEqual(self.calls, [f"focus:{HWND}", "clear", "type:hello"])
 
     def test_focus_rechecks_identity(self):
         self.fg = 999

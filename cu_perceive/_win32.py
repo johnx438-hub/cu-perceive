@@ -214,6 +214,36 @@ def foreground_window() -> int:
     return int(_dll("user32").GetForegroundWindow() or 0)
 
 
+def focus_hwnd() -> int | None:
+    """hwndFocus of the foreground thread.
+
+    None when GetGUIThreadInfo fails. 0 when the call succeeds and nothing has focus.
+    Raises Win32Unavailable off Windows.
+    """
+
+    class GUITHREADINFO(ctypes.Structure):
+        _fields_ = (
+            ("cbSize", wintypes.DWORD),
+            ("flags", wintypes.DWORD),
+            ("hwndActive", wintypes.HWND),
+            ("hwndFocus", wintypes.HWND),
+            ("hwndCapture", wintypes.HWND),
+            ("hwndMenuOwner", wintypes.HWND),
+            ("hwndMoveSize", wintypes.HWND),
+            ("hwndCaret", wintypes.HWND),
+            ("rcCaret", wintypes.RECT),
+        )
+
+    info = GUITHREADINFO()
+    info.cbSize = ctypes.sizeof(GUITHREADINFO)
+    user32 = _dll("user32")
+    user32.GetGUIThreadInfo.argtypes = [wintypes.DWORD, ctypes.POINTER(GUITHREADINFO)]
+    user32.GetGUIThreadInfo.restype = wintypes.BOOL
+    if not user32.GetGUIThreadInfo(0, ctypes.byref(info)):
+        return None
+    return int(info.hwndFocus or 0)
+
+
 def root_window(hwnd: int) -> int:
     """Top-level ancestor of hwnd via the parent chain (GA_ROOT; owners are not followed)."""
     if not hwnd:
