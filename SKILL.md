@@ -120,7 +120,11 @@ MCP 默认带压缩图；要全分辨率走磁盘路径。CLI 仍用 map 路径�
 
 ## Agent 易踩坑（K3 / 88yr 2026-09-05）
 
-- MCP `act` 只有**扁平字段**（`norm`/`xy`/`ids`/`text`/`key`…），**没有** `steps=[{...}]` JSON 数组；乱传会被静默丢掉。若解析后零步骤，现在返回 `ok:false` + error（不再假绿）。
+- MCP `act` 只有**扁平字段**（`norm`/`xy`/`ids`/`text`/`key`…），**没有** `steps=[{...}]` JSON 数组。未声明的参数（`steps`、`x`、`action`…）一律拒绝：调用报错，错误文本是 JSON（`reason: "unknown_args"`、`unknown_args`、`valid_args`），什么都不执行。若解析后零步骤，返回 `ok:false` + error。
+- `dry_run=true` 优先于 `go=true`（只做 dry run，带 warning）；只传 `dry_run=false` 不会发送，要发送就传 `go=true`。
+- 坐标可以是字符串 `"640,500"` / `"177,752;500,200"`，也可以是数组 `norm=[640,500]`、`xy=[[10,20],[30,40]]`。
+- `scroll` 单位是滚轮格数（一格约三行），不是像素；超过 50 格按 50 格发，返回 `scroll_clamped: true` + warning。
+- OCR/YOLO 每次调用有超时（`CU_PERCEIVE_DETECT_TIMEOUT`，默认 30 秒，新 worker 第一次 3 倍）。超时就杀掉 worker 重开，perceive 照样返回 stamp，只是没有识别结果并带 warning。不开 ocr/yolo 的 perceive 不会等 worker。
 - 点击例：`act(stamp="...", norm="935,69", go=true)`；坐标逗号（也认冒号）。只有键：`act(stamp="...", text="hi", replace=true, go=true, focus=true)`。
 - 完整回路：`windows` → `perceive_window` →（稳定 UI）同 stamp 多步 dry `act` → 用户 批后再 `--go` → 再 `perceive_window` 验证（点后优先 `--roi-norm` 轻复验，首次选点/规划仍全窗）。窗挪了或 ROI stamp → 重 perceive，勿盲点。
 

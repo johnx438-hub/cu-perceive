@@ -49,8 +49,19 @@ worker dies only that perceive loses its detections (with a warning); the next
 call starts a new one. As a second guard, capture never starts WGC in a process
 where onnxruntime is loaded: `auto` goes straight to PrintWindow and
 `capture.attempts` shows WGC as `skipped: "unsafe"`; an explicit `--capture wgc`
-fails instead of crashing. `CU_PERCEIVE_DETECT_INPROC=1` runs OCR/YOLO
-in-process (for debugging), which then turns this guard on.
+fails instead of crashing, with `reason: "wgc_refused_onnxruntime_guard"` and an
+error that says the onnxruntime guard refused it. `CU_PERCEIVE_DETECT_INPROC=1`
+runs OCR/YOLO in-process (for debugging), which then turns this guard on.
+
+Each OCR/YOLO call has a timeout, `CU_PERCEIVE_DETECT_TIMEOUT` seconds (default
+30; `0` waits forever). The first call of a new worker, which loads the models,
+gets three times that. A call that runs past it kills the worker and starts a
+fresh one, and the perceive still returns its stamp, without detections and
+with a warning. Only one detection call runs at a time. A second one waits for
+the worker at most that long, then returns its stamp with a "busy" warning.
+Perceive calls without `ocr`/`yolo` never wait on the worker. The MCP server
+runs every tool call in a worker thread, so a slow OCR call doesn't hold up
+other tool calls either. Live `act` chains still run one at a time.
 
 ## Window capture
 
@@ -86,7 +97,10 @@ and adds a warning to the result.
 Stamps are named `YYYYMMDD-HHMMSS-mmm` (milliseconds), with `-2`, `-3`, ... if
 that name is already taken, so two perceives never overwrite each other. A stamp's
 `.json` only appears once it is complete (it is written to a temporary file and
-renamed into place), so `act` never reads a half-written stamp.
+renamed into place), so `act` never reads a half-written stamp. Perceive also
+records each window's newest stamp in `<out_dir>/.latest/hwnd-<N>`, so
+`act --hwnd N` without a stamp reads that stamp and any newer files only, not
+every json in a large output directory.
 
 ## Acting
 
@@ -109,7 +123,18 @@ renamed into place), so `act` never reads a half-written stamp.
 - `--scroll` (MCP `scroll`, an int or a string) takes wheel notches. Prefer the
   explicit forms `down:N` (toward the bottom of the page) and `up:N`. A bare
   number is signed: negative scrolls down and **positive scrolls up**, so a
-  bare positive number adds a warning that says so.
+  bare positive number adds a warning that says so. One notch is one wheel
+  click (about three lines), not a pixel. More than 50 notches is capped at 50,
+  with `scroll_clamped: true` and a warning; repeat the call to go further.
+- MCP `act` takes points as `"x,y"` strings (`"177,752;500,200"` for several)
+  or as arrays: `norm=[640,500]`, `xy=[[10,20],[30,40]]`, also for `drag` /
+  `drag_norm`.
+- MCP tools refuse arguments they don't declare instead of dropping them: the
+  call returns an error whose text is JSON with `reason: "unknown_args"`,
+  `unknown_args` and `valid_args`, and nothing runs. That includes
+  `steps=[{...}]` (act has only flat fields). `act` takes `dry_run` as an alias:
+  `dry_run=true` forces a dry run even with `go=true`, and `dry_run=false` on
+  its own doesn't send anything (only `go=true` sends). Both cases add a warning.
 - `--hold-key` (MCP `hold_key`) holds a modifier during the clicks, drags and
   scrolls of the same call, so it needs at least one of them. On its own, with
   only keys, or with only a hover, `act` fails with

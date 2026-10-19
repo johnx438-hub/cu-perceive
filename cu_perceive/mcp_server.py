@@ -277,6 +277,8 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         map_inline=false = JSON/path only. ocr=true only for text ids. yolo=true runs ScreenParser (class names as item text).
         uia=true (S4) walks UIA under pinned hwnd; additive uia_nodes with 0-1000 norm (same as grid). Default all off. No click.
         ocr/uia/yolo are optional extras; if missing the reply has ok=false and the exact pip command in "install".
+        ocr/yolo run in a worker process with a timeout (CU_PERCEIVE_DETECT_TIMEOUT, default 30 s): a hung worker is
+        restarted and the stamp comes back without detections plus a warning. Unknown arguments are refused (reason=unknown_args).
         E2 light verify: roi="L,T,W,H" or roi_norm="CX,CY[,HALF]" (mutually exclusive) crops after full grab; map 0-1000 is ROI-local.
         out_dir optional: Windows path or /mnt/c/... ; response also has map_wsl / png_wsl (lowercase drive)."""
         hwnd_n = _nz_int(hwnd)

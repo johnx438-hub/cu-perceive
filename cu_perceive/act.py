@@ -337,9 +337,9 @@ def _num(v) -> int:
 def coerce_points(v) -> str | None:
     """Points as act's "x,y;x,y" string. Also takes [x, y], [[x, y], ...], {"x":..,"y":..}
     and the JSON text of those; floats are rounded. Empty -> None."""
-    if v is None or isinstance(v, bool):
+    if v is None:
         return None
-    if isinstance(v, (int, float)):
+    if isinstance(v, (bool, int, float)):
         raise ValueError(f'bad point {v!r}: expected "x,y" or [x, y]')
     if isinstance(v, str):
         s = v.strip()
@@ -1513,7 +1513,7 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
             **base,
             "error": (
                 "no actionable steps: pass flat fields norm/xy/ids/text/key/drag/drag_norm/scroll "
-                '(e.g. norm="935,69"). Unknown keys like steps=[{...}] are ignored by MCP - not executed.'
+                '(e.g. norm="935,69"). There is no steps=[{...}] field (MCP refuses it with reason=unknown_args).'
             ),
             "reason": "no_steps",
             "hint": 'pass e.g. norm="500,500", scroll="down:3", text="hi", or key="enter"',
