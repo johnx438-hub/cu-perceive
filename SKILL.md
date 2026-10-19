@@ -12,6 +12,24 @@ description: >-
 
 **格子图是地图。** OCR / id 是可选项。默认 **不点不拖**；`--go` / `go=true` 只在 用户 当次明确说了才加。
 
+## 浏览器页面 vs 桌面
+
+网页里的事（Chrome / Edge 标签页里的页面）用 `browser_*`。它们调用本机的 `bsk` 命令（BrowserSkill CLI，可选，不随 cu-perceive 安装）。桌面程序，以及把浏览器当普通窗口来移动或点标题栏，仍用 `windows` / `perceive_window` / `act`。
+
+`bsk` 用 `CU_PERCEIVE_BSK` 指定，否则从 PATH 找。找不到时返回 `ok:false`、`reason: missing_dependency` 和安装提示，不会自己下载。
+
+| 工具 | 用途 | 何时真的执行 |
+|---|---|---|
+| `browser_status` | daemon / 已连接的浏览器 | 立刻 |
+| `browser_session` | `list` / `start` / `stop` | `list` 立刻；`start` 和 `stop` 默认 dry-run，`go=true` 才执行 |
+| `browser_observe` | `observe` 或 `snapshot`，返回 `@eN` 和 `observation_id` | 立刻（只读） |
+| `browser_tabs` | `list` / `create` / `close` / `select` / `borrow` / `return` | `list` 立刻；其余 dry-run，`go=true` 才执行 |
+| `browser_act` | click / fill / press / navigate 等写操作 | 默认 dry-run，`go=true` 才执行；`dry_run=true` 优先 |
+
+dry-run 返回将要执行的 `command`（完整 `bsk ... --json` argv）和 `ref`，不启动 `bsk`。`browser_act` 的 ref 必须来自该 session 最近一次 `browser_observe`，并带上那次的 `observation_id`；旧 ref 直接拒绝（`reason: stale_observation`），不会发给 `bsk`。`tab borrow` 在 `go=true` 时可能要用户在浏览器里确认。bsk 若返回 `input_outcome_unknown`，不要盲重试，先再 observe。
+
+`bsk` 需要 Windows 上已连接的 Chrome 或 Edge。仓库里的测试用假的可执行文件，不启动浏览器。
+
 CLI 和 MCP 是同一套合同。字段名对齐，不要另编一套。唯一例外：输入文字 CLI 是 `--type` 或 `--text`，MCP 字段叫 `text`。
 
 MCP 的 `windows` / `perceive_window` 默认带一张压缩格子图（长边 1280 JPEG）。0–1000 仍相对整张图；点击用 stamp 里的原窗宽高，不看缩略像素。`map_inline=false` 只返路径。磁盘上仍是全分辨率 PNG。空字符串 / hwnd 0 = 省略。
@@ -133,7 +151,8 @@ MCP 默认带压缩图；要全分辨率走磁盘路径。CLI 仍用 map 路径�
 ## 不要
 
 - 云电脑桌面
-- 没说 `--go` 就点或拖
+- 没说 `--go` 就点或拖（`act` 和 `browser_act` 都一样）
+- 用 `act` 去点网页里的链接或表单；那是 `browser_act`，先 `browser_observe`
 - 默认开 OCR 或 YOLO
 - 给游戏挂机写方案
 - 远程 HTTPS 当已接通（Grok Bot 后端不在 tailnet；先 CLI）

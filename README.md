@@ -20,6 +20,9 @@ One core, two faces:
   closed window whose HWND was reused by another process fails closed.
 - OCR, UIA and YOLO are optional extras, off by default.
 - Actions default to dry-run. `--go` / `go=true` only when the user said so.
+- A web page inside Chrome or Edge is a browser task. Those tools call the
+  external `bsk` CLI. Other apps, and the browser window as a desktop window,
+  stay on `windows` / `perceive_window` / `act`.
 
 ## Install
 
@@ -209,6 +212,37 @@ console code page is. Decode it as UTF-8. PowerShell decodes captured output
 UTF-8 by default, so CJK text gets garbled; run
 `[Console]::OutputEncoding = [Text.Encoding]::UTF8` first in that session.
 
+## Browser
+
+Page work (the document inside a Chrome or Edge tab) goes through the external
+`bsk` CLI from [BrowserSkill](https://github.com/Tencent/BrowserSkill). `bsk`
+is optional. pip does not install it, and this repo does not vendor its source.
+Point `CU_PERCEIVE_BSK` at the executable, or leave `bsk` on `PATH`. If it is
+missing, the browser tools return `ok: false`, `reason: "missing_dependency"`,
+and an install hint. They do not download it.
+
+Desktop apps stay on `windows`, `perceive_window`, and `act`. Use those when
+the target is the window itself (move it, click its title bar) rather than the
+page.
+
+| Tool | What it does | When it runs |
+|---|---|---|
+| `browser_status` | Daemon and connected browsers | Immediately |
+| `browser_session` | `list`, `start`, `stop` | `list` immediately; `start` and `stop` dry-run unless `go=true` |
+| `browser_observe` | `observe` or `snapshot`; returns `@eN` refs and an `observation_id` | Immediately |
+| `browser_tabs` | `list`, `create`, `close`, `select`, `borrow`, `return` | `list` immediately; the rest dry-run unless `go=true` |
+| `browser_act` | click, fill, press, navigate, and the other acting verbs | Dry-run unless `go=true` (`dry_run=true` wins) |
+
+A dry run returns `command` (the exact `bsk ... --json` argv) and `ref`, and
+does not start `bsk`. `browser_act` refuses a ref that is not from the latest
+`browser_observe` for that session (`reason: "stale_observation"`).
+`browser_tabs action=borrow` can ask the user to confirm in the browser, and
+only after `go=true`. A result whose reason is `input_outcome_unknown` means
+do not retry blindly; observe the page and decide from what it shows.
+
+`bsk` runs on Windows with a connected Chromium-family browser. The tests here
+use a fake executable.
+
 ## Configuration
 
 Nothing machine-specific is hard-coded. Defaults and overrides:
@@ -223,6 +257,8 @@ Nothing machine-specific is hard-coded. Defaults and overrides:
 | Extra MCP Host names (e.g. a tailnet name behind a proxy) | none | `CU_PERCEIVE_ALLOWED_HOSTS=a,b` or `mcp --allow-host a` |
 | WSL distro for UNC paths | `Ubuntu` | `CU_PERCEIVE_WSL_DISTRO` |
 | Capture backend | `auto` | `CU_PERCEIVE_CAPTURE` |
+| `bsk` executable (browser tools) | `bsk` on `PATH` | `CU_PERCEIVE_BSK` |
+| `bsk` subprocess timeout | 120 seconds | `CU_PERCEIVE_BSK_TIMEOUT` |
 
 The CLI and the MCP server each resolve the output dir on their own. The CLI
 defaults to `%LOCALAPPDATA%\cu-perceive\shots\perceive` for the user running
@@ -264,3 +300,6 @@ use. Third-party notices are in `THIRD_PARTY_NOTICES.md`, including:
 - The ScreenParser weight `best.pt` has an ambiguous license: the model card
   says Apache-2.0, but the weight's metadata says AGPL-3.0.
 - opencv-python bundles FFmpeg, which is LGPL-2.1.
+- BrowserSkill (`bsk`) is an optional external program under MIT. Its source
+  is not included; the browser tools only execute a binary you install. See
+  `THIRD_PARTY_NOTICES.md`.

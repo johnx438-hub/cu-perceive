@@ -56,6 +56,7 @@ class TestMcpServerE2E(unittest.TestCase):
         cv2.imwrite(str(cls.png), img)
         cls.port = _free_port()
         env = dict(os.environ, CU_PERCEIVE_HOME=str(home), CU_PERCEIVE_OUT=str(cls.out), PYTHONPATH=str(ROOT))
+        env["CU_PERCEIVE_BSK"] = str(home / "bsk-missing")
         env.pop("CU_PERCEIVE_ALLOWED_HOSTS", None)
         # A pipe nobody reads fills up (about 4 KB on Windows) and blocks the server's logging.
         cls.log = open(home / "server.log", "wb")
@@ -134,6 +135,10 @@ class TestMcpServerE2E(unittest.TestCase):
         res = self._rpc("tools/list", {})
         names = {t["name"] for t in res["result"]["tools"]}
         self.assertTrue({"windows", "perceive_window", "act", "launch_app", "apps"} <= names, names)
+        self.assertTrue(
+            {"browser_status", "browser_session", "browser_observe", "browser_tabs", "browser_act"} <= names,
+            names,
+        )
         act = next(t for t in res["result"]["tools"] if t["name"] == "act")
         self.assertIn("replace", act["inputSchema"]["properties"])
         self.assertIn("focus", act["inputSchema"]["properties"])
@@ -196,6 +201,24 @@ class TestMcpServerE2E(unittest.TestCase):
         big = json.loads(self._call("act", {"stamp": payload["stamp"], "norm": "500,500", "scroll": "down:1000"})[0]["text"])
         self.assertTrue(big["scroll_clamped"])
         self.assertEqual([s["notches"] for s in big["steps"] if s["via"] == "scroll"], [-50])
+
+    def test_browser_tools_missing_bsk_and_unknown_args(self):
+        payload = json.loads(self._call("browser_status", {})[0]["text"])
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["reason"], "missing_dependency")
+        self.assertEqual(payload["missing_dependency"], "bsk")
+        self.assertIn("install", payload)
+        self.assertIn("bsk", payload["hint"])
+
+        res = self._rpc("tools/call", {"name": "browser_act", "arguments": {"verb": "click", "steps": []}})
+        self.assertTrue(res["result"]["isError"], res)
+        err = json.loads(res["result"]["content"][0]["text"])
+        self.assertEqual(err["reason"], "unknown_args")
+        self.assertEqual(err["unknown_args"], ["steps"])
+        self.assertIn("verb", err["valid_args"])
+        self.assertIn("go", err["valid_args"])
+        self.assertIn("dry_run", err["valid_args"])
+        self.assertFalse(err["ok"])
 
     def test_rejects_foreign_host_header(self):
         body = {"jsonrpc": "2.0", "id": 999, "method": "tools/list", "params": {}}

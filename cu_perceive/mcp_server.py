@@ -189,6 +189,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
     from PIL import Image as PILImage
 
     from .act import StampWindowMismatch, coerce_ids, load_frame, parse_steps, run_chain
+    from .browser.tools import register as register_browser_tools
     from .core import perceive
     from .extras import MissingExtraError
     from .launch import launch, list_apps
@@ -520,6 +521,8 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
     def apps():
         """List quick-launch names in apps.json."""
         return {"apps": list_apps()}
+
+    register_browser_tools(_tool)
 
     import uvicorn
     config = uvicorn.Config(http_app(), host=host, port=port, log_level="info", http="h11")
