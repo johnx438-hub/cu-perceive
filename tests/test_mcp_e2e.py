@@ -57,14 +57,16 @@ class TestMcpServerE2E(unittest.TestCase):
         cls.port = _free_port()
         env = dict(os.environ, CU_PERCEIVE_HOME=str(home), CU_PERCEIVE_OUT=str(cls.out), PYTHONPATH=str(ROOT))
         env.pop("CU_PERCEIVE_ALLOWED_HOSTS", None)
+        # A pipe nobody reads fills up (about 4 KB on Windows) and blocks the server's logging.
+        cls.log = open(home / "server.log", "wb")
         cls.proc = subprocess.Popen(
             [sys.executable, "-m", "cu_perceive", "mcp", "--port", str(cls.port)],
-            cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            cwd=ROOT, env=env, stdout=cls.log, stderr=subprocess.STDOUT,
         )
         deadline = time.time() + 20
         while time.time() < deadline:
             if cls.proc.poll() is not None:
-                out = cls.proc.stdout.read().decode("utf-8", "replace")
+                out = (home / "server.log").read_text("utf-8", "replace")
                 raise AssertionError(f"mcp server exited early:\n{out}")
             try:
                 with socket.create_connection(("127.0.0.1", cls.port), timeout=0.2):
@@ -91,7 +93,7 @@ class TestMcpServerE2E(unittest.TestCase):
             cls.proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             cls.proc.kill()
-        cls.proc.stdout.close()
+        cls.log.close()
         cls.td.cleanup()
 
     @classmethod
