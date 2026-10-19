@@ -63,6 +63,13 @@ def _nz_int(v: int):
     return v if v else None
 
 
+def _nz_scroll(v):
+    """MCP scroll: int or string; 0 / "" = no scroll."""
+    if isinstance(v, bool) or v in (None, "", 0):
+        return None
+    return str(v).strip() or None
+
+
 def _nz_str(v: str):
     return v if v else None
 
@@ -72,7 +79,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
     from mcp.server.transport_security import TransportSecuritySettings
     from PIL import Image as PILImage
 
-    from .act import coerce_ids, load_frame, parse_steps, run_chain
+    from .act import StampWindowMismatch, coerce_ids, load_frame, parse_steps, run_chain
     from .core import perceive
     from .extras import MissingExtraError
     from .launch import launch, list_apps
@@ -269,7 +276,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         drag: str = "",
         drag_norm: str = "",
         step_px: int = 4,
-        scroll: str = "",
+        scroll: str | int = "",
         button: str = "left",
         hover: bool = False,
         go: bool = False,
@@ -281,9 +288,14 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         uia_name: str = "",
         replace: bool = False,
         focus: bool = False,
+        hwnd: int = 0,
     ):
-        """norm="x,y" (0-1000 map) | xy="x,y" (stamp px) | ids="3"; scroll="down:3"|"-3" (negative/down = wheel down, toward the page bottom; positive/up = toward the top); drag_norm="x1,y1;x2,y2"; text="..." + replace=true; key="enter"|"ctrl+a"|"pagedown"; hold_key=ctrl|shift|alt (needs a click/drag/scroll); focus=true; go=true sends (default: dry run).
+        """act: go=true sends (default: dry run); needs the window in front or focus=true. scroll="down:5"/"up:5" (bare 5 = UP). key="enter"|"pagedown"|"ctrl+a". norm="x,y" 0-1000. hwnd= checks the stamp.
+        norm="x,y" (0-1000 map) | xy="x,y" (stamp px) | ids="3"; scroll="down:3"|"up:3" (int or string; bare numbers: negative = down, positive = UP); drag_norm="x1,y1;x2,y2"; text="..." + replace=true; key="enter"|"ctrl+a"|"pagedown"; hold_key=ctrl|shift|alt (needs a click/drag/scroll); focus=true; go=true sends (default: dry run).
         perceive_window does not focus; act go needs the window in front or focus=true.
+        stamp: a stamp name or the json path perceive_window returned. hwnd (optional): the window you mean;
+        with no stamp it picks that window's newest stamp, with a stamp it refuses one from another window
+        (reason=hwnd_mismatch). Other unknown params are dropped by MCP, so pass stamp or hwnd when several windows are open.
         Refusals return ok=false with reason (code), hint (next step) and blocking_window {hwnd, title}.
 
         Plan/run against a stamp. go default false. Prefer norm (map 0-1000) or xy.
@@ -329,12 +341,15 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         specs = parse_steps(
             ids=coerce_ids(ids), xy=_nz_str(xy), norm=_nz_str(norm), text=_nz_str(text),
             key=_nz_str(key), drag=_nz_str(drag), drag_norm=_nz_str(drag_norm),
-            scroll=_nz_str(scroll), button=button, hover=hover, step_px=step_px, hold=hold,
+            scroll=_nz_scroll(scroll), button=button, hover=hover, step_px=step_px, hold=hold,
             uia_name=_nz_str(uia_name) or None,
             replace=bool(replace),
         )
         try:
-            frame, path = load_frame(stamp=_nz_str(stamp))
+            frame, path = load_frame(stamp=_nz_str(stamp), hwnd=_nz_int(hwnd))
+        except StampWindowMismatch as e:
+            return {"ok": False, "error": str(e), "dry_run": not go, "reason": "hwnd_mismatch",
+                    "hint": "perceive_window(hwnd=...) and pass that stamp, or drop hwnd"}
         except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError) as e:
             return {"ok": False, "error": str(e), "dry_run": not go}
         out = run_chain(

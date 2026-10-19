@@ -109,9 +109,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     a.add_argument(
         "--stamp",
-        help="perceive stamp, default latest perceive json (--go then needs a window stamp with identity)",
+        help="perceive stamp name or the json path perceive returned; default latest perceive json (--go then needs a window stamp with identity)",
     )
     a.add_argument("--json", help="path to perceive json")
+    a.add_argument(
+        "--hwnd",
+        type=int,
+        default=None,
+        help="the window you mean: without --stamp use its newest stamp; with --stamp refuse a stamp of another window",
+    )
     a.add_argument("--ids", help="comma ids from anno, e.g. 14,9,16")
     a.add_argument("--xy", help="window pixels: 183,542;400,300")
     a.add_argument("--norm", help="0-1000: 177,752;500,200")
@@ -333,6 +339,7 @@ def main(argv: list[str] | None = None) -> int:
         from .act import (
             MethodError,
             PathActError,
+            StampWindowMismatch,
             load_frame,
             load_path_json,
             parse_steps,
@@ -416,7 +423,7 @@ def main(argv: list[str] | None = None) -> int:
                 "act needs a click, --uia-name, --type/--text, --key, --drag, --drag-norm, --path, or --scroll"
             )
         try:
-            frame, path = load_frame(stamp=args.stamp, json_path=args.json)
+            frame, path = load_frame(stamp=args.stamp, json_path=args.json, hwnd=args.hwnd)
             out = run_chain(
                 frame,
                 specs,
@@ -437,6 +444,8 @@ def main(argv: list[str] | None = None) -> int:
                 "error": str(e),
                 "dry_run": not args.go,
             }
+            if isinstance(e, StampWindowMismatch):
+                err["reason"] = "hwnd_mismatch"
             if args.path:
                 err["experimental"] = True
                 err["path_file"] = args.path

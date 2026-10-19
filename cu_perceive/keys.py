@@ -4,6 +4,8 @@ No Win32 imports, so the CLI help and the MCP tool description can list the name
 """
 from __future__ import annotations
 
+import re
+
 VK = {
     "enter": 0x0D,
     "tab": 0x09,
@@ -81,13 +83,11 @@ KEY_ALIASES = {
     "prtsc": "printscreen",
     "printscr": "printscreen",
     "caps": "capslock",
-    "plus": "equals",
     "equal": "equals",
     "dash": "minus",
     "dot": "period",
     "grave": "backquote",
     "backtick": "backquote",
-    "tilde": "backquote",
     "apostrophe": "quote",
     "lbracket": "bracketleft",
     "rbracket": "bracketright",
@@ -144,3 +144,26 @@ def check_key_spec(spec: str) -> str:
         except UnknownKeyError:
             raise UnknownKeyError(p.strip(), str(spec)) from None
     return "+".join(out)
+
+
+def split_key_list(raw: str) -> list[str]:
+    """'ctrl + end, page down' -> ['ctrl+end', 'page down'] -> normalized by check_key_spec.
+
+    Commas separate keys. Within one entry, spaces around '+' are dropped; an entry with
+    spaces that is a single key once they're removed ('page down') stays one key;
+    otherwise whitespace separates keys ('tab enter' -> tab, enter).
+    """
+    out: list[str] = []
+    for chunk in str(raw).split(","):
+        chunk = re.sub(r"\s*\+\s*", "+", chunk.strip())
+        if not chunk:
+            continue
+        if " " not in chunk:
+            out.append(chunk)
+            continue
+        try:
+            check_key_spec(chunk.replace(" ", ""))
+            out.append(chunk.replace(" ", ""))
+        except UnknownKeyError:
+            out.extend(p for p in chunk.split() if p)
+    return out
