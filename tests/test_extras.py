@@ -52,7 +52,11 @@ class TestInstallCommand(unittest.TestCase):
 
     def test_editable_checkout(self):
         dist = _FakeDist(direct_url={"url": "file:///home/u/cu-perceive", "dir_info": {"editable": True}})
-        self.assertEqual(self._cmd(dist), '/opt/py/bin/python -m pip install -e "/home/u/cu-perceive[ocr]"')
+        cmd = self._cmd(dist)
+        prefix, quoted = cmd.split(" -e ", 1)
+        self.assertEqual(prefix, "/opt/py/bin/python -m pip install")
+        self.assertTrue(quoted.startswith('"') and quoted.endswith('[ocr]"'), cmd)
+        self.assertEqual(Path(quoted[1:-len('[ocr]"')]), Path("/home/u/cu-perceive"))
 
     def test_git_install_pins_commit(self):
         dist = _FakeDist(direct_url={

@@ -4,6 +4,8 @@ from __future__ import annotations
 import unittest
 from unittest import mock
 
+from _fakes import stub_live_window
+
 from cu_perceive.uia import choose_auto_method
 from cu_perceive.act import (
     MethodError,
@@ -107,6 +109,7 @@ class TestAutoScope(unittest.TestCase):
 
 class TestRunChainAutoDry(unittest.TestCase):
     def setUp(self):
+        stub_live_window(self, 1)
         self.frame = {
             "stamp": "test-auto",
             "hwnd": 1,
@@ -252,6 +255,7 @@ class TestRunChainAutoDry(unittest.TestCase):
 
 class TestSoftMissReprobe(unittest.TestCase):
     def setUp(self):
+        stub_live_window(self, 1)
         self.frame = {
             "stamp": "test-auto",
             "hwnd": 1,

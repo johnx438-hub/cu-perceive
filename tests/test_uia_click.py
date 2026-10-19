@@ -4,6 +4,8 @@ from __future__ import annotations
 import unittest
 from unittest import mock
 
+from _fakes import stub_live_window
+
 from cu_perceive.uia import (
     PATTERN_PREFERENCE,
     pick_preferred_action,
@@ -161,6 +163,7 @@ class TestUiaScope(unittest.TestCase):
 
 class TestRunChainUiaDry(unittest.TestCase):
     def setUp(self):
+        stub_live_window(self, 1)
         p = mock.patch("cu_perceive.extras.missing_modules", return_value=[])
         p.start()
         self.addCleanup(p.stop)

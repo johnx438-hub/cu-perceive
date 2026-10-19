@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import unittest
 
+from _fakes import stub_live_window
+
 from cu_perceive.input import (
     WM_LBUTTONDOWN,
     WM_LBUTTONUP,
@@ -95,6 +97,7 @@ class TestPostScope(unittest.TestCase):
 
 class TestRunChainPostDry(unittest.TestCase):
     def setUp(self):
+        stub_live_window(self, 1)
         self.frame = {
             "stamp": "test-post",
             "hwnd": 1,
