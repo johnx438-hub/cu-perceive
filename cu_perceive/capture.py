@@ -16,6 +16,7 @@ Windows 11, occluded and not). It stays selectable for experiments only.
 """
 from __future__ import annotations
 
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -145,6 +146,26 @@ def crop_to_client(img: np.ndarray, candidates, client_rect, out_size: tuple[int
     return np.ascontiguousarray(out)
 
 
+WGC_UNSAFE_MODULES: tuple[str, ...] = ("onnxruntime",)
+
+
+def wgc_blocker() -> str | None:
+    """Why WGC must not run in this process, or None.
+
+    After onnxruntime is loaded, the next windows_capture start_free_threaded crashes
+    the whole process (access violation), so WGC is skipped; PrintWindow is unaffected.
+    perceive keeps OCR/YOLO in a child process (detect_worker), so this only triggers
+    with CU_PERCEIVE_DETECT_INPROC=1 or when something else imported onnxruntime.
+    """
+    for mod in WGC_UNSAFE_MODULES:
+        if mod in sys.modules:
+            return (
+                f"{mod} is loaded in this process and WGC would crash it; skipped "
+                "(restart the process to use WGC again)"
+            )
+    return None
+
+
 def _wgc_once(WindowsCapture, hwnd: int, draw_border, timeout: float):
     done = threading.Event()
     box: dict = {}
@@ -253,6 +274,11 @@ def capture_window(
         rec: dict = {"backend": name}
         if fn is None:
             rec.update(ok=False, error="unknown backend")
+            attempts.append(rec)
+            continue
+        blocked = wgc_blocker() if name == "wgc" else None
+        if blocked:
+            rec.update(ok=False, skipped="unsafe", error=blocked)
             attempts.append(rec)
             continue
         try:

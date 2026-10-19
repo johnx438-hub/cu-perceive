@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 from PIL import ImageGrab
 
-from . import config, extras, stamps
+from . import config, detect_worker, extras, stamps
 
 DEFAULT_OUT = config.out_dir()
 CU_WEIGHTS = config.weights_dir()
@@ -441,12 +441,17 @@ def perceive(
         import time as _time
 
         _t_ocr = _time.perf_counter()
-        raw = _parser().parse(bgr)
+        try:
+            items.extend(_to_items(detect_worker.ocr(bgr), w, h))
+        except detect_worker.DetectWorkerError as e:
+            warnings.append(f"OCR failed, no OCR items: {e}")
         ocr_ms = int(round((_time.perf_counter() - _t_ocr) * 1000))
-        items.extend(_to_items(raw, w, h))
     if yolo:
-        from .yolo import detect as yolo_detect
-        yitems = _to_items(yolo_detect(bgr), w, h)
+        try:
+            yitems = _to_items(detect_worker.yolo(bgr), w, h)
+        except detect_worker.DetectWorkerError as e:
+            warnings.append(f"YOLO failed, no YOLO items: {e}")
+            yitems = []
         for it in yitems:
             it["kind"] = "yolo"
         items.extend(yitems)
