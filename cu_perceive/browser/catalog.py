@@ -158,20 +158,39 @@ def _finite(value, name: str) -> float:
     return number
 
 
+# Above these, the value is not a real bsk argument. timeout_ms past 10 minutes
+# becomes a subprocess timeout that raises OverflowError (1e12, 1e15).
+_INT_MAX = {
+    "timeout_ms": 600_000,
+    "tab_id": 2_147_483_647,
+    "max_tokens": 1_000_000,
+}
+
+
 def _pos_int(value, name: str) -> int | None:
-    """0 / empty means omitted. Negatives and non-integers are bad_args."""
+    """0 / empty means omitted. Negatives, non-integers, and values past the cap are bad_args."""
     if isinstance(value, bool) or value in (None, "", 0):
         return None
     if isinstance(value, float):
-        if not value.is_integer():
+        if not math.isfinite(value) or not value.is_integer():
             raise plan_error("bad_args", f"{name} must be a positive integer", f"pass {name} as an integer")
-        value = int(value)
+        try:
+            value = int(value)
+        except (OverflowError, ValueError):
+            raise plan_error("bad_args", f"{name} must be a positive integer", f"pass {name} as an integer")
     if not isinstance(value, int):
         raise plan_error("bad_args", f"{name} must be a positive integer", f"pass {name} as an integer")
     if value < 0:
         raise plan_error("bad_args", f"{name} must be a positive integer", f"pass {name} greater than 0, or omit it")
     if value == 0:
         return None
+    maximum = _INT_MAX.get(name)
+    if maximum is not None and value > maximum:
+        raise plan_error(
+            "bad_args",
+            f"{name} must be from 1 to {maximum}; got {value}",
+            f"pass {name} between 1 and {maximum}, or omit it",
+        )
     return value
 
 

@@ -42,10 +42,10 @@ def page_url_of(payload) -> str | None:
 def action_changed_url(previous: str | None, result) -> bool:
     """True when a click/press/fill payload says the page URL changed.
 
-    bsk 0.3.3's typed click/press/fill results do not include a page URL.
-    When a payload does (``url`` / ``final_url`` / ``page_url``, or
-    ``previous_url`` differing from that, or ``navigated`` / ``url_changed``),
-    the stored refs are dropped so the next ref act is refused here.
+    Kept for a future bsk. 0.3.3 click/press/fill results never include a page
+    URL, so this does not fire on that release. When a later payload does
+    (``url`` / ``final_url`` / ``page_url``, ``previous_url`` differing from
+    that, or ``navigated`` / ``url_changed``), the stored refs are dropped.
     """
     if not isinstance(result, dict):
         return False

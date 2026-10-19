@@ -158,6 +158,8 @@ def _execute(plan: catalog.Plan, *, go: bool, dry_run: bool | None) -> dict:
     elif interpreted.get("ok") and plan.invalidates and plan.session:
         LEDGER.forget(plan.session)
     elif interpreted.get("ok") and plan.verb in {"click", "press", "fill"} and plan.session:
+        # Future bsk only. 0.3.3 click/press/fill JSON has no page URL, so this
+        # comparison does not clear refs on that release.
         latest = LEDGER.latest(plan.session)
         previous = None if latest is None else latest.page_url
         if action_changed_url(previous, interpreted.get("result")):
@@ -165,6 +167,15 @@ def _execute(plan: catalog.Plan, *, go: bool, dry_run: bool | None) -> dict:
             notes.append(
                 "the page URL changed; stored refs were cleared; call browser_observe before using a ref"
             )
+    elif (
+        not interpreted.get("ok")
+        and plan.session
+        and interpreted.get("reason") in {"ref_not_found", "visual_target_changed"}
+    ):
+        LEDGER.forget(plan.session)
+        hint = (interpreted.get("hint") or "").strip()
+        if "observe again" not in hint.lower():
+            interpreted["hint"] = f"{hint} observe again".strip() if hint else "observe again"
     extra = _warnings(notes, interpreted.get("warnings"))
     if extra:
         interpreted["warnings"] = extra

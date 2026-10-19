@@ -116,8 +116,12 @@ def _usage_error(text: str) -> str | None:
     """
     raw = text or ""
     lowered = raw.lower()
-    looks_like_clap = "unexpected argument" in lowered or "unexpected value" in lowered or (
-        "error:" in lowered and "usage:" in lowered
+    looks_like_clap = (
+        "unexpected argument" in lowered
+        or "unexpected value" in lowered
+        or ("invalid value" in lowered and "error:" in lowered)
+        or ("error:" in lowered and "usage:" in lowered)
+        or "for more information, try '--help'" in lowered
     )
     if not looks_like_clap:
         return None
@@ -128,7 +132,8 @@ def _usage_error(text: str) -> str | None:
             return message or stripped
     for line in raw.splitlines():
         stripped = line.strip()
-        if stripped.lower().startswith("unexpected argument") or stripped.lower().startswith("unexpected value"):
+        low = stripped.lower()
+        if low.startswith("unexpected argument") or low.startswith("unexpected value") or low.startswith("invalid value"):
             return stripped
     return "bsk rejected the command line"
 

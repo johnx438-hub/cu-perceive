@@ -68,6 +68,14 @@ elif mode == "ref_not_found":
         "exit_code": 1,
         "data": {"reason": "ref_not_found"},
     }, 1)
+elif mode == "visual_target_changed":
+    emit({
+        "code": "not_found",
+        "message": "visual target changed",
+        "hint": "the element moved",
+        "exit_code": 1,
+        "data": {"reason": "visual_target_changed"},
+    }, 1)
 elif mode == "timeout_exit":
     emit({"code": "timeout", "message": "timed out", "hint": "wait", "exit_code": 4}, 4)
 elif mode == "transport":
@@ -80,6 +88,12 @@ elif mode == "clap":
     sys.stderr.write(
         "error: unexpected argument '-t' found\n\n"
         "Usage: bsk fill --session <SESSION> --value <VALUE> [TARGET]\n\n"
+        "For more information, try '--help'.\n"
+    )
+    raise SystemExit(1)
+elif mode == "clap_invalid":
+    sys.stderr.write(
+        "error: invalid value 'nope' for '--timeout <TIMEOUT>'\n\n"
         "For more information, try '--help'.\n"
     )
     raise SystemExit(1)
@@ -372,13 +386,48 @@ class TestDryRunAndGo(BrowserCase):
         pressed = browser_act(verb="key", session="abcd", key="-", dry_run=True)
         self.assertEqual(pressed["command"][1:], ["press", "--session", "abcd", "--json", "--", "-"])
 
+    def test_huge_timeout_tab_id_and_max_tokens_are_bad_args(self):
+        obs = self.observe()
+        oid = obs["observation_id"]
+        spawned = len(self.calls())
+        for value in (10**12, 1e15, 600_001):
+            out = browser_act(
+                verb="click", session="abcd", ref="@e3", observation_id=oid, timeout_ms=value
+            )
+            self.assertEqual(out["reason"], "bad_args", out)
+            self.assertIn("timeout_ms", out["error"])
+            self.assertIn("600000", out["error"])
+        allowed = browser_act(
+            verb="click", session="abcd", ref="@e3", observation_id=oid, timeout_ms=600_000, dry_run=True
+        )
+        self.assertTrue(allowed["ok"], allowed)
+        self.assertIn("600000ms", allowed["command"])
+
+        huge_tab = browser_act(verb="click", session="abcd", ref="@e3", observation_id=oid, tab_id=2**31)
+        self.assertEqual(huge_tab["reason"], "bad_args", huge_tab)
+        self.assertIn("tab_id", huge_tab["error"])
+        tab_ok = browser_act(
+            verb="click", session="abcd", ref="@e3", observation_id=oid, tab_id=2**31 - 1, dry_run=True
+        )
+        self.assertTrue(tab_ok["ok"], tab_ok)
+        self.assertIn("2147483647", tab_ok["command"])
+
+        huge_tokens = browser_observe(session="abcd", max_tokens=10**15)
+        self.assertEqual(huge_tokens["reason"], "bad_args", huge_tokens)
+        self.assertIn("max_tokens", huge_tokens["error"])
+        self.assertEqual(len(self.calls()), spawned)
+        tokens_ok = browser_observe(session="abcd", max_tokens=1_000_000)
+        self.assertTrue(tokens_ok["ok"], tokens_ok)
+        self.assertIn("--max-tokens", tokens_ok["command"])
+        self.assertEqual(len(self.calls()), spawned + 1)
+
     def test_path_lookup_when_env_is_unset(self):
         os.environ.pop("CU_PERCEIVE_BSK")
         home = self.bsk.parent
         if sys.platform == "win32":
             # PATH may only yield bsk.exe. A .cmd next to the fake must not be launched.
             (home / "bsk.cmd").write_text("@echo off\r\n", encoding="utf-8")
-            os.environ["PATH"] = str(home) + os.pathsep + os.environ.get("PATH", "")
+            os.environ["PATH"] = str(home)
             out = browser_status()
             self.assertEqual(out["reason"], "missing_dependency")
             self.assertEqual(self.calls(), [])
@@ -386,7 +435,7 @@ class TestDryRunAndGo(BrowserCase):
         shim = home / "bsk"
         shim.write_text(f"#!{sys.executable}\n{FAKE_BODY}", encoding="utf-8")
         shim.chmod(0o755)
-        os.environ["PATH"] = str(home) + os.pathsep + os.environ.get("PATH", "")
+        os.environ["PATH"] = str(home)
         out = browser_status()
         self.assertTrue(out["ok"], out)
         self.assertEqual(out["command"][0], str(shim))
@@ -501,6 +550,12 @@ class TestErrorMapping(BrowserCase):
         self.assertNotIn("stderr", out)
         self.assertNotIn("Usage:", json.dumps(out))
 
+        os.environ["BSK_FAKE_MODE"] = "clap_invalid"
+        invalid = browser_status()
+        self.assertEqual(invalid["reason"], "bad_args")
+        self.assertEqual(invalid["error"], "invalid value 'nope' for '--timeout <TIMEOUT>'")
+        self.assertNotIn("For more information", json.dumps(invalid))
+
     def test_input_outcome_unknown_says_not_to_retry_blindly(self):
         obs = self.observe()
         os.environ["BSK_FAKE_MODE"] = "outcome_unknown"
@@ -605,6 +660,28 @@ class TestStaleRef(BrowserCase):
         self.assertEqual(stale["reason"], "stale_observation")
         self.assertEqual(self.calls()[-1][0], "click")
         self.assertEqual(len(self.calls()), 2)
+
+    def test_missing_target_clears_refs_and_says_observe_again(self):
+        obs = self.observe()
+        oid = obs["observation_id"]
+        for mode, reason in (
+            ("ref_not_found", "ref_not_found"),
+            ("visual_target_changed", "visual_target_changed"),
+        ):
+            reset_browser_state()
+            os.environ["BSK_FAKE_MODE"] = "ok"
+            obs = self.observe()
+            oid = obs["observation_id"]
+            os.environ["BSK_FAKE_MODE"] = mode
+            before = len(self.calls())
+            out = browser_act(verb="click", session="abcd", ref="@e3", observation_id=oid)
+            self.assertEqual(out["reason"], reason, out)
+            self.assertIn("observe again", out["hint"])
+            os.environ["BSK_FAKE_MODE"] = "ok"
+            stale = browser_act(verb="click", session="abcd", ref="@e3", observation_id=oid)
+            self.assertEqual(stale["reason"], "stale_observation")
+            self.assertIsNone(stale["latest_observation_id"])
+            self.assertEqual(len(self.calls()), before + 1)
 
     def test_cursor_page_replaces_refs_because_bsk_does(self):
         first = self.observe()
