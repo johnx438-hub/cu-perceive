@@ -64,9 +64,9 @@ def _tool_error_cls():
 
 UNKNOWN_ARG_HINTS = {
     "steps": (
-        "act has no steps parameter (steps=[{...}] would be silently dropped); use flat fields in "
-        'one call, e.g. act(stamp="...", norm="500,500", text="hi", key="enter", go=true) - order is '
-        "click(s) -> text -> key"
+        "this tool has no steps parameter (steps=[{...}] would be silently dropped); only desktop act takes "
+        "steps=[{flat act fields}, ...]. Use flat fields in one call, e.g. "
+        'act(stamp="...", norm="500,500", text="hi", key="enter", go=true) - order is click(s) -> text -> key'
     ),
     "x": 'pass the point as norm="x,y" (0-1000 map) or xy="x,y" (stamp px), or norm=[x, y]',
     "y": 'pass the point as norm="x,y" (0-1000 map) or xy="x,y" (stamp px), or norm=[x, y]',
@@ -444,6 +444,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         focus: bool = False,
         hwnd: int = 0,
         dry_run: bool | None = None,
+        steps: list | None = None,
     ):
         """act: go=true sends (default: dry run; dry_run=true wins); needs window in front or focus=true. scroll="down:5" notches (bare 5 = UP). key="enter"|"pagedown". norm="x,y" or [x,y]. hwnd= checks stamp.
         norm="x,y" or [x,y] (0-1000 map) | xy="x,y" or [x,y] (stamp px) | ids="3"; scroll="down:3"|"up:3" (wheel notches, not pixels; max 50; int or string; bare numbers: negative = down, positive = UP); drag_norm="x1,y1;x2,y2"; text="..." + replace=true; key="enter"|"ctrl+a"|"pagedown"; hold_key=ctrl|shift|alt (needs a click/drag/scroll); button="left"|"right"; focus=true; go=true sends (default: dry run); via=paste|keys; ime=off.
@@ -509,7 +510,21 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         uia: Invoke|Toggle|Expand|Select; no silent fallback. auto: probe UIA → chosen_method=uia|input (never post); go runs chosen only.
         E3 same-stamp: multi norm with ";" or repeated clicks on one stamp; max_age_sec / strict_stamp
         pass through to stamp_check (ROI/moved stamps fail on go or when strict_stamp).
+        steps=[{...}, ...] (max 20): a guarded chain, each step an object of flat act fields
+        (ids xy norm text key drag drag_norm step_px scroll button hover hold hold_key method uia_name replace via
+        expect_change), all against the same stamp. stamp hwnd go dry_run focus ime max_age_sec strict_stamp
+        go on the call, not in a step; do not mix steps with top-level action fields. Default is a dry run that
+        plans every step (planned_steps). Live, the chain stops after a step that opened a window
+        (new_windows), moved the foreground off the stamp window (foreground_changed), changed its title
+        (title_changed), or failed (focus_outside, typed_mismatch, replace_failed, any error). A stop returns
+        ok=false, stopped=true, stopped_at, stop_reason, completed_steps, remaining_steps and a hint to
+        re-perceive and continue. expect_change=true marks the one step meant to change the screen
+        (submit/OK/Next/Enter); it must be the last step (else bad_args). Classify targets after a perceive:
+        stable ones (fields, checkboxes, same-panel buttons) batch into one chain, with at most one
+        change-causing step at the end.
         """
+        if steps is not None and steps != []:
+            return _act_chain(steps, locals())
         send = bool(go) and not dry_run
         notes = []
         if go and dry_run:
@@ -556,6 +571,71 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         out["json"] = str(path) if path else None
         if notes:
             out["warnings"] = notes + (out.get("warnings") or [])
+        return out
+
+    def _flat_specs(f: dict):
+        return parse_steps(
+            ids=coerce_ids(f.get("ids", "")), xy=_nz_str(f.get("xy", "")), norm=_nz_str(f.get("norm", "")),
+            text=_nz_str(f.get("text", "")), key=_nz_str(f.get("key", "")), drag=_nz_str(f.get("drag", "")),
+            drag_norm=_nz_str(f.get("drag_norm", "")), scroll=_nz_scroll(f.get("scroll", "")),
+            button=f.get("button") or "left", hover=bool(f.get("hover", False)),
+            step_px=int(f.get("step_px", 4) or 4), hold=float(f.get("hold", 0) or 0),
+            uia_name=_nz_str(f.get("uia_name", "")) or None, replace=bool(f.get("replace", False)),
+            input_via=_nz_str(f.get("via", "")),
+        )
+
+    def _act_chain(steps, call: dict):
+        from .chain import ACTION_FIELDS, run_steps, validate_steps
+
+        send = bool(call.get("go")) and not call.get("dry_run")
+        mixed = [k for k in ACTION_FIELDS if call.get(k) not in (None, "", [], 0)]
+        if mixed:
+            return {"ok": False, "reason": "bad_args", "dry_run": True,
+                    "error": f"steps cannot be combined with top-level action field(s) {', '.join(mixed)}",
+                    "hint": "put every action inside steps=[...], or drop steps for a flat single-step act"}
+        norm_steps, err = validate_steps(steps)
+        if err:
+            return err
+        try:
+            frame, path = load_frame(stamp=_nz_str(call.get("stamp", "")), hwnd=_nz_int(call.get("hwnd", 0)))
+        except StampWindowMismatch as e:
+            return {"ok": False, "error": str(e), "dry_run": not send, "reason": "hwnd_mismatch",
+                    "hint": "perceive_window(hwnd=...) and pass that stamp, or drop hwnd"}
+        except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError) as e:
+            return {"ok": False, "error": str(e), "dry_run": not send}
+        stamp_source = ("explicit" if _nz_str(call.get("stamp", "")) else "latest") if path else None
+
+        def run_one(step: dict, send_flag: bool, i: int) -> dict:
+            try:
+                specs = _flat_specs(step)
+            except ValueError as e:
+                return {"ok": False, "error": str(e), "dry_run": not send_flag, "reason": "bad_args",
+                        "hint": 'points are norm="x,y" / xy="x,y" (or [x,y]); scroll="down:3" / "up:3"'}
+            return run_chain(
+                frame, specs, dry_run=not send_flag,
+                hold_key=_nz_str(step.get("hold_key", "")) or _nz_str(call.get("hold_key", "")),
+                method=_nz_str(step.get("method", "")) or _nz_str(call.get("method", "")) or "input",
+                max_age_sec=call.get("max_age_sec"), strict_stamp=bool(call.get("strict_stamp")),
+                stamp_json_path=str(path) if path else None,
+                focus=bool(call.get("focus")) and i == 0,
+                stamp_source=stamp_source, ime=_nz_str(call.get("ime", "")),
+            )
+
+        stamp_hwnd = int((frame or {}).get("hwnd") or 0)
+
+        def title_now():
+            if not stamp_hwnd:
+                return None
+            from ._win32 import window_title
+
+            return window_title(stamp_hwnd)
+
+        out = run_steps(norm_steps, run_one, send=send, stamp_hwnd=stamp_hwnd, title_now=title_now)
+        out["stamp"] = (frame or {}).get("stamp")
+        out["hwnd"] = stamp_hwnd or None
+        out["json"] = str(path) if path else None
+        if call.get("go") and call.get("dry_run"):
+            out["warnings"] = ["dry_run=true overrides go=true: this was a dry run, nothing was sent"] + (out.get("warnings") or [])
         return out
 
     @_tool
