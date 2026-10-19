@@ -117,10 +117,91 @@ def read_latest(dest: Path, hwnd: int) -> Path | None:
         name = _latest_pointer(dest, hwnd).read_text(encoding="utf-8").strip()
     except OSError:
         return None
-    if not name or "/" in name or "\\" in name:
+    return _pointer_target(dest, name)
+
+
+def _pointer_target(dest: Path, name: str) -> Path | None:
+    """A pointer holds a bare file name (same dir) or an absolute path (registry)."""
+    if not name:
+        return None
+    p = Path(name)
+    if p.is_absolute():
+        return p if p.is_file() else None
+    if "/" in name or "\\" in name:
         return None
     path = Path(dest) / name
     return path if path.is_file() else None
+
+
+# Registry: every committed stamp is recorded under the DEFAULT out dir, so a stamp
+# written with a custom out_dir is still found by bare name, by hwnd, and as "latest".
+INDEX_DIR = ".index"
+LATEST_ANY = "any"
+
+
+def _default_root() -> Path:
+    from .config import out_dir
+
+    return Path(out_dir())
+
+
+def _write_pointer(ptr: Path, text: str) -> None:
+    tmp = ptr.with_name(f"{ptr.name}.{os.getpid()}.{threading.get_ident()}{TMP_SUFFIX}")
+    try:
+        ptr.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, ptr)
+    except OSError:
+        _unlink(tmp)
+
+
+def register(final: Path, hwnd: int | None = None, root: Path | None = None) -> None:
+    """Record where ``final`` lives (best effort, never raises).
+
+    Writes ``<root>/.latest/any`` and, for a stamp outside ``root`` (custom out_dir),
+    ``<root>/.index/<stamp>`` and ``<root>/.latest/hwnd-N``, with the absolute path.
+    """
+    try:
+        final = Path(final).resolve()
+        root = Path(root) if root is not None else _default_root()
+        stamp = final.name.split(".", 1)[0]
+        if not STAMP_RE.match(stamp):
+            return
+        elsewhere = final.parent != root.resolve()
+        if elsewhere:  # default-dir stamps are found by name already
+            _write_pointer(root / INDEX_DIR / stamp, str(final))
+        if final.name == f"{stamp}.json":
+            _write_pointer(root / LATEST_DIR / LATEST_ANY, str(final))
+            if hwnd and elsewhere:
+                _write_pointer(_latest_pointer(root, int(hwnd)), str(final))
+    except Exception:
+        return
+
+
+def lookup(stamp: str, root: Path | None = None) -> Path | None:
+    """Registered json path of a bare stamp name, if it still exists."""
+    s = str(stamp or "").strip()
+    if s.lower().endswith(".windows.json"):
+        s = s[: -len(".windows.json")]
+    elif s.lower().endswith(".json"):
+        s = s[: -len(".json")]
+    if not STAMP_RE.match(s):
+        return None
+    root = Path(root) if root is not None else _default_root()
+    try:
+        name = (root / INDEX_DIR / s).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return _pointer_target(root, name)
+
+
+def latest_any(root: Path | None = None) -> Path | None:
+    root = Path(root) if root is not None else _default_root()
+    try:
+        name = (root / LATEST_DIR / LATEST_ANY).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return _pointer_target(root, name)
 
 
 def _unlink(p: Path) -> None:

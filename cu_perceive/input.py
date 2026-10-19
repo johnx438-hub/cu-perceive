@@ -1047,6 +1047,9 @@ def focused_readback(target_hwnd: int = 0) -> dict:
         "in_target": in_target,
         "hwnd": int(hwnd or 0),
         "root": root,
+        # A native Edit reports its real text; a browser / code editor (Monaco,
+        # CodeMirror) often exposes an empty ValuePattern whatever it holds.
+        "native": _class_is_edit(_class_name),
     }
 
 
@@ -1143,6 +1146,15 @@ def _keyboard_clear_selection() -> None:
     tap_key("delete")
 
 
+def _keyboard_clear_all() -> None:
+    """Ctrl+A, Delete: the whole content of a multiline / code editor (not just one line)."""
+    tap_combo("ctrl+a")
+    tap_key("delete")
+
+
+ES_MULTILINE = 0x0004
+
+
 def clear_field_for_replace(
     *,
     pattern=None,
@@ -1154,14 +1166,25 @@ def clear_field_for_replace(
     text_length=None,
     allow_keyboard: bool | None = None,
     discover: bool | None = None,
+    style: int | None = None,
 ) -> dict:
     """Empty the focused edit before a replace-type.
 
-    Edit and masked edits (WinForms MaskedTextBox is an Edit class) are cleared
-    with End, Shift+Home, Delete. SetValue('') on a mask only blanks the display
-    and leaves the old date in place, so it is not used for those controls.
-    EM_SETSEL+WM_CLEAR is the fallback for a normal Edit. When the field can be
-    read back and is still non-empty, ok=false and reason=replace_failed.
+    Single-line Edit and masked edits (WinForms MaskedTextBox is an Edit class) are
+    cleared with End, Shift+Home, Delete. SetValue('') on a mask only blanks the
+    display and leaves the old date in place, so it is not used for those controls.
+    EM_SETSEL+WM_CLEAR is the fallback for a normal Edit.
+
+    Multiline content (ES_MULTILINE, a value with line breaks, or a non-native edit
+    such as a browser textarea / Monaco / CodeMirror) is cleared as a whole:
+    EM_SETSEL+WM_CLEAR for a native Edit, else Ctrl+A, Delete. End+Shift+Home there
+    only clears the current line.
+
+    Honest verification: empty=True only when the field can really be read, i.e. a
+    native WM_GETTEXTLENGTH, or a value that read non-empty before the clear. A blank
+    read-back from a control that also read blank before (Monaco & co. expose no
+    value) gives empty=None, verified=False, readback="unavailable". When the field
+    can be read back and is still non-empty, ok=false and reason=replace_failed.
     """
     notes: list[str] = []
     if discover is None:
@@ -1178,16 +1201,70 @@ def clear_field_for_replace(
             send_message = _send_message_w
         if text_length is None and user32 is not None:
             text_length = _gettext_length
+        if style is None and hwnd and _class_is_edit(class_name):
+            style = _edit_style(int(hwnd))
     if allow_keyboard is None:
         allow_keyboard = user32 is not None
     masked = _looks_masked(class_name, control_type, legacy_text)
     edit = _looks_edit(class_name, control_type)
+    native = _class_is_edit(class_name)
+    before = _pattern_value(pattern) if pattern is not None else None
+    multiline = bool(
+        (native and style is not None and (int(style) & ES_MULTILINE))
+        or (before is not None and ("\n" in before or "\r" in before))
+        or (edit and not native)
+        # contenteditable / rich editors report Document, not Edit
+        or "document" in (control_type or "").lower()
+    ) and not masked
+    # Can a blank read-back be believed?
+    trusted = bool(native and hwnd and text_length is not None) or value_is_blank(before) is False
 
     def _done(method: str):
         empty = _field_empty(pattern, int(hwnd or 0), text_length, masked=masked)
         if empty is True:
-            return {"ok": True, "method": method, "empty": True, "verified": True, "notes": notes}
+            if not trusted:
+                return {
+                    "ok": True, "method": method, "empty": None, "verified": False,
+                    "readback": "unavailable", "multiline": multiline,
+                    "notes": notes + ["the control exposes no readable value before or after the clear; "
+                                      "emptiness not verified"],
+                }
+            return {"ok": True, "method": method, "empty": True, "verified": True,
+                    "multiline": multiline, "notes": notes}
         return None
+
+    def _fail(method: str, what: str) -> dict:
+        return {
+            "ok": False, "reason": "replace_failed",
+            "error": f"field still has text after {what}",
+            "method": method, "empty": False, "verified": True,
+            "multiline": multiline, "notes": notes,
+        }
+
+    if multiline:
+        if hwnd and send_message is not None and native:
+            try:
+                send_message(int(hwnd), EM_SETSEL, 0, -1)
+                send_message(int(hwnd), WM_CLEAR, 0, 0)
+            except Exception as e:
+                notes.append(f"EM_SETSEL failed: {e}")
+            done = _done("em_setsel")
+            if done:
+                return done
+        if allow_keyboard:
+            try:
+                _keyboard_clear_all()
+            except Exception as e:
+                notes.append(f"keyboard clear failed: {e}")
+            done = _done("ctrl_a_delete")
+            if done:
+                return done
+        empty = _field_empty(pattern, int(hwnd or 0), text_length, masked=masked)
+        if empty is False:
+            return _fail("ctrl_a_delete", "EM_SETSEL+WM_CLEAR / Ctrl+A+Delete")
+        return {"ok": True, "method": "ctrl_a_delete" if allow_keyboard else "unavailable",
+                "empty": None, "verified": False, "readback": "unavailable",
+                "multiline": True, "notes": notes}
 
     if edit or masked:
         if allow_keyboard:
@@ -1198,7 +1275,7 @@ def clear_field_for_replace(
             done = _done("end_shift_home")
             if done:
                 return done
-        if hwnd and send_message is not None and _class_is_edit(class_name) and not masked:
+        if hwnd and send_message is not None and native and not masked:
             try:
                 send_message(int(hwnd), EM_SETSEL, 0, -1)
                 send_message(int(hwnd), WM_CLEAR, 0, 0)
@@ -1227,23 +1304,17 @@ def clear_field_for_replace(
 
     empty = _field_empty(pattern, int(hwnd or 0), text_length, masked=masked)
     if empty is False:
-        return {
-            "ok": False,
-            "reason": "replace_failed",
-            "error": "field still has text after End+Shift+Home+Delete"
-            + ("" if masked or edit else " and ValuePattern.SetValue"),
-            "method": "end_shift_home" if edit or masked else "value_pattern",
-            "empty": False,
-            "verified": True,
-            "notes": notes,
-        }
+        return _fail("end_shift_home" if edit or masked else "value_pattern",
+                     "End+Shift+Home+Delete" + ("" if masked or edit else " and ValuePattern.SetValue"))
     if not allow_keyboard and not edit:
-        return {"ok": True, "method": "unavailable", "empty": None, "verified": False, "notes": notes}
+        return {"ok": True, "method": "unavailable", "empty": None, "verified": False,
+                "multiline": multiline, "notes": notes}
     return {
         "ok": True,
         "method": "end_shift_home" if (edit or masked) else "unavailable",
         "empty": None,
         "verified": False,
+        "multiline": multiline,
         "notes": notes,
     }
 

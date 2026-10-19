@@ -47,14 +47,18 @@ def latest_frame(out_dir: Path | None = None, hwnd: int | None = None) -> tuple[
     """
     from . import stamps
 
+    default_dir = out_dir is None
     out_dir = Path(out_dir or DEFAULT_OUT)
     noted = stamps.read_latest(out_dir, int(hwnd)) if hwnd else None
+    if not hwnd and default_dir:
+        # Newest stamp anywhere (custom out_dir included), via the registry.
+        noted = stamps.latest_any(out_dir)
     noted_frame = None
     floor = None
     if noted is not None:
         try:
             noted_frame = read_frame(noted)
-            if _frame_hwnd(noted_frame) == int(hwnd):
+            if not hwnd or _frame_hwnd(noted_frame) == int(hwnd):
                 floor = noted.stat().st_mtime
             else:
                 noted_frame = None
@@ -108,12 +112,20 @@ def stamp_json_path(stamp: str) -> Path:
     s = str(stamp).strip().strip('"').strip("'")
     p = Path(s)
     base = p if (p.is_absolute() or len(p.parts) > 1) else DEFAULT_OUT / p
+    bare = not (p.is_absolute() or len(p.parts) > 1)
     if s.lower().endswith(".json"):
-        return base
-    path = base.with_name(base.name + ".json")
-    windows_map = base.with_name(base.name + ".windows.json")
-    if not path.is_file() and windows_map.is_file():
-        return windows_map
+        path = base
+    else:
+        path = base.with_name(base.name + ".json")
+        windows_map = base.with_name(base.name + ".windows.json")
+        if not path.is_file() and windows_map.is_file():
+            path = windows_map
+    if bare and not path.is_file():
+        from . import stamps
+
+        found = stamps.lookup(s, DEFAULT_OUT)
+        if found is not None:
+            return found
     return path
 
 
@@ -1554,6 +1566,21 @@ def _note_typed_readback(out: dict, step: dict, expected: str, target_hwnd: int 
         out["typed_note"] = note
         return True
     actual = _clean_readback(info.get("value"), expected)
+    if (
+        info.get("value") is not None and not str(info.get("value")).strip()
+        and str(expected or "").strip() and info.get("native") is not True
+    ):
+        # Monaco-like editors expose no value at all: an empty read-back after typing
+        # proves nothing. Not a mismatch; a different non-empty value still is.
+        step["typed_verified"] = None
+        out["typed_verified"] = None
+        step["typed_readback"] = "unavailable"
+        note = ("readback_unavailable: the focused control reads back empty (no ValuePattern "
+                "text, e.g. a Monaco/CodeMirror editor); typed text not verified - perceive to check")
+        step["typed_note"] = note
+        out["typed_note"] = note
+        out["warnings"] = (out.get("warnings") or []) + [note]
+        return True
     try:
         match = typed_matches(expected, actual)
     except Exception:
@@ -2484,7 +2511,7 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                         cleared = {"ok": False, "reason": "replace_failed", "error": str(e)}
                     step["replace_clear"] = {
                         k: cleared.get(k)
-                        for k in ("ok", "method", "empty", "verified", "reason", "error")
+                        for k in ("ok", "method", "empty", "verified", "readback", "multiline", "reason", "error")
                         if k in cleared
                     }
                     if not cleared.get("ok"):
