@@ -40,6 +40,18 @@ auto-installed; the error prints the exact command for your install:
 
 YOLO weights are not in git; see `weights/README.md`.
 
+OCR and YOLO run in a separate worker process, started on first use and reused
+afterwards. Loading onnxruntime into the process that captures windows makes
+the next Windows.Graphics.Capture grab crash that whole process (an access
+violation in `windows_capture`), which used to take the MCP server down after
+any `ocr=true` call. The worker keeps onnxruntime out of the server, and if the
+worker dies only that perceive loses its detections (with a warning); the next
+call starts a new one. As a second guard, capture never starts WGC in a process
+where onnxruntime is loaded: `auto` goes straight to PrintWindow and
+`capture.attempts` shows WGC as `skipped: "unsafe"`; an explicit `--capture wgc`
+fails instead of crashing. `CU_PERCEIVE_DETECT_INPROC=1` runs OCR/YOLO
+in-process (for debugging), which then turns this guard on.
+
 ## Window capture
 
 `perceive --hwnd N` grabs the client area without touching z-order. Backends,
@@ -91,12 +103,18 @@ renamed into place), so `act` never reads a half-written stamp.
   Join a chord with `+` (`ctrl+shift+t`) and list several keys with commas
   (`tab,enter`). An unknown name fails the plan, dry run included, with
   `reason: "unknown_key"` and `valid_keys`; `act --help` prints the list.
-- `--scroll` takes wheel notches: a negative number or `down:N` scrolls down
-  (toward the bottom of the page), a positive number or `up:N` scrolls up.
+  Spaces around `+` are ignored (`ctrl + end`), and an entry that is one key
+  once its spaces are removed stays one key (`page down`); other spaces separate
+  keys (`tab enter`).
+- `--scroll` (MCP `scroll`, an int or a string) takes wheel notches. Prefer the
+  explicit forms `down:N` (toward the bottom of the page) and `up:N`. A bare
+  number is signed: negative scrolls down and **positive scrolls up**, so a
+  bare positive number adds a warning that says so.
 - `--hold-key` (MCP `hold_key`) holds a modifier during the clicks, drags and
-  scrolls of the same call, so it needs at least one of them; on its own (or
-  with only keys) `act` fails with `reason: "hold_key_needs_pointer_step"`. For
-  a key chord use `--key ctrl+pagedown` instead.
+  scrolls of the same call, so it needs at least one of them. On its own, with
+  only keys, or with only a hover, `act` fails with
+  `reason: "hold_key_needs_pointer_step"`. For a key chord use
+  `--key ctrl+pagedown` instead.
 - `--replace` (MCP `replace=true`) sends `ctrl+a` right before each `--type`, so
   the text replaces what the field holds instead of being inserted at the caret:
   `act --norm 491,63 --type https://example.org --replace --key enter --go`.
@@ -131,10 +149,16 @@ renamed into place), so `act` never reads a half-written stamp.
   click first in the same `act` and are sent only while the window that click
   landed on is in front; `--hold-key` needs the window under its first point
   in front.
+- `--stamp` / MCP `stamp` takes a stamp name or the `json` path a perceive
+  returned.
 - Without `--stamp` / `--json`, `act` uses the newest perceive stamp (desktop
   maps from `windows` are never picked) and reports `stamp_source: "latest"`.
   `--go` on it requires a window stamp with identity; for a screen-space stamp,
-  pass `--stamp` explicitly.
+  pass `--stamp` explicitly. With several windows open, pass `--hwnd` / MCP
+  `hwnd` too: without a stamp it uses that window's newest stamp, and with a
+  stamp it refuses one taken of another window (`reason: "hwnd_mismatch"`). MCP
+  drops parameters it doesn't know, so `hwnd` is the safe way to name the
+  window.
 - A dry run fails (`ok: false`) when the stamped window is gone or its HWND, PID
   or process creation time no longer match. Other stamp problems (moved,
   resized, too old) only fail a dry run with `--strict-stamp`, but every result
