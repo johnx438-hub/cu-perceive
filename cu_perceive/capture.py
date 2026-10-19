@@ -37,9 +37,12 @@ WGC_TIMEOUT_S = 1.5
 
 
 class CaptureError(RuntimeError):
-    def __init__(self, message: str, attempts: list[dict] | None = None):
+    def __init__(self, message: str, attempts: list[dict] | None = None, reason: str | None = None,
+                 hint: str | None = None):
         super().__init__(message)
         self.attempts = list(attempts or [])
+        self.reason = reason
+        self.hint = hint
 
 
 class WindowMinimizedError(CaptureError):
@@ -147,6 +150,10 @@ def crop_to_client(img: np.ndarray, candidates, client_rect, out_size: tuple[int
 
 
 WGC_UNSAFE_MODULES: tuple[str, ...] = ("onnxruntime",)
+WGC_GUARD_HINT = (
+    "use capture=printwindow (or auto, which falls back to it), or restart the server "
+    "without CU_PERCEIVE_DETECT_INPROC=1 so OCR/YOLO run in the worker process"
+)
 
 
 def wgc_blocker() -> str | None:
@@ -303,6 +310,15 @@ def capture_window(
         return CaptureResult(img, name, attempts)
     if blank is not None:
         return CaptureResult(blank[1], blank[0], attempts, blank=True)
+    if attempts and all(a.get("skipped") == "unsafe" for a in attempts):
+        raise CaptureError(
+            "capture=wgc refused by the onnxruntime guard: "
+            + attempts[0]["error"]
+            + f"; {WGC_GUARD_HINT}",
+            attempts,
+            reason="wgc_refused_onnxruntime_guard",
+            hint=WGC_GUARD_HINT,
+        )
     raise CaptureError("every window capture backend failed", attempts)
 
 
