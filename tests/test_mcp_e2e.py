@@ -184,12 +184,13 @@ class TestMcpServerE2E(unittest.TestCase):
         payload = json.loads(self._call("perceive_window", {"image": str(self.png), "map_inline": False})[0]["text"])
         res = self._rpc("tools/call", {"name": "act", "arguments": {
             "stamp": payload["stamp"], "steps": [{"action": "click", "x": 1, "y": 2}], "go": True}})
-        self.assertTrue(res["result"]["isError"], res)
+        # act takes steps=[...] now; a step with non-act fields is bad_args and nothing runs.
         err = json.loads(res["result"]["content"][0]["text"])
-        self.assertEqual(err["reason"], "unknown_args")
-        self.assertEqual(err["unknown_args"], ["steps"])
-        self.assertIn("norm", err["valid_args"])
-        self.assertIn("dry_run", err["valid_args"])
+        self.assertFalse(err["ok"])
+        self.assertEqual(err["reason"], "bad_args")
+        self.assertIn("action", err["error"])
+        self.assertIn("norm", err["valid_step_fields"])
+        self.assertTrue(err["dry_run"])
 
         res = self._rpc("tools/call", {"name": "perceive_window", "arguments": {"image": str(self.png), "region": "x"}})
         self.assertTrue(res["result"]["isError"], res)
