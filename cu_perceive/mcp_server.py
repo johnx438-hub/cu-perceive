@@ -71,6 +71,7 @@ UNKNOWN_ARG_HINTS = {
     "x": 'pass the point as norm="x,y" (0-1000 map) or xy="x,y" (stamp px), or norm=[x, y]',
     "y": 'pass the point as norm="x,y" (0-1000 map) or xy="x,y" (stamp px), or norm=[x, y]',
     "point": 'use norm="x,y" (0-1000 map) or xy="x,y" (stamp px)',
+    "click": 'the mouse button is button="left"|"right"|"middle"; norm/xy/ids already click',
     "action": "there is no action field: the fields you pass are the actions (norm/xy/ids click, text, key, scroll, drag)",
 }
 
@@ -92,12 +93,15 @@ def unknown_args_error(tool: str, unknown: list[str], known: list[str]) -> dict:
 
 
 def strict_server_cls(server_cls):
-    """server_cls whose tools/call refuses arguments the tool's input schema does not declare."""
+    """server_cls whose tools/call refuses arguments the tool's input schema does not declare.
+    Keys starting with "_" (e.g. _meta, which some clients put into arguments) are dropped."""
 
     class StrictArgsServer(server_cls):
         async def call_tool(self, name, arguments, *args, **kwargs):
             unknown: list[str] = []
             known: list[str] = []
+            if isinstance(arguments, dict):
+                arguments = {k: v for k, v in arguments.items() if not str(k).startswith("_")}
             if isinstance(arguments, dict) and arguments:
                 for t in await self.list_tools():
                     if t.name == name:
@@ -155,6 +159,27 @@ def _nz_scroll(v):
 
 def _nz_str(v: str):
     return v if v else None
+
+
+def _center_norm(box):
+    if isinstance(box, (list, tuple)) and len(box) == 4:
+        return [int((box[0] + box[2]) // 2), int((box[1] + box[3]) // 2)]
+    return None
+
+
+def _compact_rows(payload: dict) -> None:
+    """perceive_window compact=true: short item / uia_node rows with a clickable center_norm."""
+    payload["items"] = [
+        {"id": it.get("id"), "text": it.get("text"), "kind": it.get("kind"), "center_norm": _center_norm(it.get("norm"))}
+        for it in payload.get("items") or []
+    ]
+    if "uia_nodes" in payload:
+        payload["uia_nodes"] = [
+            {"id": n.get("id"), "name": n.get("name"), "control_type": n.get("control_type"),
+             "center_norm": _center_norm(n.get("norm"))}
+            for n in payload.get("uia_nodes") or []
+        ]
+    payload["compact"] = True
 
 
 def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | None = None) -> None:
@@ -265,6 +290,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         roi_norm: str = "",
         focus: bool = False,
         capture: str = "",
+        compact: bool = False,
     ):
         """perceive_window does not focus; act go needs the window in front or focus=true.
         Pin one window (or primary screen). Writes raw + 0-1000 map. Default ocr=false.
@@ -279,6 +305,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         ocr/uia/yolo are optional extras; if missing the reply has ok=false and the exact pip command in "install".
         ocr/yolo run in a worker process with a timeout (CU_PERCEIVE_DETECT_TIMEOUT, default 30 s): a hung worker is
         restarted and the stamp comes back without detections plus a warning. Unknown arguments are refused (reason=unknown_args).
+        compact=true: items (and uia_nodes) only as {id, text|name, kind|control_type, center_norm}; center_norm goes straight into act norm.
         E2 light verify: roi="L,T,W,H" or roi_norm="CX,CY[,HALF]" (mutually exclusive) crops after full grab; map 0-1000 is ROI-local.
         out_dir optional: Windows path or /mnt/c/... ; response also has map_wsl / png_wsl (lowercase drive)."""
         hwnd_n = _nz_int(hwnd)
@@ -354,6 +381,8 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
             payload["ok"] = out.get("ok", True)
             if out.get("error"):
                 payload["error"] = out["error"]
+        if compact:
+            _compact_rows(payload)
         return _with_map(payload, payload["map"], map_inline)
 
     @_tool
@@ -383,7 +412,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         dry_run: bool | None = None,
     ):
         """act: go=true sends (default: dry run; dry_run=true wins); needs window in front or focus=true. scroll="down:5" notches (bare 5 = UP). key="enter"|"pagedown". norm="x,y" or [x,y]. hwnd= checks stamp.
-        norm="x,y" or [x,y] (0-1000 map) | xy="x,y" or [x,y] (stamp px) | ids="3"; scroll="down:3"|"up:3" (wheel notches, not pixels; max 50; int or string; bare numbers: negative = down, positive = UP); drag_norm="x1,y1;x2,y2"; text="..." + replace=true; key="enter"|"ctrl+a"|"pagedown"; hold_key=ctrl|shift|alt (needs a click/drag/scroll); focus=true; go=true sends (default: dry run).
+        norm="x,y" or [x,y] (0-1000 map) | xy="x,y" or [x,y] (stamp px) | ids="3"; scroll="down:3"|"up:3" (wheel notches, not pixels; max 50; int or string; bare numbers: negative = down, positive = UP); drag_norm="x1,y1;x2,y2"; text="..." + replace=true; key="enter"|"ctrl+a"|"pagedown"; hold_key=ctrl|shift|alt (needs a click/drag/scroll); button="left"|"right"; focus=true; go=true sends (default: dry run).
         perceive_window does not focus; act go needs the window in front or focus=true.
         stamp: a stamp name or the json path perceive_window returned. hwnd (optional): the window you mean;
         with no stamp it picks that window's newest stamp, with a stamp it refuses one from another window
@@ -401,6 +430,9 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
           scroll: act(norm="500,500", scroll="down:3")  # hover then wheel, no click
 
         norm/xy: "x,y" or "x:y"; multi with ";" e.g. "177,752;500,200"; arrays too: [640,500] or [[177,752],[500,200]].
+        4 numbers (an item / uia_node norm box "left,top,right,bottom") click the box center, with a warning.
+        Mouse button: button="left"|"right"|"middle" (there is no click= param). step_px only affects drags.
+        Stamps older than 120 s add stamp_stale=true and a warning (max_age_sec=N refuses instead).
         scroll counts are wheel notches (one notch ~3 lines), not pixels; more than 50 is capped at 50 with scroll_clamped=true and a warning.
         ids: comma string / int / list; needs prior ocr/yolo perceive.
         text=paste+restore. key like ctrl+c (comma-separated ok). Unknown key -> ok=false, reason=unknown_key, valid_keys.
@@ -438,6 +470,11 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
             notes.append("dry_run=true overrides go=true: this was a dry run, nothing was sent")
         elif dry_run is False and not go:
             notes.append("dry_run=false does not send input; pass go=true to send")
+        if step_px != 4 and not (_nz_str(drag) or _nz_str(drag_norm)):
+            notes.append(
+                f"step_px={step_px} ignored: it only sets drag smoothness (px per mouse move) for drag/drag_norm; "
+                'scroll distance is scroll="down:N" in wheel notches'
+            )
         try:
             specs = parse_steps(
                 ids=coerce_ids(ids), xy=_nz_str(xy), norm=_nz_str(norm), text=_nz_str(text),

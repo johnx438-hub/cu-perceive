@@ -191,8 +191,17 @@ def item_by_id(frame: dict, id_: int) -> dict:
 
 
 def pairs(s: str) -> list[list[int]]:
-    """Parse points. Accepts x,y or x:y; multi with ;."""
-    s = s.strip().replace(" ", ";")
+    """Parse points. Accepts x,y or x:y; multi with ;. A 4-number box gives its center."""
+    return [p for p, _box in point_boxes(s)]
+
+
+def point_boxes(s: str) -> list[tuple[list[int], list[int] | None]]:
+    """(point, box) per entry of "x,y;..."; box is set when the entry was a
+    "left,top,right,bottom" box (the norm / bbox format of OCR items and UIA nodes)
+    and point is its center."""
+    import re
+
+    s = re.sub(r"\s*([,:])\s*", r"\1", s.strip()).replace(" ", ";")
     out = []
     for chunk in s.split(";"):
         if not chunk:
@@ -206,11 +215,21 @@ def pairs(s: str) -> list[list[int]]:
                 f'bad point {chunk!r}: expected "x,y" (MCP/act) or "x:y"; '
                 f'multi points use ";" e.g. "177,752;500,200"'
             )
+        if len(parts) == 4:
+            l, t, r, b = (int(round(float(v))) for v in parts)
+            if r < l or b < t:
+                raise ValueError(
+                    f"bad box {chunk!r}: 4 numbers are read as left,top,right,bottom (right >= left, "
+                    "bottom >= top); for one point pass two numbers"
+                )
+            out.append(([(l + r) // 2, (t + b) // 2], [l, t, r, b]))
+            continue
         if len(parts) != 2:
             raise ValueError(
-                f'bad point {chunk!r}: expected two ints "x,y" (got {len(parts)} parts)'
+                f'bad point {chunk!r}: expected two ints "x,y" or a box "left,top,right,bottom" '
+                f"(got {len(parts)} parts)"
             )
-        out.append([int(parts[0]), int(parts[1])])
+        out.append(([int(parts[0]), int(parts[1])], None))
     if not out:
         raise ValueError('expected at least one "x,y" point')
     return out
@@ -316,6 +335,7 @@ def subsample_points(points: list, max_n: int = 24) -> list:
 
 
 MAX_SCROLL_NOTCHES = 50
+STALE_STAMP_SEC = 120
 
 
 def scroll_spec(raw) -> dict:
@@ -356,8 +376,8 @@ def coerce_points(v) -> str | None:
     if isinstance(v, (list, tuple)):
         if not v:
             return None
-        if len(v) == 2 and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in v):
-            return f"{_num(v[0])},{_num(v[1])}"
+        if len(v) in (2, 4) and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in v):
+            return ",".join(str(_num(x)) for x in v)
         parts = [coerce_points(x) for x in v]
         return ";".join(p for p in parts if p) or None
     raise ValueError(f'bad point {v!r}: expected "x,y" or [x, y]')
@@ -456,12 +476,12 @@ def parse_steps(
             for x in ids.replace(" ", "").split(","):
                 if x:
                     out.append({"kind": "id", "id": int(x)})
-        if xy:
-            for p in pairs(xy):
-                out.append({"kind": "xy", "xy": p})
-        if norm:
-            for p in pairs(norm):
-                out.append({"kind": "norm", "norm": p})
+        for kind, raw in (("xy", xy), ("norm", norm)):
+            for p, box in point_boxes(raw) if raw else []:
+                spec = {"kind": kind, kind: p}
+                if box:
+                    spec["box"] = box
+                out.append(spec)
     extra = {}
     if step_px is not None:
         extra["step_px"] = int(step_px)
@@ -1597,6 +1617,12 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                 f"scroll={n} is a bare positive number, which scrolls UP (toward the top); "
                 f'use scroll="down:{n}" to scroll down, or "up:{n}" to make up explicit'
             ]
+        if s.get("box"):
+            k = s["kind"]
+            out["warnings"] = (out.get("warnings") or []) + [
+                f"{k}={','.join(map(str, s['box']))} has 4 numbers, read as a left,top,right,bottom box "
+                f"(the format of item / uia_node norm); clicking its center {k}=\"{s[k][0]},{s[k][1]}\""
+            ]
         if s.get("kind") == "scroll" and s.get("clamped_from") is not None:
             out["scroll_clamped"] = True
             out["warnings"] = (out.get("warnings") or []) + [
@@ -1664,6 +1690,13 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
     out["stamp_ok"] = not stamp_bad
     if stamp_bad:
         out["stamp_error"] = stamp_check.get("error") or "stamp check failed; re-perceive"
+    age = stamp_check.get("age_sec")
+    if not stamp_bad and max_age_sec is None and age is not None and age > STALE_STAMP_SEC:
+        out["stamp_stale"] = True
+        out["warnings"] = (out.get("warnings") or []) + [
+            f"stamp is {age:.0f}s old (over {STALE_STAMP_SEC}s); if the window changed since, "
+            "re-perceive before acting (max_age_sec=N turns this into a refusal)"
+        ]
     # A plan for a window that is gone or now belongs to another process is wrong, so
     # identity failures fail the dry run too; moved/aged stamps only with strict_stamp.
     wrong_window = stamp_check.get("identity_ok") is False
