@@ -534,7 +534,7 @@ class TestNewWindowsAndLock(unittest.TestCase):
         self.assertGreaterEqual(slept.call_count, 1)
 
     def test_only_window_opening_steps_wait(self):
-        self.assertEqual(new_window_wait_s(), 0.25)
+        self.assertEqual(new_window_wait_s(), 1.2)  # PR12 default (slow-start apps)
         frame = _screen()
         self.assertFalse(chain_may_open_window(plan_steps(frame, parse_steps(text="hi"))))
         self.assertFalse(chain_may_open_window(plan_steps(frame, parse_steps(key="a"))))

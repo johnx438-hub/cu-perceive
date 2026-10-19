@@ -451,6 +451,67 @@ def force_foreground(hwnd: int) -> bool:
     return bool(_window_service().force_foreground(int(hwnd)))
 
 
+INTEGRITY_NAMES = ((0x4000, "system"), (0x3000, "high"), (0x2100, "medium_plus"), (0x2000, "medium"),
+                   (0x1000, "low"), (0x0, "untrusted"))
+
+
+def integrity_name(rid: int | None) -> str | None:
+    if rid is None:
+        return None
+    for floor, name in INTEGRITY_NAMES:
+        if int(rid) >= floor:
+            return name
+    return "untrusted"
+
+
+def process_integrity(pid: int, *, probe=None) -> dict:
+    """{rid, level, error?} for a pid. probe(pid) -> (rid, error) is injectable for tests."""
+    from . import _win32
+
+    probe = probe or _win32.process_integrity_rid
+    try:
+        rid, err = probe(int(pid))
+    except Exception as e:
+        rid, err = None, str(e)
+    out = {"rid": rid, "level": integrity_name(rid)}
+    if err:
+        out["error"] = err
+    return out
+
+
+def self_integrity(*, probe=None) -> dict:
+    import os as _os
+
+    out = process_integrity(_os.getpid(), probe=probe)
+    out["elevated"] = None if out["rid"] is None else out["rid"] >= 0x3000
+    return out
+
+
+def target_integrity_check(hwnd: int, *, probe=None, pid_of=None) -> dict:
+    """Compare the target window's process integrity with ours.
+
+    elevated_target: True (target above us, UIPI drops our input), False, or None (unknown,
+    e.g. its token could not be read).
+    """
+    import os as _os
+
+    from . import _win32
+
+    pid_of = pid_of or _win32.window_pid
+    try:
+        pid = int(pid_of(int(hwnd)) or 0)
+    except Exception:
+        pid = 0
+    ours = process_integrity(_os.getpid(), probe=probe)
+    theirs = process_integrity(pid, probe=probe) if pid else {"rid": None, "level": None, "error": "no pid"}
+    elevated = None
+    if ours["rid"] is not None and theirs["rid"] is not None:
+        elevated = theirs["rid"] > ours["rid"]
+    return {"elevated_target": elevated, "target_integrity": theirs.get("level"),
+            "self_integrity": ours.get("level"), "target_pid": pid or None,
+            **({"integrity_error": theirs["error"]} if theirs.get("error") else {})}
+
+
 FOCUS_VERIFY_SETTLE_S = 0.15
 
 

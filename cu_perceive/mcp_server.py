@@ -10,7 +10,7 @@ INLINE_MAX_SIDE = 1280
 
 _PASS_THROUGH = ("ok", "error", "minimized", "identity", "capture", "focused", "warnings",
                  "foreground_ok", "focus_attempts", "foreground_hwnd", "stale_suspect",
-                 "hwnd_replaced", "suggested_hwnd")
+                 "hwnd_replaced", "suggested_hwnd", "target_integrity", "elevated_target")
 
 
 def transport_security_lists(extra_hosts: list[str] | None = None) -> tuple[list[str], list[str]]:
@@ -170,12 +170,36 @@ def _center_norm(box):
     return None
 
 
+def _wait_s(ms):
+    """new_window_wait_ms -> seconds (None = default)."""
+    if ms is None or ms == "":
+        return None
+    try:
+        return max(0.0, float(ms)) / 1000.0
+    except (TypeError, ValueError):
+        return None
+
+
+def _chain_step_wait(ms, step: dict, i: int, n: int):
+    """Chains wait long only on the last / expect_change step; field clicks keep 250 ms."""
+    from .act import NEW_WINDOW_CHAIN_STEP_S, new_window_wait_s
+
+    full = _wait_s(ms)
+    if i == n - 1 or step.get("expect_change"):
+        return full
+    return min(NEW_WINDOW_CHAIN_STEP_S, new_window_wait_s() if full is None else full)
+
+
 def _compact_rows(payload: dict) -> None:
     """perceive_window compact=true: short item / uia_node rows with a clickable center_norm."""
-    payload["items"] = [
-        {"id": it.get("id"), "text": it.get("text"), "kind": it.get("kind"), "center_norm": _center_norm(it.get("norm"))}
-        for it in payload.get("items") or []
-    ]
+    rows_i = []
+    for it in payload.get("items") or []:
+        row = {"id": it.get("id"), "text": it.get("text"), "kind": it.get("kind"),
+               "center_norm": _center_norm(it.get("norm")), "bbox_norm": it.get("norm")}
+        if it.get("confidence") is not None:
+            row["confidence"] = it["confidence"]
+        rows_i.append(row)
+    payload["items"] = rows_i
     if "uia_nodes" in payload:
         rows = []
         for n in payload.get("uia_nodes") or []:
@@ -331,7 +355,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         ocr/yolo run in a worker process with a timeout (CU_PERCEIVE_DETECT_TIMEOUT, default 30 s): a hung worker is
         restarted and the stamp comes back without detections plus a warning. Unknown arguments are refused (reason=unknown_args).
         compact=true without uia=true adds uia_nodes_omitted=true and a warning (UIA stays opt-in).
-        compact=true: items as {id, text, kind, center_norm}; uia_nodes keep name, control_type, center_norm, value, and readonly (null when a DataItem/DataGrid provider cannot say; a cell value of "(null)" is omitted). Text/DataItem/Edit content stays. Occluded nodes are omitted (uia_occluded); an empty runtime id is not occlusion. A walk that times out returns partial nodes and uia_timeout. center_norm goes straight into act norm.
+        compact=true: items as {id, text, kind, center_norm, bbox_norm, confidence} (OCR confidence 0-1, omitted when unknown; full items also carry box px and norm); uia_nodes keep name, control_type, center_norm, value, and readonly (null when a DataItem/DataGrid provider cannot say; a cell value of "(null)" is omitted). Text/DataItem/Edit content stays. Occluded nodes are omitted (uia_occluded); an empty runtime id is not occlusion. A walk that times out returns partial nodes and uia_timeout. center_norm goes straight into act norm.
         focus=true is measured: focused/foreground_ok report whether the window really is foreground afterwards (a warning when not).
         Occlusion only counts another top-level window (other process) or a sibling MDI child over a node, never the window itself or its own child HWNDs (CEF/Chromium safe); dropped nodes are named in uia_occluded_names (max 30). uia_include_occluded=true keeps them with occluded=true.
         stale_suspect=true: WGC failed and the grab fell back to PrintWindow (may be an old frame). hwnd_replaced/suggested_hwnd: the hwnd looks rebuilt.
@@ -463,6 +487,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         dry_run: bool | None = None,
         steps: list | None = None,
         check_change: bool = False,
+        new_window_wait_ms: int | None = None,
     ):
         """act: go=true sends (default: dry run; dry_run=true wins); needs window in front or focus=true. scroll="down:5" notches (bare 5 = UP). key="enter"|"pagedown". norm="x,y" or [x,y]. hwnd= checks stamp.
         norm="x,y" or [x,y] (0-1000 map) | xy="x,y" or [x,y] (stamp px) | ids="3"; scroll="down:3"|"up:3" (wheel notches, not pixels; max 50; int or string; bare numbers: negative = down, positive = UP); drag_norm="x1,y1;x2,y2"; text="..." + replace=true; key="enter"|"ctrl+a"|"pagedown"; hold_key=ctrl|shift|alt (needs a click/drag/scroll); button="left"|"right"; focus=true; go=true sends (default: dry run); via=paste|keys; ime=off.
@@ -496,7 +521,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         Before any clear or type, the top-level window that owns keyboard focus (GA_ROOT of hwndFocus) must be the stamp hwnd. An owned modal dialog is reason=focus_outside and nothing is cleared. blocking_window then names that top-level dialog {hwnd, title, class, focus_hwnd} and the hint says to close or dismiss it first.
         When the clipboard holds non-text data (image, files, rich text) that cannot be restored, paste is skipped and the text is typed with keys; the step reports clipboard_preserved=true and a warning.
         Concurrent go=true acts run one at a time. A dry run reports foreground_click_count=0; the plan is planned_foreground_click_count.
-        go=true adds new_windows [{hwnd, title, class}] after a click, Enter, F-key, Alt combo, or Esc (polled ~250ms, CU_PERCEIVE_NEW_WINDOW_WAIT_MS, and it returns as soon as a window appears). Typing does not wait. after is {foreground_hwnd, title, class}.
+        go=true adds new_windows [{hwnd, title, class}] after a click, Enter, F-key, Alt combo, or Esc (polled up to new_window_wait_ms, default 1200 or CU_PERCEIVE_NEW_WINDOW_WAIT_MS, then one recheck 300 ms later; it returns as soon as a window appears; in a steps chain only the last / expect_change step waits that long, earlier steps 250 ms). windows_snapshot_changed=true means some top-level window appeared, closed or changed title. Typing does not wait. after is {foreground_hwnd, title, class}.
         Keys: a-z, 0-9, f1-f24, num0-num9, alt, backquote, backslash, backspace, bracketleft,
               bracketright, capslock, comma, ctrl, delete, down, end, enter, equals, esc, home, insert,
               left, menu, minus, numlock, pagedown, pageup, pause, period, printscreen, quote, right,
@@ -545,7 +570,11 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         yours to judge). Dry runs skip it. focus=true is verified: if the stamp window is still not
         foreground after a retry, nothing is sent (reason=focus_failed, foreground_ok=false). A rebuilt window
         (hwnd gone, class changed, or hidden while a same-process window replaced it) is reason=hwnd_replaced
-        with hwnd_replaced=true and suggested_hwnd.
+        with hwnd_replaced=true and suggested_hwnd. check_change also covers drags; layout_reflow_suspected=true
+        (changed_ratio over 0.3) means much of the window moved: re-perceive before reusing old coordinates.
+        Capability boundary: a target running elevated (as administrator) above cu-perceive's integrity level
+        cannot receive input (Windows UIPI); go refuses with reason=elevated_target before sending anything
+        (dry runs warn; elevated_target / target_integrity / self_integrity are reported).
         """
         if check_change:
             # locals() in a closure also holds free variables: keep only real parameters
@@ -597,6 +626,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
             focus=bool(focus),
             stamp_source=("explicit" if _nz_str(stamp) else "latest") if path else None,
             ime=_nz_str(ime),
+            new_window_wait_s=_wait_s(new_window_wait_ms),
         )
         out["json"] = str(path) if path else None
         if notes:
@@ -664,6 +694,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
                 stamp_json_path=str(path) if path else None,
                 focus=bool(call.get("focus")) and i == 0,
                 stamp_source=stamp_source, ime=_nz_str(call.get("ime", "")),
+                new_window_wait_s=_chain_step_wait(call.get("new_window_wait_ms"), step, i, len(norm_steps)),
             )
 
         stamp_hwnd = int((frame or {}).get("hwnd") or 0)

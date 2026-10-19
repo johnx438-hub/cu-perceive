@@ -306,6 +306,52 @@ def is_cloaked(hwnd: int) -> bool:
         return False
 
 
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_TOKEN_QUERY = 0x0008
+_TOKEN_INTEGRITY_LEVEL = 25
+
+
+def process_integrity_rid(pid: int) -> tuple[int | None, str | None]:
+    """Mandatory integrity RID of a process (0x2000 medium, 0x3000 high, 0x4000 system).
+
+    Returns (rid, None) or (None, error). Opening an elevated process's token from a
+    medium process normally works (query-only); access denied is reported as an error.
+    """
+    if not pid:
+        return None, "no pid"
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    adv = ctypes.WinDLL("advapi32", use_last_error=True)
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    adv.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+    adv.GetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+                                        ctypes.POINTER(wintypes.DWORD)]
+    adv.GetSidSubAuthorityCount.restype = ctypes.POINTER(ctypes.c_ubyte)
+    adv.GetSidSubAuthorityCount.argtypes = [ctypes.c_void_p]
+    adv.GetSidSubAuthority.restype = ctypes.POINTER(wintypes.DWORD)
+    adv.GetSidSubAuthority.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+    hproc = k32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+    if not hproc:
+        return None, f"OpenProcess failed (winerror {ctypes.get_last_error()})"
+    tok = wintypes.HANDLE()
+    try:
+        if not adv.OpenProcessToken(hproc, _TOKEN_QUERY, ctypes.byref(tok)):
+            return None, f"OpenProcessToken failed (winerror {ctypes.get_last_error()})"
+        try:
+            need = wintypes.DWORD(0)
+            adv.GetTokenInformation(tok, _TOKEN_INTEGRITY_LEVEL, None, 0, ctypes.byref(need))
+            buf = ctypes.create_string_buffer(max(int(need.value), 64))
+            if not adv.GetTokenInformation(tok, _TOKEN_INTEGRITY_LEVEL, buf, len(buf), ctypes.byref(need)):
+                return None, f"GetTokenInformation failed (winerror {ctypes.get_last_error()})"
+            sid = ctypes.cast(buf, ctypes.POINTER(ctypes.c_void_p))[0]  # TOKEN_MANDATORY_LABEL.Label.Sid
+            count = adv.GetSidSubAuthorityCount(sid)[0]
+            return int(adv.GetSidSubAuthority(sid, count - 1)[0]), None
+        finally:
+            k32.CloseHandle(tok)
+    finally:
+        k32.CloseHandle(hproc)
+
+
 def window_thread(hwnd: int) -> int:
     """Thread that created hwnd, 0 if the window is gone."""
     return int(_dll("user32").GetWindowThreadProcessId(int(hwnd), None) or 0)
