@@ -534,6 +534,10 @@ def perceive(
                     if k in uia_res
                 }
                 uia_meta["uia_ms"] = uia_ms
+                occ_warn, all_occ = uia_occlusion_warnings(uia_res, uia_nodes, bool(uia_ok))
+                warnings.extend(occ_warn)
+                if all_occ:
+                    uia_meta["uia_all_occluded"] = True
                 if uia_res.get("warnings"):
                     warnings.extend(str(w) for w in uia_res["warnings"])
 
@@ -591,3 +595,21 @@ def perceive(
             except OSError:
                 pass
         raise
+
+
+def uia_occlusion_warnings(uia_res: dict, nodes: list, ok: bool) -> tuple[list[str], bool]:
+    """Warnings when UIA nodes were dropped as covered by another window. (warnings, all_occluded)."""
+    occ = int((uia_res or {}).get("uia_occluded") or 0)
+    if not ok or occ <= 0:
+        return [], False
+    if not nodes:
+        return [
+            f"uia: all {occ} nodes are covered by another window (uia_occluded={occ}, uia_count=0); "
+            "perceive again with focus=true to bring the window to the front (a topmost window stays on top even then: move it)"
+        ], True
+    if occ >= len(nodes):
+        return [
+            f"uia: {occ} nodes omitted as covered by another window (more than the {len(nodes)} returned); "
+            "focus=true brings the window to the front"
+        ], False
+    return [], False

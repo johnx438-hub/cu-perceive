@@ -143,7 +143,7 @@ MCP 默认带压缩图；要全分辨率走磁盘路径。CLI 仍用 map 路径�
 
 ## Agent 易踩坑（K3 / 88yr 2026-09-05）
 
-- MCP `act` 只有**扁平字段**（`norm`/`xy`/`ids`/`text`/`key`…），**没有** `steps=[{...}]` JSON 数组。未声明的参数（`steps`、`x`、`action`…）一律拒绝：调用报错，错误文本是 JSON（`reason: "unknown_args"`、`unknown_args`、`valid_args`），什么都不执行。若解析后零步骤，返回 `ok:false` + error。
+- MCP `act` 的字段是**扁平字段**（`norm`/`xy`/`ids`/`text`/`key`…）；多步用 `steps=[{...}]`，每步是同样的扁平字段（PR #9 起，最多 20 步，带守卫）。未声明的参数（`x`、`action`…）一律拒绝：调用报错，错误文本是 JSON（`reason: "unknown_args"`、`unknown_args`、`valid_args`），什么都不执行。若解析后零步骤，返回 `ok:false` + error。
 - 桌面 `act`：`dry_run=true` 优先于 `go=true`（只做 dry run，带 warning）；只传 `dry_run=false` 不会发送，要发送就传 `go=true`。
 - 浏览器写操作（`browser_act`，以及 `browser_session` 的 start/stop、`browser_tabs` 的 create/close/select/borrow/return）默认执行。`dry_run=true` 只返回计划的 `bsk` 命令。`go` 不拦。要恢复「默认 dry-run、`go=true` 才执行」，设 `CU_PERCEIVE_BSK_REQUIRE_GO=1`。
 - 坐标可以是字符串 `"640,500"` / `"177,752;500,200"`，也可以是数组 `norm=[640,500]`、`xy=[[10,20],[30,40]]`。给 4 个数（OCR item / UIA node 的 `norm` 框 left,top,right,bottom）就点框中心并带 warning。鼠标键是 `button="left|right|middle"`，没有 `click=`。`step_px` 只管拖动平滑度，跟滚动距离无关。

@@ -157,8 +157,9 @@ every json in a large output directory.
   disables) returns the nodes collected so far plus a warning (`uia_timeout`).
 - MCP tools refuse arguments they don't declare instead of dropping them: the
   call returns an error whose text is JSON with `reason: "unknown_args"`,
-  `unknown_args` and `valid_args`, and nothing runs. That includes
-  `steps=[{...}]` (act has only flat fields). Keys starting with `_` (such as
+  `unknown_args` and `valid_args`, and nothing runs (for example `x=` or
+  `action=`). `act` does take `steps=[{...}, ...]`: a guarded chain whose steps
+  are objects of the flat act fields (max 20). Keys starting with `_` (such as
   `_meta`) are dropped silently. `act` takes `dry_run` as an alias:
   `dry_run=true` forces a dry run even with `go=true`, and `dry_run=false` on
   its own doesn't send anything (only `go=true` sends). Both cases add a warning.
