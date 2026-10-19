@@ -446,10 +446,46 @@ def clipboard_get_inprocess() -> str | None:
     return _with_open_clipboard(read)
 
 
+# Formats that restore_staged can put back: the text itself and its synthesized siblings.
+_TEXT_FORMATS = frozenset({1, 7, 13, 16})  # CF_TEXT, CF_OEMTEXT, CF_UNICODETEXT, CF_LOCALE
+# Registered formats that OLE / .NET add to a plain-text copy. They carry no data of their own.
+_TEXT_COMPANION_NAMES = frozenset({
+    "dataobject", "ole private data", "system.string", "oleclipboardpersistonflush",
+})
+
+
+def _is_text_companion(cb, fmt: int) -> bool:
+    if int(fmt) < 0xC000:
+        return False
+    try:
+        name = cb.GetClipboardFormatName(int(fmt))
+    except Exception:
+        return False
+    return str(name or "").strip().lower() in _TEXT_COMPANION_NAMES
+
+
+def clipboard_foreign_formats_inprocess() -> list[int]:
+    """Clipboard formats other than plain text (bitmaps, files, HTML, RTF...). Raises ClipboardError."""
+
+    def scan(cb) -> list[int]:
+        found: list[int] = []
+        fmt = 0
+        for _ in range(512):
+            fmt = cb.EnumClipboardFormats(fmt)
+            if not fmt:
+                break
+            if int(fmt) not in _TEXT_FORMATS and not _is_text_companion(cb, fmt):
+                found.append(int(fmt))
+        return found
+
+    return _with_open_clipboard(scan)
+
+
 def _clipboard_inprocess(op: str, text: str | None) -> dict:
     try:
         if op == "get":
-            return {"ok": True, "text": clipboard_get_inprocess()}
+            foreign = clipboard_foreign_formats_inprocess()
+            return {"ok": True, "text": clipboard_get_inprocess(), "foreign_formats": len(foreign)}
         if op == "set":
             clipboard_set_inprocess("" if text is None else str(text))
             return {"ok": True}
@@ -644,6 +680,19 @@ def prepare_paste(text: str) -> dict:
     """
     text = "" if text is None else str(text)
     got = clipboard_rpc("get")
+    if got.get("ok") and int(got.get("foreign_formats") or 0) > 0:
+        # Only text can be saved and put back. Overwriting an image, file list or
+        # rich text would destroy it, so do not touch the clipboard at all.
+        return {
+            "ok": False,
+            "via": "clipboard",
+            "reason": "clipboard_nontext",
+            "error": "the clipboard holds non-text data that cannot be restored after a paste",
+            "n": len(text),
+            "restored": False,
+            "staged": False,
+            "fallback": "keys",
+        }
     save_ok = bool(got.get("ok"))
     saved = got.get("text") if save_ok else None
     save_error = None if save_ok else (got.get("error") or "could not read the clipboard")
