@@ -265,10 +265,12 @@ class TestGhostHint(unittest.TestCase):
 class _ToolApp:
     def __init__(self):
         self.tools = {}
+        self.registered = {}
 
     def tool(self):
         def deco(fn):
-            self.tools[fn.__name__] = fn
+            self.registered[fn.__name__] = fn
+            self.tools[fn.__name__] = getattr(fn, "__wrapped__", fn)
             return fn
         return deco
 

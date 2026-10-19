@@ -47,9 +47,92 @@ def mcp_api():
     return 1, FastMCP, Image
 
 
+def _tool_error_cls():
+    try:
+        from mcp.server.mcpserver.exceptions import ToolError
+
+        return ToolError
+    except ImportError:
+        pass
+    try:
+        from mcp.server.fastmcp.exceptions import ToolError
+
+        return ToolError
+    except ImportError:
+        return ValueError
+
+
+UNKNOWN_ARG_HINTS = {
+    "steps": (
+        "act has no steps parameter (steps=[{...}] would be silently dropped); use flat fields in "
+        'one call, e.g. act(stamp="...", norm="500,500", text="hi", key="enter", go=true) - order is '
+        "click(s) -> text -> key"
+    ),
+    "x": 'pass the point as norm="x,y" (0-1000 map) or xy="x,y" (stamp px), or norm=[x, y]',
+    "y": 'pass the point as norm="x,y" (0-1000 map) or xy="x,y" (stamp px), or norm=[x, y]',
+    "point": 'use norm="x,y" (0-1000 map) or xy="x,y" (stamp px)',
+    "action": "there is no action field: the fields you pass are the actions (norm/xy/ids click, text, key, scroll, drag)",
+}
+
+
+def unknown_args_error(tool: str, unknown: list[str], known: list[str]) -> dict:
+    """ok=false payload for arguments a tool does not take (nothing was run)."""
+    hints = [UNKNOWN_ARG_HINTS[a] for a in unknown if a in UNKNOWN_ARG_HINTS]
+    return {
+        "ok": False,
+        "reason": "unknown_args",
+        "error": (
+            f"{tool}: unknown argument(s) {', '.join(sorted(unknown))}; nothing was run "
+            "(unknown arguments are refused, not ignored)"
+        ),
+        "unknown_args": sorted(unknown),
+        "valid_args": sorted(known),
+        "hint": "; ".join(hints) or f"use only valid_args for {tool}",
+    }
+
+
+def strict_server_cls(server_cls):
+    """server_cls whose tools/call refuses arguments the tool's input schema does not declare."""
+
+    class StrictArgsServer(server_cls):
+        async def call_tool(self, name, arguments, *args, **kwargs):
+            unknown: list[str] = []
+            known: list[str] = []
+            if isinstance(arguments, dict) and arguments:
+                for t in await self.list_tools():
+                    if t.name == name:
+                        schema = getattr(t, "input_schema", None) or getattr(t, "inputSchema", None) or {}
+                        known = list((schema.get("properties") or {}).keys())
+                        unknown = [k for k in arguments if k not in known]
+                        break
+            if unknown:
+                import json
+
+                raise _tool_error_cls()(json.dumps(unknown_args_error(name, unknown, known), ensure_ascii=False))
+            return await super().call_tool(name, arguments, *args, **kwargs)
+
+    StrictArgsServer.__name__ = f"Strict{server_cls.__name__}"
+    return StrictArgsServer
+
+
+def offloaded(fn):
+    """Async wrapper running sync tool ``fn`` in a worker thread. mcp 1.x calls sync tools on
+    the event loop, so one slow call (OCR) would otherwise stall every other tool call."""
+    import functools
+
+    @functools.wraps(fn)
+    async def run(*args, **kwargs):
+        import anyio.to_thread
+
+        return await anyio.to_thread.run_sync(functools.partial(fn, *args, **kwargs))
+
+    return run
+
+
 def build_server(name: str, host: str, port: int, security):
     """Server object plus a zero-arg factory for its streamable-HTTP Starlette app."""
     major, server_cls, _image = mcp_api()
+    server_cls = strict_server_cls(server_cls)
     if major >= 2:
         app = server_cls(name)
         return app, lambda: app.streamable_http_app(transport_security=security, host=host)
@@ -76,6 +159,7 @@ def _nz_str(v: str):
 
 def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | None = None) -> None:
     import json
+    import threading
     from mcp.server.transport_security import TransportSecuritySettings
     from PIL import Image as PILImage
 
@@ -118,8 +202,13 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         allowed_origins=origins,
     )
     app, http_app = build_server("cu-perceive", host, port, security)
+    act_lock = threading.Lock()
 
-    @app.tool()
+    def _tool(fn):
+        app.tool()(offloaded(fn))
+        return fn
+
+    @_tool
     def windows(title: str = "", exe: str = "", hwnd: int = 0, map: bool = True, map_inline: bool = True):
         """Desktop window list + ruler map (0-1000, screen space). Read the image to pick hwnd.
         hwnd 0 / empty title+exe = all windows (+ optional map). map_inline=false = JSON only.
@@ -161,7 +250,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         }
         return _with_map(payload, out["map"], map_inline)
 
-    @app.tool()
+    @_tool
     def perceive_window(
         hwnd: int = 0,
         title: str = "",
@@ -265,16 +354,16 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
                 payload["error"] = out["error"]
         return _with_map(payload, payload["map"], map_inline)
 
-    @app.tool()
+    @_tool
     def act(
         stamp: str = "",
         ids: str | int | list = "",
-        xy: str = "",
-        norm: str = "",
+        xy: str | list = "",
+        norm: str | list = "",
         text: str = "",
         key: str = "",
-        drag: str = "",
-        drag_norm: str = "",
+        drag: str | list = "",
+        drag_norm: str | list = "",
         step_px: int = 4,
         scroll: str | int = "",
         button: str = "left",
@@ -289,13 +378,16 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         replace: bool = False,
         focus: bool = False,
         hwnd: int = 0,
+        dry_run: bool | None = None,
     ):
-        """act: go=true sends (default: dry run); needs the window in front or focus=true. scroll="down:5"/"up:5" (bare 5 = UP). key="enter"|"pagedown"|"ctrl+a". norm="x,y" 0-1000. hwnd= checks the stamp.
-        norm="x,y" (0-1000 map) | xy="x,y" (stamp px) | ids="3"; scroll="down:3"|"up:3" (int or string; bare numbers: negative = down, positive = UP); drag_norm="x1,y1;x2,y2"; text="..." + replace=true; key="enter"|"ctrl+a"|"pagedown"; hold_key=ctrl|shift|alt (needs a click/drag/scroll); focus=true; go=true sends (default: dry run).
+        """act: go=true sends (default: dry run; dry_run=true wins); needs window in front or focus=true. scroll="down:5" notches (bare 5 = UP). key="enter"|"pagedown". norm="x,y" or [x,y]. hwnd= checks stamp.
+        norm="x,y" or [x,y] (0-1000 map) | xy="x,y" or [x,y] (stamp px) | ids="3"; scroll="down:3"|"up:3" (wheel notches, not pixels; max 50; int or string; bare numbers: negative = down, positive = UP); drag_norm="x1,y1;x2,y2"; text="..." + replace=true; key="enter"|"ctrl+a"|"pagedown"; hold_key=ctrl|shift|alt (needs a click/drag/scroll); focus=true; go=true sends (default: dry run).
         perceive_window does not focus; act go needs the window in front or focus=true.
         stamp: a stamp name or the json path perceive_window returned. hwnd (optional): the window you mean;
         with no stamp it picks that window's newest stamp, with a stamp it refuses one from another window
-        (reason=hwnd_mismatch). Other unknown params are dropped by MCP, so pass stamp or hwnd when several windows are open.
+        (reason=hwnd_mismatch). Pass stamp or hwnd when several windows are open.
+        dry_run=true forces a dry run even with go=true; dry_run=false alone does not send (go=true does).
+        Unknown arguments (steps=[...], x=, action=, ...) are refused with reason=unknown_args and valid_args; nothing runs.
         Refusals return ok=false with reason (code), hint (next step) and blocking_window {hwnd, title}.
 
         Plan/run against a stamp. go default false. Prefer norm (map 0-1000) or xy.
@@ -306,7 +398,8 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
           keys only: act(stamp="...", text="hi", replace=true, go=true, focus=true)
           scroll: act(norm="500,500", scroll="down:3")  # hover then wheel, no click
 
-        norm/xy: "x,y" or "x:y"; multi with ";" e.g. "177,752;500,200".
+        norm/xy: "x,y" or "x:y"; multi with ";" e.g. "177,752;500,200"; arrays too: [640,500] or [[177,752],[500,200]].
+        scroll counts are wheel notches (one notch ~3 lines), not pixels; more than 50 is capped at 50 with scroll_clamped=true and a warning.
         ids: comma string / int / list; needs prior ocr/yolo perceive.
         text=paste+restore. key like ctrl+c (comma-separated ok). Unknown key -> ok=false, reason=unknown_key, valid_keys.
         Keys: a-z, 0-9, f1-f24, num0-num9, alt, backquote, backslash, backspace, bracketleft,
@@ -334,45 +427,57 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         method=input (default SendInput) | post (S1) | uia (S2) | auto (S3).
         post/uia/auto: single left clicks only (norm/xy/ids); reject drag/path/scroll/type/hold.
         uia: Invoke|Toggle|Expand|Select; no silent fallback. auto: probe UIA → chosen_method=uia|input (never post); go runs chosen only.
-        Unknown args (e.g. steps=[{action:click}]) are dropped by MCP - if nothing remains, ok=false.
         E3 same-stamp: multi norm with ";" or repeated clicks on one stamp; max_age_sec / strict_stamp
         pass through to stamp_check (ROI/moved stamps fail on go or when strict_stamp).
         """
-        specs = parse_steps(
-            ids=coerce_ids(ids), xy=_nz_str(xy), norm=_nz_str(norm), text=_nz_str(text),
-            key=_nz_str(key), drag=_nz_str(drag), drag_norm=_nz_str(drag_norm),
-            scroll=_nz_scroll(scroll), button=button, hover=hover, step_px=step_px, hold=hold,
-            uia_name=_nz_str(uia_name) or None,
-            replace=bool(replace),
-        )
+        send = bool(go) and not dry_run
+        notes = []
+        if go and dry_run:
+            notes.append("dry_run=true overrides go=true: this was a dry run, nothing was sent")
+        elif dry_run is False and not go:
+            notes.append("dry_run=false does not send input; pass go=true to send")
+        try:
+            specs = parse_steps(
+                ids=coerce_ids(ids), xy=_nz_str(xy), norm=_nz_str(norm), text=_nz_str(text),
+                key=_nz_str(key), drag=_nz_str(drag), drag_norm=_nz_str(drag_norm),
+                scroll=_nz_scroll(scroll), button=button, hover=hover, step_px=step_px, hold=hold,
+                uia_name=_nz_str(uia_name) or None,
+                replace=bool(replace),
+            )
+        except ValueError as e:
+            return {"ok": False, "error": str(e), "dry_run": not send, "reason": "bad_args",
+                    "hint": 'points are norm="x,y" / xy="x,y" (or [x,y]); scroll="down:3" / "up:3"'}
         try:
             frame, path = load_frame(stamp=_nz_str(stamp), hwnd=_nz_int(hwnd))
         except StampWindowMismatch as e:
-            return {"ok": False, "error": str(e), "dry_run": not go, "reason": "hwnd_mismatch",
+            return {"ok": False, "error": str(e), "dry_run": not send, "reason": "hwnd_mismatch",
                     "hint": "perceive_window(hwnd=...) and pass that stamp, or drop hwnd"}
         except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError) as e:
-            return {"ok": False, "error": str(e), "dry_run": not go}
-        out = run_chain(
-            frame,
-            specs,
-            dry_run=not go,
-            hold_key=_nz_str(hold_key),
-            method=_nz_str(method) or "input",
-            max_age_sec=max_age_sec,
-            strict_stamp=bool(strict_stamp),
-            stamp_json_path=str(path) if path else None,
-            focus=bool(focus),
-            stamp_source=("explicit" if _nz_str(stamp) else "latest") if path else None,
-        )
+            return {"ok": False, "error": str(e), "dry_run": not send}
+        with act_lock:
+            out = run_chain(
+                frame,
+                specs,
+                dry_run=not send,
+                hold_key=_nz_str(hold_key),
+                method=_nz_str(method) or "input",
+                max_age_sec=max_age_sec,
+                strict_stamp=bool(strict_stamp),
+                stamp_json_path=str(path) if path else None,
+                focus=bool(focus),
+                stamp_source=("explicit" if _nz_str(stamp) else "latest") if path else None,
+            )
         out["json"] = str(path) if path else None
+        if notes:
+            out["warnings"] = notes + (out.get("warnings") or [])
         return out
 
-    @app.tool()
+    @_tool
     def launch_app(app: str = "", exe: str = ""):
         """Start a named app from apps.json, or an exe path. Always starts; no dry-run."""
         return launch(app=_nz_str(app), exe=_nz_str(exe))
 
-    @app.tool()
+    @_tool
     def apps():
         """List quick-launch names in apps.json."""
         return {"apps": list_apps()}
