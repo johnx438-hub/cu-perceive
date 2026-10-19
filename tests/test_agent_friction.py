@@ -219,8 +219,12 @@ class TestRefusalDetails(_Tree):
         self.fg = SIBLING
         with mock.patch("cu_perceive.windows.force_foreground"):
             out = run_chain(_window_frame(), parse_steps(key="enter"), dry_run=False, focus=True)
-        self.assertEqual(out["reason"], "not_foreground_after_focus")
+        # PR11: focus is verified (with one retry) before any input
+        self.assertEqual(out["reason"], "focus_failed")
+        self.assertIs(out["foreground_ok"], False)
+        self.assertEqual(out["focus_attempts"], 2)
         self.assertIn(f"w{SIBLING}", out["hint"])
+        self.assertEqual(self.calls, [])
 
     def test_covered_after_focus_says_move_or_close(self):
         self.at = COVER

@@ -39,6 +39,8 @@ class _Mocks(unittest.TestCase):
             "live": mock.patch("cu_perceive.windows.live_geom", return_value=(dict(ORIGIN), dict(WIN))),
             "refresh": mock.patch("cu_perceive.windows.refresh_geom", return_value=(dict(ORIGIN), dict(WIN))),
             "focus": mock.patch("cu_perceive.windows.force_foreground", return_value=True),
+            # PR11: focus=true is verified; the fake window counts as foreground
+            "fg": mock.patch("cu_perceive.windows.foreground_matches", side_effect=lambda h: (True, h)),
             "capture": mock.patch(
                 "cu_perceive.windows.capture_window_image",
                 return_value=CaptureResult(_frame_img(), "wgc", [{"backend": "wgc", "ok": True}]),

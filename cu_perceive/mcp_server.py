@@ -2,12 +2,15 @@
 specific host, never 0.0.0.0. Extra Host names (e.g. a tailnet name behind a reverse
 proxy) are opt-in via --allow-host or CU_PERCEIVE_ALLOWED_HOSTS."""
 
+import inspect
 from io import BytesIO
 from pathlib import Path
 
 INLINE_MAX_SIDE = 1280
 
-_PASS_THROUGH = ("ok", "error", "minimized", "identity", "capture", "focused", "warnings")
+_PASS_THROUGH = ("ok", "error", "minimized", "identity", "capture", "focused", "warnings",
+                 "foreground_ok", "focus_attempts", "foreground_hwnd", "stale_suspect",
+                 "hwnd_replaced", "suggested_hwnd")
 
 
 def transport_security_lists(extra_hosts: list[str] | None = None) -> tuple[list[str], list[str]]:
@@ -186,6 +189,8 @@ def _compact_rows(payload: dict) -> None:
                 row["value"] = n.get("value")
             if "readonly" in n:
                 row["readonly"] = n["readonly"]
+            if n.get("occluded"):
+                row["occluded"] = True
             rows.append(row)
         payload["uia_nodes"] = rows
     payload["compact"] = True
@@ -310,6 +315,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         focus: bool = False,
         capture: str = "",
         compact: bool = False,
+        uia_include_occluded: bool = False,
     ):
         """perceive_window does not focus; act go needs the window in front or focus=true.
         Pin one window (or primary screen). Writes raw + 0-1000 map. Default ocr=false.
@@ -326,6 +332,9 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         restarted and the stamp comes back without detections plus a warning. Unknown arguments are refused (reason=unknown_args).
         compact=true without uia=true adds uia_nodes_omitted=true and a warning (UIA stays opt-in).
         compact=true: items as {id, text, kind, center_norm}; uia_nodes keep name, control_type, center_norm, value, and readonly (null when a DataItem/DataGrid provider cannot say; a cell value of "(null)" is omitted). Text/DataItem/Edit content stays. Occluded nodes are omitted (uia_occluded); an empty runtime id is not occlusion. A walk that times out returns partial nodes and uia_timeout. center_norm goes straight into act norm.
+        focus=true is measured: focused/foreground_ok report whether the window really is foreground afterwards (a warning when not).
+        Occlusion only counts another top-level window (other process) or a sibling MDI child over a node, never the window itself or its own child HWNDs (CEF/Chromium safe); dropped nodes are named in uia_occluded_names (max 30). uia_include_occluded=true keeps them with occluded=true.
+        stale_suspect=true: WGC failed and the grab fell back to PrintWindow (may be an old frame). hwnd_replaced/suggested_hwnd: the hwnd looks rebuilt.
         E2 light verify: roi="L,T,W,H" or roi_norm="CX,CY[,HALF]" (mutually exclusive) crops after full grab; map 0-1000 is ROI-local.
         out_dir optional: Windows path or /mnt/c/... ; response also has map_wsl / png_wsl (lowercase drive).
         A stamp written to a custom out_dir is registered under the default dir, so act finds it by bare stamp name, by hwnd, and as the latest stamp."""
@@ -350,11 +359,13 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
                 roi=roi_n or None,
                 roi_norm=roi_norm_n or None,
                 capture=_nz_str(capture),
+                uia_include_occluded=bool(uia_include_occluded),
             )
         except MissingExtraError as e:
             return e.to_dict()
         if out.get("ok") is False and not out.get("stamp"):
-            keep = ("ok", "error", "reason", "hint", "minimized", "degenerate_client", "hwnd", "window", "capture", "focused")
+            keep = ("ok", "error", "reason", "hint", "minimized", "degenerate_client", "hwnd", "window", "capture", "focused",
+                    "foreground_ok", "hwnd_replaced", "suggested_hwnd")
             return {k: out.get(k) for k in keep if k in out}
         payload = {
             "stamp": out["stamp"],
@@ -401,6 +412,9 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
                 payload["uia_truncated"] = out["uia_truncated"]
             if "uia_occluded" in out:
                 payload["uia_occluded"] = out["uia_occluded"]
+            if out.get("uia_occluded_names"):
+                payload["uia_occluded_names"] = out["uia_occluded_names"]
+                payload["uia_occluded_why"] = out.get("uia_occluded_why")
             if out.get("uia_all_occluded"):
                 payload["uia_all_occluded"] = True
                 payload.setdefault("hint", "every UIA node is covered by another window: perceive_window(..., focus=true); if it is still covered, a topmost window is in the way and must be moved")
@@ -448,6 +462,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         hwnd: int = 0,
         dry_run: bool | None = None,
         steps: list | None = None,
+        check_change: bool = False,
     ):
         """act: go=true sends (default: dry run; dry_run=true wins); needs window in front or focus=true. scroll="down:5" notches (bare 5 = UP). key="enter"|"pagedown". norm="x,y" or [x,y]. hwnd= checks stamp.
         norm="x,y" or [x,y] (0-1000 map) | xy="x,y" or [x,y] (stamp px) | ids="3"; scroll="down:3"|"up:3" (wheel notches, not pixels; max 50; int or string; bare numbers: negative = down, positive = UP); drag_norm="x1,y1;x2,y2"; text="..." + replace=true; key="enter"|"ctrl+a"|"pagedown"; hold_key=ctrl|shift|alt (needs a click/drag/scroll); button="left"|"right"; focus=true; go=true sends (default: dry run); via=paste|keys; ime=off.
@@ -525,7 +540,19 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         (submit/OK/Next/Enter); it must be the last step (else bad_args). Classify targets after a perceive:
         stable ones (fields, checkboxes, same-panel buttons) batch into one chain, with at most one
         change-causing step at the end.
+        check_change=true (opt-in, default off) grabs the stamp window before and after a go and adds
+        screen_changed, changed_ratio and changed_bbox_norm (pixels only; whether it is the right change is
+        yours to judge). Dry runs skip it. focus=true is verified: if the stamp window is still not
+        foreground after a retry, nothing is sent (reason=focus_failed, foreground_ok=false). A rebuilt window
+        (hwnd gone, class changed, or hidden while a same-process window replaced it) is reason=hwnd_replaced
+        with hwnd_replaced=true and suggested_hwnd.
         """
+        if check_change:
+            # locals() in a closure also holds free variables: keep only real parameters
+            params = inspect.signature(act).parameters
+            kw = {k: v for k, v in locals().items() if k in params}
+            kw["check_change"] = False
+            return _act_with_change(kw)
         if steps is not None and steps != []:
             return _act_chain(steps, locals())
         send = bool(go) and not dry_run
@@ -586,6 +613,21 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
             uia_name=_nz_str(f.get("uia_name", "")) or None, replace=bool(f.get("replace", False)),
             input_via=_nz_str(f.get("via", "")),
         )
+
+    def _act_with_change(kw: dict):
+        from .change import run_with_change_check
+
+        if not (bool(kw.get("go")) and not kw.get("dry_run")):
+            out = act(**kw)
+            if isinstance(out, dict):
+                out["check_change"] = "skipped (dry run)"
+            return out
+        try:
+            frame, _ = load_frame(stamp=_nz_str(kw.get("stamp", "")), hwnd=_nz_int(kw.get("hwnd", 0)))
+            target = int(frame.get("hwnd") or 0) or None
+        except Exception:
+            target = None  # act() itself reports the stamp problem
+        return run_with_change_check(target, lambda: act(**kw))
 
     def _act_chain(steps, call: dict):
         from .chain import ACTION_FIELDS, run_steps, validate_steps

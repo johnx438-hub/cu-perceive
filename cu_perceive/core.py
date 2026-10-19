@@ -252,8 +252,11 @@ def _capture_pinned(hwnd: int, *, focus: bool, capture: str) -> dict:
             "hint": "restore the window yourself, or retry with focus=true (CLI --focus)",
         }
     identity = window_identity(hwnd)
+    focus_info: dict = {}
     if focus:
-        force_foreground(hwnd)
+        from .windows import focus_and_verify
+
+        focus_info = focus_and_verify(hwnd, retries=1)
         time.sleep(RESTORE_SETTLE_S)
         origin, win = refresh_geom(hwnd)
     else:
@@ -321,7 +324,39 @@ def _capture_pinned(hwnd: int, *, focus: bool, capture: str) -> dict:
         return {"ok": False, "error": f"window changed during capture: {after}"}
     if after:
         warnings.append(f"window identity incomplete ({after}); act on this stamp will fail closed")
+    extra: dict = {}
+    if focus:
+        extra["foreground_ok"] = focus_info.get("foreground_ok")
+        extra["focus_attempts"] = focus_info.get("focus_attempts")
+        if focus_info.get("foreground_ok") is False:
+            extra["foreground_hwnd"] = focus_info.get("foreground_hwnd")
+            warnings.append(
+                f"focus=true but hwnd={hwnd} is not the foreground window after "
+                f"{focus_info.get('focus_attempts')} attempts (foreground={focus_info.get('foreground_hwnd')}); "
+                "captured anyway, but act with focus=true will refuse until it can raise it"
+            )
+    meta = result.meta()
+    if stale_suspect_from_meta(meta):
+        extra["stale_suspect"] = True
+        warnings.append(
+            "WGC failed and capture fell back to printwindow; the image may be stale "
+            "(GPU/Chromium windows often paint old frames) — verify before trusting it"
+        )
+    try:
+        from .windows import hwnd_replacement
+
+        rep = hwnd_replacement(hwnd, identity, (win or {}).get("title"))
+    except Exception:
+        rep = None
+    if rep:
+        extra["hwnd_replaced"] = bool(rep.get("hwnd_replaced"))
+        extra["suggested_hwnd"] = rep.get("suggested_hwnd")
+        warnings.append(
+            f"hwnd={hwnd} looks {'replaced' if rep.get('hwnd_replaced') else 'hidden'} ({rep.get('why')}); "
+            + (f"perceive suggested_hwnd={rep.get('suggested_hwnd')} instead" if rep.get("suggested_hwnd") else "re-find the window")
+        )
     return {
+        **extra,
         "ok": True,
         "image": result.image,
         "origin": origin,
@@ -330,6 +365,15 @@ def _capture_pinned(hwnd: int, *, focus: bool, capture: str) -> dict:
         "capture": result.meta(),
         "warnings": warnings,
     }
+
+
+def stale_suspect_from_meta(meta: dict | None) -> bool:
+    """Capture ended on printwindow after a real WGC attempt failed (not skipped as unsafe)."""
+    meta = meta or {}
+    if meta.get("backend") != "printwindow":
+        return False
+    return any(a.get("backend") == "wgc" and not a.get("ok") and a.get("skipped") != "unsafe"
+               for a in meta.get("attempts") or [])
 
 
 def _no_stamp_payload(res: dict, *, hwnd: int, win: dict | None, focus: bool) -> dict:
@@ -382,6 +426,7 @@ def perceive(
     roi=None,
     roi_norm=None,
     capture: str | None = None,
+    uia_include_occluded: bool = False,
 ) -> dict:
     """Grab -> grid map (+ optional OCR / YOLO / UIA ids). Never clicks.
 
@@ -427,6 +472,8 @@ def perceive(
         win = res.get("window") or win
         capture_meta = res["capture"]
         warnings.extend(res.get("warnings") or [])
+        pin_extra = {k: res[k] for k in ("foreground_ok", "focus_attempts", "foreground_hwnd",
+                                         "stale_suspect", "hwnd_replaced", "suggested_hwnd") if k in res}
         h, w = bgr.shape[:2]
     else:
         bgr, w, h = _grab(src, hwnd=None, activate=False)
@@ -523,6 +570,7 @@ def perceive(
                     height=int(h),
                     origin_left=ol,
                     origin_top=ot,
+                    include_occluded=bool(uia_include_occluded),
                 )
                 uia_ms = int(round((_time.perf_counter() - _t_uia) * 1000))
                 uia_ok = bool(uia_res.get("ok"))
@@ -530,7 +578,8 @@ def perceive(
                 uia_nodes = list(uia_res.get("uia_nodes") or [])
                 uia_meta = {
                     k: uia_res[k]
-                    for k in ("uia_count", "uia_visited", "uia_truncated", "uia_occluded", "uia_timeout", "caps")
+                    for k in ("uia_count", "uia_visited", "uia_truncated", "uia_occluded", "uia_occluded_names",
+                              "uia_occluded_why", "uia_timeout", "caps")
                     if k in uia_res
                 }
                 uia_meta["uia_ms"] = uia_ms
@@ -563,7 +612,9 @@ def perceive(
         if pin:
             payload["identity"] = identity
             payload["capture"] = capture_meta
-            payload["focused"] = bool(focus)
+            payload.update(pin_extra)
+            # measured, not the argument: focus=true that did not take reports False
+            payload["focused"] = bool(focus) and pin_extra.get("foreground_ok") is not False
         if warnings:
             payload["warnings"] = warnings
         if verify_light:

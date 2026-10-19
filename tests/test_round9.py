@@ -269,7 +269,8 @@ _DOC_NON_ARGS = {
     "pointer_refused_step", "keyboard_refused_step", "hold_key_refused_step", "dry_run_only",
     "CU_PERCEIVE_DETECT_TIMEOUT", "CU_PERCEIVE_BSK_REQUIRE_GO",
     # result fields named in docs
-    "stopped", "expect_change",  # chain result field / step-level field (see chain.STEP_FIELDS)
+    "stopped", "expect_change",
+    "stale_suspect", "occluded", "foreground_ok", "hwnd_replaced",  # PR11 result fields  # chain result field / step-level field (see chain.STEP_FIELDS)
     "window", "clipboard_preserved", "foreground_click_count", "empty", "verified",
     # arguments the docs name only to say they are refused (unknown_args hints)
     "steps", "x", "action", "click",

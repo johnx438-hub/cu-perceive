@@ -134,7 +134,8 @@ class TestCoveredClick(_Desk):
         with mock.patch("cu_perceive.act.stamp_identity_error", side_effect=[None, "HWND reused by pid 7"]):
             out = self.go(norm="900,700", focus=True)
         self.assertFalse(out["ok"])
-        self.assertIn("after --focus failed", out["error"])
+        self.assertRegex(out["error"], r"after --focus failed|before step 0 failed")
+        self.assertEqual(out["reason"], "identity_changed")
         self.assertEqual(self.calls, [f"focus:{HWND}"])
 
     def test_second_click_covered_stops_chain(self):

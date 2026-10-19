@@ -175,7 +175,9 @@ class TestKeyboardOnlyGo(_Live):
                         side_effect=[None, "HWND reused by pid 7"]):
             out = self.go(_window_frame(), key="enter", focus=True)
         self.assertFalse(out["ok"])
-        self.assertIn("after --focus failed", out["error"])
+        # PR11: focus is verified up front, so the identity check that trips may be the next one
+        self.assertRegex(out["error"], r"after --focus failed|before step 0 failed")
+        self.assertEqual(out["reason"], "identity_changed")
         self.assertEqual(self.calls, [f"focus:{HWND}"])
 
     def test_focus_that_does_not_stick_refuses(self):
@@ -183,8 +185,10 @@ class TestKeyboardOnlyGo(_Live):
         self.focus_result = 999
         out = self.go(_window_frame(), key="enter", focus=True)
         self.assertFalse(out["ok"])
-        self.assertIn("still not in the foreground", out["error"])
-        self.assertEqual(self.calls, [f"focus:{HWND}"])
+        # PR11: verified focus retries once, then refuses before any input
+        self.assertEqual(out["reason"], "focus_failed")
+        self.assertIn("not foreground", out["error"])
+        self.assertEqual(self.calls, [f"focus:{HWND}", f"focus:{HWND}"])
 
     def test_dry_run_warns(self):
         out = run_chain(_window_frame(), parse_steps(text="x"), dry_run=True)

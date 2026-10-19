@@ -113,7 +113,8 @@ class TestHoldKeyTarget(_Input):
         out = self.go(norm="500,500", scroll="down:3", focus=True)
         self.assertTrue(out["ok"], out)
         self.assertTrue(out["focused_window"])
-        self.assertEqual(self.calls, ["hover", f"focus:{HWND}", "down:ctrl", "scroll", "up:ctrl"])
+        # PR11: focus=true raises (and verifies) before any input
+        self.assertEqual(self.calls, [f"focus:{HWND}", "hover", "down:ctrl", "scroll", "up:ctrl"])
 
     def test_screen_stamp_needs_window_under_point_in_front(self):
         with mock.patch("cu_perceive.windows.window_at_point", return_value=77):

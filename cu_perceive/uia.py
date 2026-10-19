@@ -671,6 +671,97 @@ def control_center_occluded(control, bbox, *, hit_at) -> bool:
     return True
 
 
+UIA_OCCLUDED_NAMES_MAX = 30
+
+
+class Win32Probe:
+    """HWND facts for the occlusion test; injectable so tests run without Win32."""
+
+    def valid(self, hwnd: int) -> bool:
+        from . import _win32
+
+        return bool(_win32.is_window(int(hwnd)))
+
+    def window_at(self, x: int, y: int) -> int:
+        from . import _win32
+
+        return int(_win32.window_from_point(int(x), int(y)) or 0)
+
+    def root(self, hwnd: int) -> int:
+        from . import _win32
+
+        return int(_win32.root_window(int(hwnd)) or 0)
+
+    def pid(self, hwnd: int) -> int:
+        from . import _win32
+
+        return int(_win32.window_pid(int(hwnd)) or 0)
+
+    def related(self, a: int, b: int) -> bool:
+        """a == b, or one is a descendant of the other."""
+        from . import _win32
+
+        return int(a) == int(b) or _win32.is_child(int(a), int(b)) or _win32.is_child(int(b), int(a))
+
+    def owner_chain(self, hwnd: int) -> list[int]:
+        from . import _win32
+
+        out, cur = [], int(hwnd)
+        for _ in range(8):
+            cur = int(_win32.owner_window(cur) or 0)
+            if not cur:
+                break
+            out.append(cur)
+        return out
+
+
+def hwnd_occlusion(target_hwnd: int, ctrl_hwnd: int | None, bbox, *, probe) -> tuple[bool | None, str]:
+    """Window-level occlusion verdict at the bbox center: (True|False|None, why).
+
+    Only *another* top-level window (other process, not owned by the target) occludes.
+    Inside the target's own root, the hit HWND occludes only when it is unrelated to the
+    control's own nearest HWND (sibling MDI child); the control's own HWND, its ancestors
+    and descendants never do. That last rule fixes CEF/Chromium, whose windowless DOM
+    elements all hit-test to Chrome_RenderWidgetHostHWND. None = undecided (no HWND info),
+    the caller falls back to the UIA ControlFromPoint test.
+    """
+    if not bbox or len(bbox) < 4:
+        return False, "no_bbox"
+    left, top, right, bottom = (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
+    if right <= left or bottom <= top:
+        return False, "empty_bbox"
+    cx, cy = (left + right) // 2, (top + bottom) // 2
+    try:
+        valid = getattr(probe, "valid", None)
+        if valid is not None and not valid(int(target_hwnd)):
+            return None, "no_target"
+        hit = probe.window_at(cx, cy)
+        if not hit:
+            return None, "no_hit"
+        t_root = probe.root(target_hwnd) or int(target_hwnd)
+        h_root = probe.root(hit) or int(hit)
+        if h_root != t_root:
+            if probe.pid(h_root) == probe.pid(t_root):
+                return False, "own_process_window"
+            if t_root in probe.owner_chain(h_root):
+                return False, "owned_window"
+            return True, "other_window"
+        if hit == t_root or not ctrl_hwnd:
+            return False, "self"
+        if probe.related(int(ctrl_hwnd), int(hit)):
+            return False, "self"
+        return True, "sibling_child"
+    except Exception:
+        return None, "probe_error"
+
+
+def _native_hwnd(control) -> int:
+    try:
+        return int(getattr(control, "NativeWindowHandle", 0) or 0)
+    except Exception:
+        return 0
+
+
 # UIA_ValueIsReadOnlyPropertyId. DataGridView cells often expose this even when
 # the ValuePattern wrapper's IsReadOnly attribute is missing.
 _VALUE_IS_READONLY = 30046
@@ -815,8 +906,14 @@ def collect_uia_nodes(
     max_depth: int = UIA_MAX_DEPTH,
     skip_empty_name: bool = False,
     timeout_s: float | None = None,
+    include_occluded: bool = False,
+    probe=None,
 ) -> dict[str, Any]:
     """Walk UIA tree under stamp hwnd; return compact nodes with norm bboxes.
+
+    Occluded nodes (covered by another top-level window, or a sibling MDI child) are
+    dropped and named in ``uia_occluded_names``; ``include_occluded`` keeps them with
+    ``occluded: true``.
 
     Fail-closed: returns ``ok=False`` + ``error`` on missing package / bad hwnd.
     Does not raise for soft per-node errors.
@@ -858,6 +955,9 @@ def collect_uia_nodes(
     visited = 0
     truncated = False
     occluded_n = 0
+    occluded_names: list[str] = []
+    occluded_why: dict[str, int] = {}
+    probe = probe if probe is not None else Win32Probe()
     content_kept = 0
     timed_out = False
     if timeout_s is None:
@@ -871,7 +971,7 @@ def collect_uia_nodes(
         except Exception:
             return None
 
-    def walk(ctrl, depth: int) -> None:
+    def walk(ctrl, depth: int, near_hwnd: int = 0) -> None:
         nonlocal truncated, visited, occluded_n, content_kept, timed_out
         if truncated or timed_out:
             return
@@ -926,9 +1026,19 @@ def collect_uia_nodes(
             ):
                 # MDI children stacked under the active one still walk as on-screen.
                 # Drop a node whose center is covered by a different element.
-                if bbox is not None and control_center_occluded(ctrl, bbox, hit_at=hit_at):
+                is_occ = False
+                if bbox is not None:
+                    verdict, why = hwnd_occlusion(int(hwnd), _native_hwnd(ctrl) or near_hwnd or None, bbox, probe=probe)
+                    if verdict is None:
+                        verdict = control_center_occluded(ctrl, bbox, hit_at=hit_at)
+                        why = "uia_hit"
+                    is_occ = bool(verdict)
+                if is_occ:
                     occluded_n += 1
-                else:
+                    occluded_why[why] = occluded_why.get(why, 0) + 1
+                    if len(occluded_names) < UIA_OCCLUDED_NAMES_MAX:
+                        occluded_names.append(name or f"[{ctype}]")
+                if not is_occ or include_occluded:
                     preferred = pick_preferred_action(patterns)
                     node: dict[str, Any] = {
                         "id": len(nodes) + 1,
@@ -943,6 +1053,8 @@ def collect_uia_nodes(
                         node["preferred_action"] = preferred
                     if value is not None:
                         node["value"] = value
+                    if is_occ:
+                        node["occluded"] = True
                     if readonly is True or readonly is False:
                         if readonly or value is not None or content_only or "edit" in ctype.lower():
                             node["readonly"] = readonly
@@ -966,7 +1078,7 @@ def collect_uia_nodes(
         for ch in children or []:
             if truncated:
                 break
-            walk(ch, depth + 1)
+            walk(ch, depth + 1, _native_hwnd(ctrl) or near_hwnd)
 
     walk_error: list[BaseException] = []
 
@@ -1007,6 +1119,9 @@ def collect_uia_nodes(
         "uia_visited": visited,
         "uia_truncated": truncated or timed_out,
         "uia_occluded": occluded_n,
+        "uia_occluded_names": occluded_names,
+        "uia_occluded_why": occluded_why,
+        "uia_include_occluded": bool(include_occluded),
         "caps": {
             "max_nodes": int(max_nodes),
             "max_depth": int(max_depth),

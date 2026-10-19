@@ -85,6 +85,8 @@ def _declare(name: str, dll) -> None:
     if name == "user32":
         sigs = {
             "IsWindow": ([HWND], wintypes.BOOL),
+            "IsWindowVisible": ([HWND], wintypes.BOOL),
+            "IsChild": ([HWND, HWND], wintypes.BOOL),
             "IsIconic": ([HWND], wintypes.BOOL),
             "GetForegroundWindow": ([], HWND),
             "GetAncestor": ([HWND, wintypes.UINT], HWND),
@@ -277,6 +279,31 @@ def window_title(hwnd: int) -> str:
     buf = ctypes.create_unicode_buffer(512)
     n = _dll("user32").GetWindowTextW(int(hwnd), buf, 512)
     return buf.value[:n] if n > 0 else ""
+
+
+def is_window_visible(hwnd: int) -> bool:
+    return bool(_dll("user32").IsWindowVisible(int(hwnd))) if hwnd else False
+
+
+def is_child(parent: int, child: int) -> bool:
+    """IsChild(parent, child): child is a descendant (WS_CHILD chain) of parent."""
+    if not parent or not child:
+        return False
+    return bool(_dll("user32").IsChild(int(parent), int(child)))
+
+
+def is_cloaked(hwnd: int) -> bool:
+    """DWMWA_CLOAKED != 0 (a hidden UWP/virtual-desktop/cloaked window still IsWindowVisible)."""
+    if not hwnd:
+        return False
+    try:
+        val = wintypes.DWORD(0)
+        hr = ctypes.windll.dwmapi.DwmGetWindowAttribute(
+            wintypes.HWND(int(hwnd)), wintypes.DWORD(14), ctypes.byref(val), ctypes.sizeof(val)
+        )
+        return hr == 0 and bool(val.value)
+    except Exception:
+        return False
 
 
 def window_thread(hwnd: int) -> int:
