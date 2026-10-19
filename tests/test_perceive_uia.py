@@ -5,6 +5,7 @@ import time
 import unittest
 from unittest import mock
 
+from cu_perceive.mcp_server import _compact_rows
 from cu_perceive.uia import (
     UIA_CONTENT_MAX,
     UIA_MAX_DEPTH,
@@ -282,6 +283,81 @@ class TestReadonlyAndTimeout(unittest.TestCase):
         with mock.patch("cu_perceive.uia._auto", return_value=auto):
             _value, readonly = read_control_value(Cell())
         self.assertIs(readonly, True)
+
+    def test_datagrid_false_readonly_and_null_literal(self):
+        class Pat:
+            Value = "(null)"
+
+            def IsReadOnly(self):
+                return False
+
+        class Cell:
+            ControlTypeName = "DataItemControl"
+
+            def GetPattern(self, pid):
+                return Pat()
+
+        class Edit:
+            ControlTypeName = "EditControl"
+
+            def GetPattern(self, pid):
+                return Pat()
+
+        auto = mock.Mock()
+        auto.PatternId.ValuePattern = 1
+        with mock.patch("cu_perceive.uia._auto", return_value=auto):
+            value, readonly = read_control_value(Cell())
+            edit_value, edit_ro = read_control_value(Edit())
+        self.assertIsNone(value)
+        self.assertIsNone(readonly)
+        self.assertEqual(edit_value, "(null)")
+        self.assertIs(edit_ro, False)
+
+        class Root:
+            Name = "qty"
+            ControlTypeName = "DataItemControl"
+            BoundingRectangle = _Rect()
+
+            def GetPattern(self, pid):
+                if pid == 1:
+                    return Pat()
+                return None
+
+            def GetPropertyValue(self, pid):
+                return False
+
+            def GetRuntimeId(self):
+                return (3,)
+
+            def GetChildren(self):
+                return []
+
+        class Auto:
+            class PatternId:
+                ValuePattern = 1
+
+            class PropertyId:
+                IsOffscreenProperty = 9
+
+            def ControlFromHandle(self, hwnd):
+                return Root()
+
+            def ControlFromPoint(self, x, y):
+                return Root()
+
+        with mock.patch("cu_perceive.uia._auto", return_value=Auto()), \
+                mock.patch("cu_perceive.uia.list_available_patterns", return_value=[]):
+            res = collect_uia_nodes(5, width=200, height=100, origin_left=0, origin_top=0, timeout_s=1)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(len(res["uia_nodes"]), 1)
+        node = res["uia_nodes"][0]
+        self.assertNotIn("value", node)
+        self.assertIn("readonly", node)
+        self.assertIsNone(node["readonly"])
+        payload = {"items": [], "uia_nodes": [dict(node)]}
+        _compact_rows(payload)
+        self.assertIsNone(payload["uia_nodes"][0]["readonly"])
+        self.assertNotIn("value", payload["uia_nodes"][0])
 
     def test_walk_timeout_returns_partial_nodes(self):
         class Root:

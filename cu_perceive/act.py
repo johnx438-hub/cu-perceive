@@ -1402,10 +1402,12 @@ def _focus_target_error(out: dict, target: int, label: str) -> str | None:
 
 
 def _note_typed_readback(out: dict, step: dict, expected: str, target_hwnd: int = 0) -> bool:
-    """Set typed_verified from the focused control. False means the act must stop.
+    """Set typed_verified from the focused control inside the target window.
 
     true: the value matches. false: it does not (typed_mismatch, never ok).
-    null: the value could not be read, or focus is not a live window (unit-test hwnds).
+    null: the value could not be read, focus is not a live window (unit-test
+    hwnds), the edit is a password, or the focused element belongs to another
+    top-level window.
     """
     if target_hwnd:
         try:
@@ -1419,9 +1421,31 @@ def _note_typed_readback(out: dict, step: dict, expected: str, target_hwnd: int 
             out["typed_verified"] = None
             return True
     try:
-        from .input import read_focused_value, typed_matches
+        from .input import focused_readback, typed_matches
 
-        actual = read_focused_value()
+        info = focused_readback(int(target_hwnd or 0))
+    except Exception:
+        info = None
+    if not isinstance(info, dict):
+        step["typed_verified"] = None
+        out["typed_verified"] = None
+        return True
+    if info.get("password"):
+        step["typed_verified"] = None
+        out["typed_verified"] = None
+        note = "password field; read-back skipped"
+        step["typed_note"] = note
+        out["typed_note"] = note
+        return True
+    if info.get("in_target") is False:
+        step["typed_verified"] = None
+        out["typed_verified"] = None
+        note = "focused control is not in the target window; read-back skipped"
+        step["typed_note"] = note
+        out["typed_note"] = note
+        return True
+    actual = info.get("value")
+    try:
         match = typed_matches(expected, actual)
     except Exception:
         actual, match = None, None
@@ -1622,15 +1646,40 @@ def _snapshot_windows() -> list[dict] | None:
         return None
 
 
-NEW_WINDOW_WAIT_S = 0.6
+NEW_WINDOW_WAIT_S = 0.25
 NEW_WINDOW_POLL_S = 0.05
+_WINDOW_OPEN_KEYS = frozenset({"enter", "return", "esc", "escape"})
+
+
+def _key_may_open(spec: str) -> bool:
+    """Enter, Esc, an F-key, or an Alt combo can open or close a top-level window."""
+    parts = [p for p in str(spec).lower().split("+") if p]
+    if any(p in _WINDOW_OPEN_KEYS for p in parts):
+        return True
+    if any(len(p) > 1 and p[0] == "f" and p[1:].isdigit() for p in parts):
+        return True
+    return "alt" in parts and len(parts) >= 2
+
+
+def chain_may_open_window(steps) -> bool:
+    """True when a planned step can create a top-level window.
+
+    Clicks, Enter, Esc, F-keys, and Alt combos wait for ``new_windows``.
+    Typing, scrolling, and dragging do not.
+    """
+    for step in steps or []:
+        if step.get("via") in ("id", "xy", "norm"):
+            return True
+        if step.get("via") == "key" and _key_may_open(step.get("key") or ""):
+            return True
+    return False
 
 
 def new_window_wait_s() -> float:
     """How long to poll for a dialog that appears just after input. 0 disables the wait.
 
-    ``CU_PERCEIVE_NEW_WINDOW_WAIT_MS`` (default 600). Act often returns in
-    16–80 ms, before a WinForms dialog exists.
+    ``CU_PERCEIVE_NEW_WINDOW_WAIT_MS`` (default 250). The wait runs only after a
+    step that can open a window, and it returns as soon as one appears.
     """
     raw = os.environ.get("CU_PERCEIVE_NEW_WINDOW_WAIT_MS", "").strip().lower()
     if raw in ("0", "off", "none"):
@@ -1644,9 +1693,15 @@ def new_window_wait_s() -> float:
     return max(0.0, ms / 1000.0)
 
 
-def _poll_new_windows(before: list[dict] | None) -> tuple[list[dict], list[dict] | None]:
-    """Snapshot, then poll until a new top-level window shows up or the wait elapses."""
-    timeout = new_window_wait_s()
+def _poll_new_windows(
+    before: list[dict] | None, timeout: float | None = None,
+) -> tuple[list[dict], list[dict] | None]:
+    """Snapshot, then poll until a new top-level window shows up or the wait elapses.
+
+    ``timeout`` 0 takes one snapshot and does not sleep. A new window ends the wait early.
+    """
+    if timeout is None:
+        timeout = new_window_wait_s()
     latest = _snapshot_windows()
     found = diff_new_windows(before, latest) if before is not None and latest is not None else []
     waited = 0.0
@@ -1662,7 +1717,8 @@ def _poll_new_windows(before: list[dict] | None) -> tuple[list[dict], list[dict]
 
 
 def _attach_new_windows(out: dict, before: list[dict] | None) -> None:
-    found, _latest = _poll_new_windows(before)
+    timeout = new_window_wait_s() if chain_may_open_window(out.get("steps")) else 0.0
+    found, _latest = _poll_new_windows(before, timeout)
     out["new_windows"] = found
     try:
         from .windows import foreground_brief
@@ -2213,7 +2269,7 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
         return out
     from .input import (
         clear_field_for_replace, click_xy, discard_paste, drag_path, enter_text, finish_paste, hover_xy,
-        key_down, key_up, prepare_paste, read_focused_value, scroll_xy, tap_key, typed_matches,
+        key_down, key_up, prepare_paste, scroll_xy, tap_key,
     )
     held = False
     clicked = False

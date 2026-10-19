@@ -461,10 +461,11 @@ def foreground_matches(hwnd: int) -> tuple[bool, int]:
 
 
 def focus_matches(hwnd: int) -> tuple[bool | None, int]:
-    """(True, focus) when keyboard focus is inside hwnd; (False, focus) when it is not.
+    """(True, focus) when GetGUIThreadInfo's hwndFocus has GA_ROOT == hwnd.
 
     (None, 0) when focus cannot be read, or hwnd is not a live window (unit-test
-    hwnds). A child edit and an owned dialog's edit both match.
+    hwnds). A child edit of hwnd matches. An owned modal dialog does not: its
+    top-level window is the dialog, and typing there would edit the dialog.
     """
     from . import _win32
 
@@ -480,10 +481,10 @@ def focus_matches(hwnd: int) -> tuple[bool | None, int]:
     if not focused:
         return False, 0
     try:
-        root = _win32.root_window(int(focused)) or int(focused)
+        root = int(_win32.root_window(int(focused)) or int(focused))
     except Exception:
         return None, 0
-    return owned_by(root, target), int(focused)
+    return root == target, int(focused)
 
 
 MENU_CLASS = "#32768"

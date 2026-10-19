@@ -149,7 +149,10 @@ every json in a large output directory.
   by another element (occluded MDI children) with `uia_occluded` counting them.
   Occlusion uses `uiautomation.ControlsAreSame`. An empty `GetRuntimeId()` is
   not treated as a different control, so hwnd-less toolbars, menus, grid cells
-  and lookup rows stay. Read-only grid cells include `readonly`. A UIA walk
+  and lookup rows stay. A grid cell includes `readonly` when the provider
+  confirms it (`true`). DataGridView cells that only report "not readonly"
+  come back as `readonly: null`, and a cell value of the literal `(null)` is
+  null. A UIA walk
   that runs longer than 20s (`CU_PERCEIVE_UIA_WALK_TIMEOUT`, seconds; `0`
   disables) returns the nodes collected so far plus a warning (`uia_timeout`).
 - MCP tools refuse arguments they don't declare instead of dropping them: the
@@ -168,12 +171,17 @@ every json in a large output directory.
   `--type`, then types. An edit or masked edit (a WinForms MaskedTextBox is an
   Edit, and `SetValue("")` only blanks its display) is cleared with End,
   Shift+Home, Delete, then EM_SETSEL + WM_CLEAR. Other value patterns use
-  SetValue. It does not send Ctrl+A. If the field can be read back and is
+  SetValue. It does not send Ctrl+A. A value with no letters or digits
+  (`____-__-__`) counts as empty, including a WinForms MaskedTextBox whose
+  class is `WindowsForms10.EDIT...`. Masked edits are also recognized from
+  UIA/legacy text that says masked. If the field can be read back and is
   still not empty, the act stops with `reason: "replace_failed"` and does not
   type. Paste writes the clipboard before that clear, so a clipboard failure
-  does not wipe the field. After typing, the focused value is read back:
-  `typed_verified` is true, false, or null, and a mismatch is
-  `reason: "typed_mismatch"` (never `ok: true`).
+  does not wipe the field. After typing, the focused element **of the target
+  window** is read back: `typed_verified` is true, false, or null, and a
+  mismatch is `reason: "typed_mismatch"` (never `ok: true`). A password edit
+  (UIA IsPassword or `ES_PASSWORD`) skips that check: `typed_verified` is
+  null and `typed_note` says the read-back was skipped.
   `act --norm 491,63 --type https://example.org --replace --key enter --go`.
 - `--via paste|keys` (MCP `via`) chooses how `--type` / `text` is entered.
   `paste` (default) puts the text on the clipboard and sends Ctrl+V, then
@@ -204,8 +212,11 @@ every json in a large output directory.
     actually there);
   - each `--type` / `--key` needs the stamped window, or a window it owns (for
     example a dialog the click just opened), in the foreground, also after a
-    click, and keyboard focus inside that window. Otherwise it refuses with
-    `keyboard_refused_step` (`not_foreground` or `focus_outside`);
+    click. Before any clear or type, the top-level window that owns keyboard
+    focus (`GetGUIThreadInfo` hwndFocus, then `GetAncestor` `GA_ROOT`) must be
+    the stamp hwnd. A child edit of that window matches. An owned modal dialog
+    does not: the act refuses with `keyboard_refused_step` /
+    `focus_outside` and does not clear the dialog's field;
   - `--hold-key` counts as a key: it is pressed at the first click, drag or
     scroll, once that step's point has passed and only if the stamped window
     (or one it owns) is in the foreground. Otherwise it refuses with
@@ -245,10 +256,11 @@ every json in a large output directory.
   (0 when the run is refused). A dry run also leaves it at 0; the plan is
   `planned_foreground_click_count`. Concurrent `--go` / `go=true` acts in one
   process run one at a time. A live act takes its window snapshot inside that
-  lock, then polls for about 600ms (`CU_PERCEIVE_NEW_WINDOW_WAIT_MS`) so a
-  dialog that appears just after the click is listed in `new_windows`
-  (`hwnd`, `title`, `class`). `after` is the foreground window when the act
-  returns.
+  lock. After a click, Enter, F-key, Alt combo, or Esc it polls for about
+  250ms (`CU_PERCEIVE_NEW_WINDOW_WAIT_MS`) and stops as soon as a new top-level
+  window appears, listed in `new_windows` (`hwnd`, `title`, `class`). Typing,
+  scrolling, and dragging do not wait. `after` is the foreground window when
+  the act returns.
 - `--method uia` without the `uia` extra exits with code 3 and prints the same
   `missing_extra` / `install` fields as `perceive --uia`. `--method auto`
   without it falls back to input and says so in `warnings`.

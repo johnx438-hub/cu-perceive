@@ -8,22 +8,29 @@ import time
 import unittest
 from unittest import mock
 
-from cu_perceive.act import diff_new_windows, normalize_input_via, parse_steps, run_chain
+from cu_perceive.act import (
+    chain_may_open_window, diff_new_windows, new_window_wait_s, normalize_input_via, parse_steps,
+    plan_steps, run_chain,
+)
 from cu_perceive.ime import (
     layout_ime_active, normalize_ime, pick_installed_latin, probe_ime, restore_ime, suspend_ime,
 )
 from cu_perceive.input import (
     ClipboardError,
     _clipboard_worker,
+    _looks_masked,
     _shutdown_clipboard_worker,
     _worker_failure,
     clear_field_for_replace,
     clipboard_rpc,
     clipboard_set_inprocess,
+    edit_is_password,
     paste_text,
     typed_matches,
     unicode_clipboard_bytes,
+    value_is_blank,
 )
+from cu_perceive.windows import focus_matches
 
 
 def _screen():
@@ -417,6 +424,49 @@ class TestReplaceClear(unittest.TestCase):
         self.assertIsNone(typed_matches("B2003", None))
         self.assertFalse(typed_matches("B2003", "old"))
 
+    def test_winforms_mask_template_counts_as_empty(self):
+        # WindowsForms10.EDIT has no "masked" in the class. After End/Shift+Home/Delete
+        # the display is the prompt, and WM_GETTEXTLENGTH still counts those characters.
+        pat = _Pattern("2020-01-01")
+        sent = []
+
+        def tap(k):
+            if k == "delete":
+                pat.value = "____-__-__"
+
+        def send(*args):
+            sent.append(args)
+
+        with mock.patch("cu_perceive.input.tap_key", side_effect=tap), \
+                mock.patch("cu_perceive.input.tap_combo"):
+            out = clear_field_for_replace(
+                pattern=pat, hwnd=5, class_name="WindowsForms10.EDIT.app.0.378734a",
+                control_type="EditControl", send_message=send, text_length=lambda h: 10,
+                discover=False, allow_keyboard=True,
+            )
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["method"], "end_shift_home")
+        self.assertTrue(out["empty"])
+        self.assertEqual(sent, [])
+        self.assertTrue(value_is_blank("____-__-__"))
+        self.assertFalse(value_is_blank("2020-01-01"))
+        self.assertIsNone(value_is_blank(None))
+
+    def test_legacy_text_marks_a_winforms_edit_as_masked(self):
+        self.assertTrue(_looks_masked("WindowsForms10.EDIT.app", legacy_text="MaskedTextBox"))
+        self.assertFalse(_looks_masked("WindowsForms10.EDIT.app"))
+        pat = _Pattern("2020-01-01")
+        sent = []
+        with mock.patch("cu_perceive.input.tap_key"), mock.patch("cu_perceive.input.tap_combo"):
+            out = clear_field_for_replace(
+                pattern=pat, hwnd=5, class_name="WindowsForms10.EDIT.app",
+                legacy_text="MaskedTextBox date", send_message=lambda *a: sent.append(a),
+                text_length=lambda h: 0, discover=False, allow_keyboard=True,
+            )
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["reason"], "replace_failed")
+        self.assertEqual(sent, [])
+
 
 class TestNewWindowsAndLock(unittest.TestCase):
     def test_diff_reports_hwnd_title_class(self):
@@ -483,6 +533,80 @@ class TestNewWindowsAndLock(unittest.TestCase):
         self.assertEqual(out["new_windows"], [{"hwnd": 9, "title": "保存成功", "class": "#32770"}])
         self.assertGreaterEqual(slept.call_count, 1)
 
+    def test_only_window_opening_steps_wait(self):
+        self.assertEqual(new_window_wait_s(), 0.25)
+        frame = _screen()
+        self.assertFalse(chain_may_open_window(plan_steps(frame, parse_steps(text="hi"))))
+        self.assertFalse(chain_may_open_window(plan_steps(frame, parse_steps(key="a"))))
+        self.assertFalse(chain_may_open_window(plan_steps(frame, parse_steps(key="ctrl+c"))))
+        self.assertFalse(chain_may_open_window(plan_steps(frame, parse_steps(scroll="down:1"))))
+        self.assertTrue(chain_may_open_window(plan_steps(frame, parse_steps(key="enter"))))
+        self.assertTrue(chain_may_open_window(plan_steps(frame, parse_steps(key="esc"))))
+        self.assertTrue(chain_may_open_window(plan_steps(frame, parse_steps(key="f4"))))
+        self.assertTrue(chain_may_open_window(plan_steps(frame, parse_steps(key="alt+f"))))
+        self.assertTrue(chain_may_open_window(plan_steps(frame, parse_steps(norm="1,1"))))
+
+        def live(steps):
+            with mock.patch("cu_perceive.act.check_stamp", return_value={"ok": True}), \
+                    mock.patch("cu_perceive.act.stamp_identity_error", return_value=None), \
+                    mock.patch("cu_perceive.windows.foreground_matches", return_value=(True, 42)), \
+                    mock.patch("cu_perceive.windows.focus_matches", return_value=(None, 0)), \
+                    mock.patch("cu_perceive.input.enter_text", return_value={"ok": True, "via": "keys"}), \
+                    mock.patch("cu_perceive.input.tap_key", return_value={"ok": True}), \
+                    mock.patch("cu_perceive.act._snapshot_windows", return_value=[]), \
+                    mock.patch("cu_perceive.windows.foreground_brief", return_value=None), \
+                    mock.patch("time.sleep") as slept:
+                out = run_chain(_window(), steps, dry_run=False)
+            return out, slept
+
+        typed, slept = live(parse_steps(text="B2003", input_via="keys"))
+        self.assertTrue(typed["ok"], typed)
+        slept.assert_not_called()
+        entered, slept = live(parse_steps(key="enter"))
+        self.assertTrue(entered["ok"], entered)
+        self.assertGreaterEqual(slept.call_count, 1)
+
+    def test_focus_root_must_be_the_stamp_hwnd(self):
+        with mock.patch("cu_perceive._win32.is_window", return_value=True), \
+                mock.patch("cu_perceive._win32.focus_hwnd", return_value=55), \
+                mock.patch("cu_perceive._win32.root_window", return_value=99):
+            self.assertEqual(focus_matches(42), (False, 55))
+        with mock.patch("cu_perceive._win32.is_window", return_value=True), \
+                mock.patch("cu_perceive._win32.focus_hwnd", return_value=7), \
+                mock.patch("cu_perceive._win32.root_window", return_value=42):
+            self.assertEqual(focus_matches(42), (True, 7))
+        with mock.patch("cu_perceive._win32.is_window", return_value=False):
+            self.assertEqual(focus_matches(42), (None, 0))
+
+    def test_modal_dialog_focus_does_not_clear(self):
+        calls = []
+
+        def root(hwnd):
+            return 99 if int(hwnd) == 55 else int(hwnd)
+
+        with mock.patch("cu_perceive.act.check_stamp", return_value={"ok": True}), \
+                mock.patch("cu_perceive.act.stamp_identity_error", return_value=None), \
+                mock.patch("cu_perceive.windows.foreground_matches", return_value=(True, 42)), \
+                mock.patch("cu_perceive.windows.force_foreground", return_value=True), \
+                mock.patch("cu_perceive._win32.is_window", return_value=True), \
+                mock.patch("cu_perceive._win32.focus_hwnd", return_value=55), \
+                mock.patch("cu_perceive._win32.root_window", side_effect=root), \
+                mock.patch("cu_perceive.input.clear_field_for_replace",
+                           side_effect=lambda **k: calls.append("clear")), \
+                mock.patch("cu_perceive.input.prepare_paste",
+                           side_effect=lambda t: calls.append("stage") or {"ok": True}), \
+                mock.patch("cu_perceive.input.enter_text",
+                           side_effect=lambda *a, **k: calls.append("type")), \
+                mock.patch("cu_perceive.act._snapshot_windows", return_value=[]), \
+                mock.patch("cu_perceive.windows.foreground_brief", return_value=None), \
+                mock.patch("time.sleep"):
+            out = run_chain(
+                _window(), parse_steps(text="hello", replace=True), dry_run=False, focus=True,
+            )
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["reason"], "focus_outside")
+        self.assertEqual(calls, [])
+
     def test_focus_outside_refuses_before_clear_or_type(self):
         calls = []
         with mock.patch("cu_perceive.act.check_stamp", return_value={"ok": True}), \
@@ -508,7 +632,8 @@ class TestNewWindowsAndLock(unittest.TestCase):
                 mock.patch("cu_perceive.windows.foreground_matches", return_value=(True, 42)), \
                 mock.patch("cu_perceive.windows.focus_matches", return_value=(True, 42)), \
                 mock.patch("cu_perceive.input.enter_text", return_value={"ok": True, "via": "keys"}), \
-                mock.patch("cu_perceive.input.read_focused_value", return_value="old"), \
+                mock.patch("cu_perceive.input.focused_readback",
+                           return_value={"value": "old", "password": False, "in_target": True}), \
                 mock.patch("cu_perceive.act._snapshot_windows", return_value=[]), \
                 mock.patch("cu_perceive.windows.foreground_brief", return_value=None), \
                 mock.patch("time.sleep"):
@@ -516,6 +641,42 @@ class TestNewWindowsAndLock(unittest.TestCase):
         self.assertFalse(out["ok"])
         self.assertEqual(out["reason"], "typed_mismatch")
         self.assertIs(out["typed_verified"], False)
+
+    def test_password_readback_is_skipped(self):
+        self.assertTrue(edit_is_password(uia_password=True))
+        self.assertTrue(edit_is_password(style=0x0020))
+        self.assertFalse(edit_is_password(style=0))
+        with mock.patch("cu_perceive.act.check_stamp", return_value={"ok": True}), \
+                mock.patch("cu_perceive.act.stamp_identity_error", return_value=None), \
+                mock.patch("cu_perceive.windows.foreground_matches", return_value=(True, 42)), \
+                mock.patch("cu_perceive.windows.focus_matches", return_value=(True, 42)), \
+                mock.patch("cu_perceive.input.enter_text", return_value={"ok": True, "via": "keys"}), \
+                mock.patch("cu_perceive.input.focused_readback",
+                           return_value={"value": None, "password": True, "in_target": True}), \
+                mock.patch("cu_perceive.act._snapshot_windows", return_value=[]), \
+                mock.patch("cu_perceive.windows.foreground_brief", return_value=None), \
+                mock.patch("time.sleep"):
+            out = run_chain(_window(), parse_steps(text="secret", input_via="keys"), dry_run=False)
+        self.assertTrue(out["ok"], out)
+        self.assertIsNone(out["typed_verified"])
+        self.assertIn("password", out["typed_note"])
+        self.assertNotEqual(out.get("reason"), "typed_mismatch")
+
+    def test_readback_from_another_window_is_not_a_match(self):
+        with mock.patch("cu_perceive.act.check_stamp", return_value={"ok": True}), \
+                mock.patch("cu_perceive.act.stamp_identity_error", return_value=None), \
+                mock.patch("cu_perceive.windows.foreground_matches", return_value=(True, 42)), \
+                mock.patch("cu_perceive.windows.focus_matches", return_value=(True, 42)), \
+                mock.patch("cu_perceive.input.enter_text", return_value={"ok": True, "via": "keys"}), \
+                mock.patch("cu_perceive.input.focused_readback",
+                           return_value={"value": "B2003", "password": False, "in_target": False}), \
+                mock.patch("cu_perceive.act._snapshot_windows", return_value=[]), \
+                mock.patch("cu_perceive.windows.foreground_brief", return_value=None), \
+                mock.patch("time.sleep"):
+            out = run_chain(_window(), parse_steps(text="B2003", input_via="keys"), dry_run=False)
+        self.assertTrue(out["ok"], out)
+        self.assertIsNone(out["typed_verified"])
+        self.assertNotEqual(out.get("reason"), "typed_mismatch")
 
     def test_ime_off_does_not_warn_when_the_switch_sticks(self):
         active = {

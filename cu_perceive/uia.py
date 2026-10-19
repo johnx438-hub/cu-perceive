@@ -710,12 +710,35 @@ def _read_flag(obj, names: tuple[str, ...]) -> bool | None:
     return None
 
 
+def _control_type_name(control) -> str:
+    try:
+        return str(getattr(control, "ControlTypeName", "") or "")
+    except Exception:
+        return ""
+
+
+def provider_readonly_unreliable(control_type: str) -> bool:
+    """DataGridView cells report IsReadOnly false even when the cell cannot be edited."""
+    c = (control_type or "").lower()
+    return "dataitem" in c or "datagrid" in c
+
+
+def normalize_cell_value(value: str | None, control_type: str = "") -> str | None:
+    """A grid cell whose value is the literal ``(null)`` is an empty cell."""
+    if value is None:
+        return None
+    if provider_readonly_unreliable(control_type) and str(value).strip().lower() == "(null)":
+        return None
+    return value
+
+
 def read_control_value(control) -> tuple[str | None, bool | None]:
     """(ValuePattern.Value truncated, IsReadOnly or None). Never raises.
 
     Read-only grid cells often have no ``IsReadOnly`` attribute on the pattern
     object. This also checks the ValueIsReadOnly property and the legacy
-    accessible state bit.
+    accessible state bit. A DataItem/DataGrid ``False`` is not evidence, so
+    those cells report ``None``. A cell value of ``(null)`` is ``None``.
     """
     auto = None
     pat = None
@@ -750,6 +773,10 @@ def read_control_value(control) -> tuple[str | None, bool | None]:
                 readonly = bool(raw_state & _STATE_SYSTEM_READONLY)
         except Exception:
             pass
+    ctype = _control_type_name(control)
+    value = normalize_cell_value(value, ctype)
+    if provider_readonly_unreliable(ctype) and readonly is not True:
+        readonly = None
     return value, readonly
 
 
@@ -916,10 +943,12 @@ def collect_uia_nodes(
                         node["preferred_action"] = preferred
                     if value is not None:
                         node["value"] = value
-                    if isinstance(readonly, bool) and (
-                        readonly or value is not None or content_only or "edit" in ctype.lower()
-                    ):
-                        node["readonly"] = readonly
+                    if readonly is True or readonly is False:
+                        if readonly or value is not None or content_only or "edit" in ctype.lower():
+                            node["readonly"] = readonly
+                    elif provider_readonly_unreliable(ctype):
+                        # Explicit null: the provider's "not readonly" is not evidence.
+                        node["readonly"] = None
                     with state_lock:
                         nodes.append(node)
                         kept_n = len(nodes)

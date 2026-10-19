@@ -829,12 +829,43 @@ def _foreground_focus_hwnd() -> int:
     return int(info.hwndFocus or 0)
 
 
-def _discover_focused_edit() -> tuple[object | None, int, str, str]:
-    """(ValuePattern or None, edit hwnd, class name, control type). Best effort; never raises."""
+def _legacy_text(control) -> str:
+    """Legacy accessible description/help/name, for mask detection. Never raises."""
+    if control is None:
+        return ""
+    parts: list[str] = []
+    try:
+        import uiautomation as auto
+
+        leg_id = getattr(auto.PatternId, "LegacyIAccessiblePattern", None)
+        leg = control.GetPattern(leg_id) if leg_id is not None else None
+    except Exception:
+        leg = None
+    for src in (leg, control):
+        if src is None:
+            continue
+        for name in ("Description", "Help", "Name", "AutomationId", "ClassName"):
+            try:
+                val = getattr(src, name, None)
+            except Exception:
+                continue
+            if callable(val):
+                try:
+                    val = val()
+                except Exception:
+                    continue
+            if val:
+                parts.append(str(val))
+    return " ".join(parts)
+
+
+def _discover_focused_edit() -> tuple:
+    """(ValuePattern or None, edit hwnd, class name, control type, control). Best effort; never raises."""
     pattern = None
     hwnd = 0
     class_name = ""
     control_type = ""
+    ctrl = None
     try:
         import uiautomation as auto
 
@@ -858,6 +889,7 @@ def _discover_focused_edit() -> tuple[object | None, int, str, str]:
                 class_name = ""
     except Exception:
         pattern = None
+        ctrl = None
     if not hwnd:
         try:
             hwnd = _foreground_focus_hwnd()
@@ -868,13 +900,105 @@ def _discover_focused_edit() -> tuple[object | None, int, str, str]:
             class_name = _window_class_name(hwnd)
         except Exception:
             class_name = ""
-    return pattern, hwnd, class_name, control_type
+    return pattern, hwnd, class_name, control_type, ctrl
+
+
+# Edit control style. WinForms PasswordChar sets this; UIA IsPassword is the other signal.
+ES_PASSWORD = 0x0020
+GWL_STYLE = -16
+_UIA_IS_PASSWORD = 30019
+
+
+def edit_is_password(*, uia_password: bool | None = None, style: int | None = None) -> bool:
+    """True when UIA says IsPassword or the edit style has ES_PASSWORD."""
+    if uia_password is True:
+        return True
+    if style is not None and (int(style) & ES_PASSWORD):
+        return True
+    return False
+
+
+def _edit_style(hwnd: int) -> int | None:
+    if user32 is None or not hwnd:
+        return None
+    try:
+        user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.GetWindowLongW.restype = ctypes.c_long
+        return int(user32.GetWindowLongW(int(hwnd), GWL_STYLE))
+    except Exception:
+        return None
+
+
+def _uia_is_password(control) -> bool | None:
+    if control is None:
+        return None
+    flag = getattr(control, "IsPassword", None)
+    if callable(flag):
+        try:
+            flag = flag()
+        except Exception:
+            flag = None
+    if isinstance(flag, bool):
+        return flag
+    try:
+        import uiautomation as auto
+
+        pid = getattr(getattr(auto, "PropertyId", None), "IsPasswordProperty", _UIA_IS_PASSWORD)
+        raw = control.GetPropertyValue(pid)
+    except Exception:
+        return None
+    if isinstance(raw, bool):
+        return raw
+    if raw in (0, 1):
+        return bool(raw)
+    return None
+
+
+def _hwnd_root(hwnd: int) -> int | None:
+    """GA_ROOT of hwnd, or None when it cannot be read (including fake test hwnds)."""
+    if not hwnd:
+        return None
+    try:
+        from . import _win32
+
+        if not _win32.is_window(int(hwnd)):
+            return None
+        return int(_win32.root_window(int(hwnd)) or int(hwnd))
+    except Exception:
+        return None
 
 
 def read_focused_value() -> str | None:
     """ValuePattern of the focused control, or None when it cannot be read."""
-    pattern, _hwnd, _class_name, _ctype = _discover_focused_edit()
-    return _pattern_value(pattern) if pattern is not None else None
+    return focused_readback(0).get("value")
+
+
+def focused_readback(target_hwnd: int = 0) -> dict:
+    """Value of the focused edit, and whether that edit belongs to ``target_hwnd``.
+
+    ``in_target`` is False when the focused control's top-level window is not
+    ``target_hwnd`` (a modal dialog's Filter box). Its value must not be treated
+    as the stamp window's. ``password`` skips comparison: password edits read
+    back as empty. ``value`` is None when it cannot be read or it is not the target's.
+    """
+    pattern, hwnd, _class_name, _ctype, control = _discover_focused_edit()
+    root = _hwnd_root(int(hwnd or 0))
+    in_target: bool | None
+    if not target_hwnd or root is None:
+        in_target = None
+    else:
+        in_target = int(root) == int(target_hwnd)
+    password = edit_is_password(uia_password=_uia_is_password(control), style=_edit_style(int(hwnd or 0)))
+    value = None
+    if in_target is not False and not password:
+        value = _pattern_value(pattern) if pattern is not None else None
+    return {
+        "value": value,
+        "password": password,
+        "in_target": in_target,
+        "hwnd": int(hwnd or 0),
+        "root": root,
+    }
 
 
 def typed_matches(expected: str, actual: str | None) -> bool | None:
@@ -909,8 +1033,26 @@ def _pattern_value(pattern) -> str | None:
     return str(value)
 
 
-def _looks_masked(class_name: str | None, control_type: str | None = None) -> bool:
-    return "masked" in f"{class_name or ''} {control_type or ''}".lower()
+def _looks_masked(class_name: str | None, control_type: str | None = None, legacy_text: str | None = None) -> bool:
+    """WinForms MaskedTextBox's window class is WindowsForms10.EDIT..., not 'masked'.
+
+    Also accept UIA/legacy description, help, name, or automation id that says masked.
+    """
+    blob = f"{class_name or ''} {control_type or ''} {legacy_text or ''}".lower()
+    return "masked" in blob or "maskedit" in blob
+
+
+def value_is_blank(current: str | None) -> bool | None:
+    """True for '' or a mask template (``____-__-__``). None when there is no value.
+
+    Prompt and separator characters are not content. A date still in the box
+    has digits and is not blank.
+    """
+    if current is None:
+        return None
+    if current == "":
+        return True
+    return not any(ch.isalnum() for ch in current)
 
 
 def _looks_edit(class_name: str | None, control_type: str | None = None) -> bool:
@@ -921,23 +1063,19 @@ def _looks_edit(class_name: str | None, control_type: str | None = None) -> bool
     return "edit" in (control_type or "").lower()
 
 
-def _value_empty(current: str | None, *, masked: bool) -> bool | None:
-    if current is None:
-        return None
-    if current == "":
-        return True
-    if masked and not any(ch.isalnum() for ch in current):
-        return True
-    return False
-
-
 def _field_empty(pattern, hwnd: int, text_length, *, masked: bool) -> bool | None:
     """True/False when the edit can be read; None when it cannot.
 
-    WM_GETTEXTLENGTH wins for a normal edit. A masked control whose ValuePattern
-    still contains digits is not empty, even when SetValue('') made the display blank.
+    A value with no letters or digits (``____-__-__``) is empty even when
+    WM_GETTEXTLENGTH counts the mask characters. Digits still in a masked
+    control are not empty. Otherwise length 0 means empty.
     """
     current = _pattern_value(pattern) if pattern is not None else None
+    blank = value_is_blank(current)
+    if blank is True:
+        return True
+    if masked and blank is False:
+        return False
     n = None
     if text_length is not None and hwnd:
         try:
@@ -945,12 +1083,8 @@ def _field_empty(pattern, hwnd: int, text_length, *, masked: bool) -> bool | Non
         except Exception:
             n = None
     if n is not None:
-        if n > 0:
-            return False
-        if masked and current and any(ch.isalnum() for ch in current):
-            return False
-        return True
-    return _value_empty(current, masked=masked)
+        return n == 0
+    return blank
 
 
 def _keyboard_clear_selection() -> None:
@@ -966,6 +1100,7 @@ def clear_field_for_replace(
     hwnd: int = 0,
     class_name: str | None = None,
     control_type: str | None = None,
+    legacy_text: str | None = None,
     send_message=None,
     text_length=None,
     allow_keyboard: bool | None = None,
@@ -984,16 +1119,19 @@ def clear_field_for_replace(
         discover = (
             pattern is None and not hwnd and send_message is None
             and text_length is None and class_name is None and control_type is None
+            and legacy_text is None
         )
     if discover:
-        pattern, hwnd, class_name, control_type = _discover_focused_edit()
+        pattern, hwnd, class_name, control_type, ctrl = _discover_focused_edit()
+        if legacy_text is None:
+            legacy_text = _legacy_text(ctrl)
         if send_message is None and user32 is not None:
             send_message = _send_message_w
         if text_length is None and user32 is not None:
             text_length = _gettext_length
     if allow_keyboard is None:
         allow_keyboard = user32 is not None
-    masked = _looks_masked(class_name, control_type)
+    masked = _looks_masked(class_name, control_type, legacy_text)
     edit = _looks_edit(class_name, control_type)
 
     def _done(method: str):

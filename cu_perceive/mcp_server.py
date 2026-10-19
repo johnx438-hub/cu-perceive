@@ -184,7 +184,7 @@ def _compact_rows(payload: dict) -> None:
             }
             if n.get("value") is not None:
                 row["value"] = n.get("value")
-            if isinstance(n.get("readonly"), bool):
+            if "readonly" in n:
                 row["readonly"] = n["readonly"]
             rows.append(row)
         payload["uia_nodes"] = rows
@@ -313,7 +313,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         ocr/uia/yolo are optional extras; if missing the reply has ok=false and the exact pip command in "install".
         ocr/yolo run in a worker process with a timeout (CU_PERCEIVE_DETECT_TIMEOUT, default 30 s): a hung worker is
         restarted and the stamp comes back without detections plus a warning. Unknown arguments are refused (reason=unknown_args).
-        compact=true: items as {id, text, kind, center_norm}; uia_nodes keep name, control_type, center_norm, value, and readonly. Text/DataItem/Edit content stays. Occluded nodes are omitted (uia_occluded); an empty runtime id is not occlusion. A walk that times out returns partial nodes and uia_timeout. center_norm goes straight into act norm.
+        compact=true: items as {id, text, kind, center_norm}; uia_nodes keep name, control_type, center_norm, value, and readonly (null when a DataItem/DataGrid provider cannot say; a cell value of "(null)" is omitted). Text/DataItem/Edit content stays. Occluded nodes are omitted (uia_occluded); an empty runtime id is not occlusion. A walk that times out returns partial nodes and uia_timeout. center_norm goes straight into act norm.
         E2 light verify: roi="L,T,W,H" or roi_norm="CX,CY[,HALF]" (mutually exclusive) crops after full grab; map 0-1000 is ROI-local.
         out_dir optional: Windows path or /mnt/c/... ; response also has map_wsl / png_wsl (lowercase drive)."""
         hwnd_n = _nz_int(hwnd)
@@ -451,11 +451,11 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         ids: comma string / int / list; needs prior ocr/yolo perceive.
         text=paste+restore by default (via="paste"|"keys"; keys = SendInput unicode, for a grid cell that ignores Ctrl+V). key like ctrl+c (comma-separated ok). Unknown key -> ok=false, reason=unknown_key, valid_keys.
         Clipboard errors return ok=false reason=clipboard_failed (the server stays up). Previous clipboard text is restored; an empty clipboard is emptied again. Paste is staged before replace clears the field.
-        After typing, typed_verified is true/false/null from a read-back. A mismatch is reason=typed_mismatch (never ok=true).
+        After typing, typed_verified is true/false/null from a read-back of the target window's focused element. A mismatch is reason=typed_mismatch (never ok=true). Password edits (UIA IsPassword or ES_PASSWORD) skip that read-back: typed_verified is null and typed_note says so. A mask template with no letters or digits (____-__-__) counts as empty.
         ime="off" closes the target IME and switches that window to an already-installed Latin layout (never loads a new one), then verifies and restores. A handled ime=off does not also warn ime_active.
-        Typing also requires keyboard focus inside the target window (reason=focus_outside when it is not).
+        Before any clear or type, the top-level window that owns keyboard focus (GA_ROOT of hwndFocus) must be the stamp hwnd. An owned modal dialog is reason=focus_outside and nothing is cleared.
         Concurrent go=true acts run one at a time. A dry run reports foreground_click_count=0; the plan is planned_foreground_click_count.
-        go=true adds new_windows [{hwnd, title, class}] for top-level windows that appeared (polled ~600ms, CU_PERCEIVE_NEW_WINDOW_WAIT_MS), and after {foreground_hwnd, title, class}.
+        go=true adds new_windows [{hwnd, title, class}] after a click, Enter, F-key, Alt combo, or Esc (polled ~250ms, CU_PERCEIVE_NEW_WINDOW_WAIT_MS, and it returns as soon as a window appears). Typing does not wait. after is {foreground_hwnd, title, class}.
         Keys: a-z, 0-9, f1-f24, num0-num9, alt, backquote, backslash, backspace, bracketleft,
               bracketright, capslock, comma, ctrl, delete, down, end, enter, equals, esc, home, insert,
               left, menu, minus, numlock, pagedown, pageup, pause, period, printscreen, quote, right,

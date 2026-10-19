@@ -153,7 +153,7 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument(
         "--replace",
         action="store_true",
-        help="clear the focused edit before each --type (End+Shift+Home+Delete for an edit/mask, else ValuePattern or EM_SETSEL — not Ctrl+A) and check it is empty",
+        help="clear the focused edit before each --type (End+Shift+Home+Delete for an edit/mask, else ValuePattern or EM_SETSEL — not Ctrl+A). A mask like ____-__-__ counts as empty",
     )
     a.add_argument("--slow-type", action="store_true", help="per-char SendInput instead of paste (same as --via keys)")
     a.add_argument(
