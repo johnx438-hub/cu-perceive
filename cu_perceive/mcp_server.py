@@ -304,7 +304,8 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         go=true: foreground_click_count counts clicks actually sent (0 if refused);
         planned_foreground_click_count is the plan.
         scroll+xy/norm/ids => hover then wheel (NO left-click) - will not focus an input.
-        hold>0 = long-press. hold_key=ctrl|shift|alt across the chain (not mouse hold).
+        hold>0 = long-press. hold_key=ctrl|shift|alt across the chain (not mouse hold); on go it is
+        pressed only while the stamp window (or one it owns) is in front, else hold_key_refused_step.
         method=input (default SendInput) | post (S1) | uia (S2) | auto (S3).
         post/uia/auto: single left clicks only (norm/xy/ids); reject drag/path/scroll/type/hold.
         uia: Invoke|Toggle|Expand|Select; no silent fallback. auto: probe UIA → chosen_method=uia|input (never post); go runs chosen only.

@@ -272,6 +272,46 @@ def is_sentinel_origin(origin: dict | None) -> bool:
 
 
 RESTORE_SETTLE_S = 0.30
+OFFSCREEN_PARK = -10000
+MIN_CLIENT_PX = 8
+SMALL_CLIENT_PX = 80
+
+
+def capture_geometry_problem(origin: dict | None, image_size: tuple[int, int] | None = None) -> tuple[str | None, str | None]:
+    """(error, warning) for a pinned capture's client geometry.
+
+    error: the window is parked off-screen (left/top <= -10000, e.g. a "ghost" window
+    that is not iconic but sits at -32000), or its client area / image is degenerate
+    (under MIN_CLIENT_PX on a side, e.g. 144x1). Such a frame is useless to plan on.
+    warning: a client area under SMALL_CLIENT_PX on a side; act treats such stamps as
+    minimized stubs and refuses them.
+    """
+    if not origin:
+        return "window has no client area", None
+    try:
+        left, top = int(origin.get("left", 0)), int(origin.get("top", 0))
+        w, h = int(origin.get("width", 0)), int(origin.get("height", 0))
+    except (TypeError, ValueError):
+        return f"window client geometry is unreadable ({origin!r})", None
+    if image_size is not None:
+        w, h = min(w, int(image_size[0])), min(h, int(image_size[1]))
+    if left <= OFFSCREEN_PARK or top <= OFFSCREEN_PARK:
+        return (
+            f"window is parked off-screen at ({left},{top}) with a {w}x{h} client area: it is not "
+            "minimized but is not on any monitor (a 'ghost' window, often after minimizing it while "
+            "one of its dialogs was open); restore it or move it onto a monitor, then perceive again"
+        ), None
+    if w < MIN_CLIENT_PX or h < MIN_CLIENT_PX:
+        return (
+            f"window client area is only {w}x{h} px, too small to perceive; restore or resize it, "
+            "then perceive again"
+        ), None
+    if w < SMALL_CLIENT_PX or h < SMALL_CLIENT_PX:
+        return None, (
+            f"window client area is only {w}x{h} px; act treats stamps under {SMALL_CLIENT_PX} px "
+            "on a side as minimized stubs and will refuse them"
+        )
+    return None, None
 
 
 def desktop_capture_sizes() -> set[tuple[int, int]]:
@@ -343,18 +383,19 @@ def force_foreground(hwnd: int) -> bool:
 
 
 def foreground_matches(hwnd: int) -> tuple[bool, int]:
-    """(True, fg) when the keyboard-focus window is hwnd or one of its children.
+    """(True, fg) when the keyboard-focus window belongs to hwnd: hwnd itself, a
+    window it owns (its dialogs and popups), or one of its popup menus.
 
-    Strict: an owned dialog or popup of hwnd is a different top-level window and
-    does not match. Raises _win32.Win32Unavailable off Windows.
+    The same set of windows as point_owner, so a key after a click into an owned
+    dialog goes through. Another top-level window of the same app (not owned by
+    hwnd) does not match. Raises _win32.Win32Unavailable off Windows.
     """
     from . import _win32
 
     fg = _win32.foreground_window()
     if not fg or not hwnd:
         return False, fg
-    target = _win32.root_window(int(hwnd)) or int(hwnd)
-    return (_win32.root_window(fg) or fg) == target, fg
+    return owned_by(_win32.root_window(fg) or fg, int(hwnd)), fg
 
 
 MENU_CLASS = "#32768"

@@ -227,6 +227,7 @@ def _capture_pinned(hwnd: int, *, focus: bool, capture: str) -> dict:
     from .capture import DWM_EXPERIMENTAL_WARNING, EXPERIMENTAL_BACKENDS, CaptureError, WindowMinimizedError
     from .windows import (
         RESTORE_SETTLE_S,
+        capture_geometry_problem,
         capture_looks_implausible,
         capture_window_image,
         force_foreground,
@@ -287,6 +288,23 @@ def _capture_pinned(hwnd: int, *, focus: bool, capture: str) -> dict:
                 result = capture_window_image(hwnd, origin, capture=capture, focused=True)
             except CaptureError:
                 pass
+    try:
+        img_h, img_w = result.image.shape[:2]
+        image_size = (int(img_w), int(img_h))
+    except Exception:
+        image_size = None
+    geom_err, geom_warn = capture_geometry_problem(origin, image_size)
+    if geom_err:
+        hint = " (even after --focus restored and raised it)" if focus else "; --focus restores and raises it"
+        return {
+            "ok": False,
+            "error": f"hwnd={hwnd}: {geom_err}{hint}",
+            "capture": result.meta(),
+            "degenerate_client": {**{k: (origin or {}).get(k) for k in ("left", "top", "width", "height")},
+                                  "image": list(image_size) if image_size else None},
+        }
+    if geom_warn:
+        warnings.append(geom_warn)
     after = verify_window_identity(hwnd, identity.get("pid"), identity.get("ctime"))
     if identity.get("pid") and identity.get("ctime") and after:
         return {"ok": False, "error": f"window changed during capture: {after}"}
@@ -334,6 +352,8 @@ def _no_stamp_payload(res: dict, *, hwnd: int, win: dict | None, focus: bool) ->
         out["minimized"] = True
     if res.get("capture"):
         out["capture"] = res["capture"]
+    if res.get("degenerate_client"):
+        out["degenerate_client"] = res["degenerate_client"]
     return out
 
 

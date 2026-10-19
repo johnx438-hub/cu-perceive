@@ -191,14 +191,15 @@ class TestForegroundMatches(unittest.TestCase):
     def test_root_comparison(self):
         from cu_perceive import windows
 
-        roots = {HWND: HWND, 77: HWND, 555: 555}
-        with mock.patch("cu_perceive._win32.root_window", side_effect=lambda h: roots.get(h, 0)):
-            with mock.patch("cu_perceive._win32.foreground_window", return_value=77):
-                self.assertEqual(windows.foreground_matches(HWND), (True, 77))
-            with mock.patch("cu_perceive._win32.foreground_window", return_value=555):
-                self.assertEqual(windows.foreground_matches(HWND), (False, 555))
-            with mock.patch("cu_perceive._win32.foreground_window", return_value=0):
-                self.assertEqual(windows.foreground_matches(HWND), (False, 0))
+        roots = {HWND: HWND, 77: HWND, 555: 555, 600: 600, 700: 700}
+        owners = {600: HWND}
+        with mock.patch("cu_perceive._win32.root_window", side_effect=lambda h: roots.get(h, 0)), \
+                mock.patch("cu_perceive._win32.owner_window", side_effect=lambda h: owners.get(h, 0)), \
+                mock.patch("cu_perceive._win32.class_name", return_value="TkTopLevel"), \
+                mock.patch("cu_perceive._win32.window_thread", return_value=9):
+            for fg, ok in ((77, True), (600, True), (555, False), (700, False), (0, False)):
+                with mock.patch("cu_perceive._win32.foreground_window", return_value=fg):
+                    self.assertEqual(windows.foreground_matches(HWND), (ok, fg), fg)
 
     def test_off_windows_raises(self):
         from cu_perceive import _win32, windows

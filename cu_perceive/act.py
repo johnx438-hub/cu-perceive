@@ -1138,6 +1138,14 @@ def _keyboard_refuse(out: dict, n: int, err: str) -> dict:
     return out
 
 
+def _hold_refuse(out: dict, n: int, hold: str, err: str) -> dict:
+    """The --hold-key modifier goes to the foreground window, like any key."""
+    out["ok"] = False
+    out["error"] = f"--hold-key {hold} refused before step {n} (a held modifier goes to the foreground window): {err}"
+    out["hold_key_refused_step"] = n
+    return out
+
+
 def step_points(step: dict) -> list[tuple[str, list]]:
     """Screen points where a pointer step's mouse events land: (label, [x, y]).
 
@@ -1649,6 +1657,10 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                 if via in FOCUSING_VIAS and not _has_window(frame or {}):
                     clicked_window = _clicked_window(step)
             if hold and not held and via not in ("hover", "wait"):
+                hold_target = None if _has_window(frame or {}) else _clicked_window(step)
+                err = _keyboard_target_error(frame or {}, focus=focus, out=out, clicked_window=hold_target)
+                if err:
+                    return _hold_refuse(out, n, hold, err)
                 key_down(hold)
                 held = True
             if via in FOCUSING_VIAS:
