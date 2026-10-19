@@ -169,6 +169,32 @@ class TestMcpServerE2E(unittest.TestCase):
         up = json.loads(self._call("act", {"stamp": payload["stamp"], "norm": "500,500", "scroll": 5})[0]["text"])
         self.assertTrue(any("scrolls UP" in w for w in up.get("warnings", [])), up)
 
+    def test_unknown_args_refused_dry_run_wins_and_array_points(self):
+        payload = json.loads(self._call("perceive_window", {"image": str(self.png), "map_inline": False})[0]["text"])
+        res = self._rpc("tools/call", {"name": "act", "arguments": {
+            "stamp": payload["stamp"], "steps": [{"action": "click", "x": 1, "y": 2}], "go": True}})
+        self.assertTrue(res["result"]["isError"], res)
+        err = json.loads(res["result"]["content"][0]["text"])
+        self.assertEqual(err["reason"], "unknown_args")
+        self.assertEqual(err["unknown_args"], ["steps"])
+        self.assertIn("norm", err["valid_args"])
+        self.assertIn("dry_run", err["valid_args"])
+
+        res = self._rpc("tools/call", {"name": "perceive_window", "arguments": {"image": str(self.png), "region": "x"}})
+        self.assertTrue(res["result"]["isError"], res)
+        self.assertEqual(json.loads(res["result"]["content"][0]["text"])["unknown_args"], ["region"])
+
+        act = json.loads(self._call("act", {"stamp": payload["stamp"], "norm": [500, 500], "go": True,
+                                             "dry_run": True})[0]["text"])
+        self.assertTrue(act["ok"], act)
+        self.assertTrue(act["dry_run"])
+        self.assertEqual(act["steps"][0]["via"], "norm")
+        self.assertIn("dry_run=true overrides go=true", act["warnings"][0])
+
+        big = json.loads(self._call("act", {"stamp": payload["stamp"], "norm": "500,500", "scroll": "down:1000"})[0]["text"])
+        self.assertTrue(big["scroll_clamped"])
+        self.assertEqual([s["notches"] for s in big["steps"] if s["via"] == "scroll"], [-50])
+
     def test_rejects_foreign_host_header(self):
         body = {"jsonrpc": "2.0", "id": 999, "method": "tools/list", "params": {}}
         with self.assertRaises(urllib.error.HTTPError) as cm:
