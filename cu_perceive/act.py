@@ -1200,6 +1200,9 @@ def _set_refusal(out: dict, reason: str, hint: str, window: int | dict | None = 
     out["hint"] = hint
     if isinstance(window, dict):
         out["blocking_window"] = {"hwnd": window.get("hwnd"), "title": window.get("title")}
+        for extra in ("class", "focus_hwnd"):
+            if window.get(extra) is not None:
+                out["blocking_window"][extra] = window.get(extra)
     elif window:
         out["blocking_window"] = {"hwnd": int(window), "title": _window_title(window)}
 
@@ -1390,15 +1393,67 @@ def _focus_target_error(out: dict, target: int, label: str) -> str | None:
         return None
     if ok is not False:
         return None
+    dialog = _focus_owner_window(focused, int(target))
+    if dialog is not None:
+        title = dialog.get("title")
+        named = f"{title!r} (hwnd {dialog['hwnd']})" if title else f"hwnd {dialog['hwnd']}"
+        _set_refusal(
+            out, "focus_outside",
+            f"close or dismiss the dialog {named} first (it owns keyboard focus), "
+            "then re-perceive and retry",
+            dialog,
+        )
+        return (
+            f"{label} is in the foreground but keyboard focus is in dialog {named}, "
+            "not inside it; typing refused"
+        )
     _set_refusal(
         out, "focus_outside",
         "click the target field so it has keyboard focus, then retry",
-        {"hwnd": focused} if focused else None,
+        {"hwnd": focused, "title": _window_title(focused)} if focused else None,
     )
     return (
         f"{label} is in the foreground but keyboard focus is hwnd {focused}, "
         "not inside it; typing refused"
     )
+
+
+def _focus_owner_window(focused: int, target: int) -> dict | None:
+    """The top-level window (GA_ROOT) that holds keyboard focus, when it is not target.
+
+    focus_matches reports the focused child (a button or edit inside a modal); the
+    caller needs the dialog itself to say what to close.
+    """
+    if not focused:
+        return None
+    try:
+        from . import _win32
+
+        root = int(_win32.root_window(int(focused)) or int(focused))
+    except Exception:
+        return None
+    if not root or root == int(target):
+        return None
+    info: dict = {"hwnd": root, "title": _window_title(root) or None, "focus_hwnd": int(focused)}
+    try:
+        info["class"] = _win32.class_name(root) or None
+    except Exception:
+        pass
+    return info
+
+
+def _clean_readback(actual, expected) -> str | None:
+    """A WinForms/grid provider reports an empty edit as the literal ``(null)``.
+
+    Treat it as empty so typed_readback and typed_mismatch errors never show it,
+    unless that literal is exactly what was typed.
+    """
+    if actual is None:
+        return None
+    text = str(actual)
+    if text.strip().lower() == "(null)" and str(expected or "").strip().lower() != "(null)":
+        return ""
+    return text
 
 
 def _note_typed_readback(out: dict, step: dict, expected: str, target_hwnd: int = 0) -> bool:
@@ -1444,7 +1499,7 @@ def _note_typed_readback(out: dict, step: dict, expected: str, target_hwnd: int 
         step["typed_note"] = note
         out["typed_note"] = note
         return True
-    actual = info.get("value")
+    actual = _clean_readback(info.get("value"), expected)
     try:
         match = typed_matches(expected, actual)
     except Exception:
@@ -1860,10 +1915,15 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                 state = getattr(_ime_restore, "state", None)
                 _ime_restore.state = None
                 _live_lock_state.held = False
-                if state is not None and isinstance(out, dict):
+                rest = None
+                if state is not None:
                     from .ime import restore_ime
 
-                    rest = restore_ime(state)
+                    try:
+                        rest = restore_ime(state)
+                    except Exception as e:
+                        rest = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+                if rest is not None and isinstance(out, dict):
                     out["ime_restored"] = bool(rest.get("ok"))
                     if not rest.get("ok"):
                         out["warnings"] = (out.get("warnings") or []) + [
@@ -2331,7 +2391,15 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                         staged = prepare_paste(step["text"])
                     except Exception as e:
                         staged = {"ok": False, "reason": "clipboard_failed", "error": str(e)}
-                    if not staged.get("ok"):
+                    if staged.get("reason") == "clipboard_nontext":
+                        input_via = "keys"
+                        staged = None
+                        step["clipboard_preserved"] = True
+                        out["warnings"] = (out.get("warnings") or []) + [
+                            "the clipboard holds non-text data (image, files or rich text); typed "
+                            "with keys instead of paste so it is left untouched"
+                        ]
+                    elif not staged.get("ok"):
                         step["typed"] = False
                         out["ok"] = False
                         out["reason"] = staged.get("reason") or "clipboard_failed"
