@@ -36,18 +36,37 @@ def _is_perceive_stamp_json(p: Path) -> bool:
 def latest_frame(out_dir: Path | None = None, hwnd: int | None = None) -> tuple[dict, Path | None]:
     """Newest readable perceive stamp; skips windows maps and empty / partial files.
 
-    hwnd: newest stamp of that window only.
+    hwnd: newest stamp of that window only. perceive records each window's newest stamp
+    (stamps.note_latest), so only that stamp and files with a newer mtime are read; without
+    a record, files are read newest-first until one matches.
     """
+    from . import stamps
+
     out_dir = Path(out_dir or DEFAULT_OUT)
+    noted = stamps.read_latest(out_dir, int(hwnd)) if hwnd else None
+    noted_frame = None
+    floor = None
+    if noted is not None:
+        try:
+            noted_frame = read_frame(noted)
+            if _frame_hwnd(noted_frame) == int(hwnd):
+                floor = noted.stat().st_mtime
+            else:
+                noted_frame = None
+        except (OSError, ValueError):
+            noted_frame = None
     cands = []
     for p in out_dir.glob("*.json"):
         if not _is_perceive_stamp_json(p):
             continue
         try:
-            cands.append((p.stat().st_mtime, p))
+            mtime = p.stat().st_mtime
         except OSError:
             continue
-    if not cands:
+        if floor is not None and (mtime < floor or p == noted):
+            continue
+        cands.append((mtime, p))
+    if not cands and noted_frame is None:
         return {}, None
     cands.sort(key=lambda t: t[0], reverse=True)
     for _, p in cands:
@@ -58,6 +77,8 @@ def latest_frame(out_dir: Path | None = None, hwnd: int | None = None) -> tuple[
         if hwnd and _frame_hwnd(frame) != int(hwnd):
             continue
         return frame, p
+    if noted_frame is not None:
+        return noted_frame, noted
     if hwnd:
         raise FileNotFoundError(
             f"no perceive stamp for hwnd={int(hwnd)} in {out_dir}; perceive that window first "
@@ -294,8 +315,57 @@ def subsample_points(points: list, max_n: int = 24) -> list:
     return out
 
 
+MAX_SCROLL_NOTCHES = 50
+
+
+def scroll_spec(raw) -> dict:
+    """kind=scroll spec; counts past MAX_SCROLL_NOTCHES are clamped (clamped_from keeps the ask)."""
+    n = parse_scroll(raw)
+    spec: dict = {"kind": "scroll", "notches": n}
+    if abs(n) > MAX_SCROLL_NOTCHES:
+        spec["notches"] = MAX_SCROLL_NOTCHES if n > 0 else -MAX_SCROLL_NOTCHES
+        spec["clamped_from"] = n
+    return spec
+
+
+def _num(v) -> int:
+    if isinstance(v, bool) or not isinstance(v, (int, float, str)):
+        raise ValueError(f"bad coordinate {v!r}: expected a number")
+    return int(round(float(v)))
+
+
+def coerce_points(v) -> str | None:
+    """Points as act's "x,y;x,y" string. Also takes [x, y], [[x, y], ...], {"x":..,"y":..}
+    and the JSON text of those; floats are rounded. Empty -> None."""
+    if v is None or isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        raise ValueError(f'bad point {v!r}: expected "x,y" or [x, y]')
+    if isinstance(v, str):
+        s = v.strip()
+        if s[:1] in ("[", "{"):
+            try:
+                return coerce_points(json.loads(s))
+            except json.JSONDecodeError as e:
+                raise ValueError(f'bad point {s!r}: expected "x,y" or [x, y] ({e})') from e
+        return s or None
+    if isinstance(v, dict):
+        if "x" in v and "y" in v:
+            return f"{_num(v['x'])},{_num(v['y'])}"
+        raise ValueError(f'bad point {v!r}: expected {{"x": .., "y": ..}}')
+    if isinstance(v, (list, tuple)):
+        if not v:
+            return None
+        if len(v) == 2 and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in v):
+            return f"{_num(v[0])},{_num(v[1])}"
+        parts = [coerce_points(x) for x in v]
+        return ";".join(p for p in parts if p) or None
+    raise ValueError(f'bad point {v!r}: expected "x,y" or [x, y]')
+
+
 def parse_scroll(raw: str | int) -> int:
-    """Wheel notches. +up / -down. Also accepts up:3, down:3, up, down, and ints."""
+    """Wheel notches (one notch = one wheel click, ~3 lines; not pixels). +up / -down.
+    Also accepts up:3, down:3, up, down, and ints."""
     s = str(raw).strip().lower().replace(" ", "")
     if s.startswith("scroll:"):
         s = s[7:]
@@ -357,6 +427,8 @@ def parse_steps(
     """Flat act fields -> ordered specs. replace=True puts a ctrl+a select-all before
     every type step so the paste replaces the field's text instead of inserting at the caret."""
     out: list[dict] = []
+    xy, norm = coerce_points(xy), coerce_points(norm)
+    drag, drag_norm = coerce_points(drag), coerce_points(drag_norm)
     if steps:
         for raw in steps.replace(" ", "").split(","):
             if not raw:
@@ -372,7 +444,7 @@ def parse_steps(
             elif raw.startswith("key:"):
                 out.append({"kind": "key", "key": raw[4:]})
             elif raw.startswith("scroll:"):
-                out.append({"kind": "scroll", "notches": parse_scroll(raw[7:])})
+                out.append(scroll_spec(raw[7:]))
             elif raw.startswith("uia:"):
                 # E4: uia:File / uia:File@MenuItemControl / uia:#12
                 out.append({"kind": "uia_name", "query": raw[4:]})
@@ -398,7 +470,7 @@ def parse_steps(
     if drag_norm:
         out.append({"kind": "drag", "points": _point_pairs(drag_norm), "space": "norm", **extra})
     if scroll not in (None, ""):
-        spec = {"kind": "scroll", "notches": parse_scroll(scroll)}
+        spec = scroll_spec(scroll)
         if spec["notches"] > 0 and str(scroll).strip().lstrip("+").isdigit():
             spec["bare_positive"] = True
         out.append(spec)
@@ -1524,6 +1596,13 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
             out["warnings"] = (out.get("warnings") or []) + [
                 f"scroll={n} is a bare positive number, which scrolls UP (toward the top); "
                 f'use scroll="down:{n}" to scroll down, or "up:{n}" to make up explicit'
+            ]
+        if s.get("kind") == "scroll" and s.get("clamped_from") is not None:
+            out["scroll_clamped"] = True
+            out["warnings"] = (out.get("warnings") or []) + [
+                f"scroll asked for {s['clamped_from']} wheel notches; capped at {s['notches']} "
+                f"(max {MAX_SCROLL_NOTCHES}). Scroll counts are wheel notches (~3 lines each), "
+                "not pixels; repeat the call to scroll further"
             ]
     if method_n == "post":
         try:

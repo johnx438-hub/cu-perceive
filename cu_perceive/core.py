@@ -270,6 +270,14 @@ def _capture_pinned(hwnd: int, *, focus: bool, capture: str) -> dict:
             "capture": {"backend": None, "attempts": e.attempts, "skipped": "minimized"},
         }
     except CaptureError as e:
+        if e.reason:
+            return {
+                "ok": False,
+                "error": f"capture failed for hwnd={hwnd}: {e}",
+                "reason": e.reason,
+                "hint": e.hint,
+                "capture": {"backend": None, "attempts": e.attempts},
+            }
         hint = "" if focus else " Retry with focus=true (CLI --focus) to raise the window and grab the screen."
         return {
             "ok": False,
@@ -569,6 +577,8 @@ def perceive(
                 payload["error"] = uia_error
         attach_wsl(payload, 'png', 'map', 'grid', 'anno', 'json')
         stamps.commit(js, json.dumps(payload, ensure_ascii=False, indent=2))
+        if payload.get("hwnd"):
+            stamps.note_latest(dest, payload["hwnd"], js)
         return payload
     except BaseException:
         stamps.release(js)

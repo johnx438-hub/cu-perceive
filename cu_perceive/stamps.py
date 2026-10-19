@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -86,6 +87,40 @@ def release(final: Path) -> None:
     final = Path(final)
     _unlink(reserve_path(final))
     _unlink(tmp_path(final))
+
+
+LATEST_DIR = ".latest"
+
+
+def _latest_pointer(dest: Path, hwnd: int) -> Path:
+    return Path(dest) / LATEST_DIR / f"hwnd-{int(hwnd)}"
+
+
+def note_latest(dest: Path, hwnd: int, final: Path) -> None:
+    """Remember ``final`` as the newest stamp of ``hwnd`` in ``dest`` (best effort)."""
+    try:
+        ptr = _latest_pointer(dest, hwnd)
+    except (TypeError, ValueError):
+        return
+    tmp = ptr.with_name(f"{ptr.name}.{os.getpid()}.{threading.get_ident()}{TMP_SUFFIX}")
+    try:
+        ptr.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(Path(final).name, encoding="utf-8")
+        os.replace(tmp, ptr)
+    except OSError:
+        _unlink(tmp)
+
+
+def read_latest(dest: Path, hwnd: int) -> Path | None:
+    """The stamp json note_latest last recorded for ``hwnd``, if it still exists."""
+    try:
+        name = _latest_pointer(dest, hwnd).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not name or "/" in name or "\\" in name:
+        return None
+    path = Path(dest) / name
+    return path if path.is_file() else None
 
 
 def _unlink(p: Path) -> None:
