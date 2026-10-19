@@ -25,7 +25,7 @@ cu-perceive <cmd>            # pip 安装后
 python -m cu_perceive <cmd>  # 源码目录
 ```
 
-出图：默认 `%LOCALAPPDATA%\cu-perceive\shots\perceive\`（`CU_PERCEIVE_OUT` 可改）。给人看时读返回的 `map` 再附上。
+出图：CLI 默认 `%LOCALAPPDATA%\cu-perceive\shots\perceive\`（`CU_PERCEIVE_OUT` 可改）。MCP server 可能用另一个用户或另一个 `CU_PERCEIVE_OUT`，目录不一定相同：一律用返回的 `json` / `map` / `png` 路径，act 时显式传 `stamp`。给人看时读返回的 `map` 再附上。
 
 OCR / UIA / YOLO 是可选包（`[ocr]` / `[uia]` / `[yolo]`），第一次用到时才加载。缺包时返回 `ok:false` + `install`（确切的 pip 命令），**不会自动安装**。
 
@@ -42,7 +42,7 @@ OCR / UIA / YOLO 是可选包（`[ocr]` / `[uia]` / `[yolo]`），第一次用�
 
 1. **选窗** — `windows`（MCP 同名）。默认出桌面标尺图：格子 + `#id hwnd`。看 `map` 选。`--title` / `--exe` 返回匹配数组 `windows[]` + `window`（picked）+ `pick_rule`（非最小化 → EnumWindows z-top → 面积；非保证前台）。同 exe 多窗再加 title/hwnd。`--hwnd` 仍一行。`--no-map` / `map=false` 只出 JSON。
 2. **钉住再看** — `perceive --hwnd N`（MCP：`perceive_window`）。默认原图 + `.grid.png`，字段 `map`。不要默认开 OCR。
-   **默认不抢前台**：按窗口本身抓（WGC → PrintWindow），被别的窗口挡住也能抓；返回 `capture.backend` / `capture.attempts`。`--capture dwm` 是实验性的（Win11 上恒为全黑），不在 auto 里。**最小化的窗口不还原**，返回 `ok:false, minimized:true, capture.skipped="minimized"`、不出 stamp；停在屏幕外（-32000、没最小化的"幽灵窗"）或客户区小于 8 px（比如 144x1）也 `ok:false` + `degenerate_client`、不出 stamp（`--focus` 也一样，先把窗口挪回屏幕）；要还原并拉到前台显式加 `--focus` / `focus=true`。stamp 带 `identity {hwnd,pid,ctime}`，名字是 `YYYYMMDD-HHMMSS-mmm`（同名再加 `-2`…，不会互相覆盖）。不要再 launch。
+   **默认不抢前台**：按窗口本身抓（WGC → PrintWindow），被别的窗口挡住也能抓；返回 `capture.backend` / `capture.attempts`。`--capture dwm` 是实验性的（Win11 上恒为全黑），不在 auto 里。**最小化的窗口不还原**，返回 `ok:false, minimized:true, capture.skipped="minimized"`、不出 stamp；停在屏幕外（-32000、没最小化的"幽灵窗"）或客户区小于 8 px（比如 144x1）也 `ok:false` + `degenerate_client`、不出 stamp（`--focus` 也一样，没用：从任务栏还原或选中后 Win+Shift+←/→ 把窗口挪回屏幕，再 perceive；返回带 `reason: offscreen|tiny_client` 和 `hint`）；要还原并拉到前台显式加 `--focus` / `focus=true`。stamp 带 `identity {hwnd,pid,ctime}`，名字是 `YYYYMMDD-HHMMSS-mmm`（同名再加 `-2`…，不会互相覆盖）。不要再 launch。
 3. **读 `map`** — 没标上的点（图标、牌面、空白画布）看格子，不要看 `.anno.png`。
 4. **可选 OCR / YOLO** — 有字的框用 `--ocr`。没字的图标/按钮加 `--yolo`（ScreenParser，类名当 text，可用 `--ids`）。默认都关。浏览器跳网址仍可先 OCR 地址栏。
    - **可选 UIA 节点(S4) / E4 旁路 OCR** — 有字的 Win32/WPF 按钮/菜单：**优先** `perceive --uia`（不要默认 `--ocr`）。格子图仍是主地图；`uia_nodes` 只是附加。 点仍走 **norm + `method=auto|uia|input`**（`act --uia-name "File"` 或 `--steps uia:File` / `uia:File@MenuItemControl` / `uia:#12` → 解析成 norm 中心）；**不要**把 element_token / raw Invoke 当默认点击路径。 无 hwnd 或 UIA 失败 → ok:false；弱 a11y（`uia_count=0`）退回格子图/OCR。OCR 留给绘制文字 / 浏览器正文。 `perceive --uia` 可带 `uia_ms`；同次 `--ocr` 时可有 `ocr_ms`。
@@ -58,13 +58,14 @@ OCR / UIA / YOLO 是可选包（`[ocr]` / `[uia]` / `[yolo]`），第一次用�
      - CLI：`act --max-age SEC`（可选）、`act --strict-stamp`。MCP：`max_age_sec` / `strict_stamp` 已透传。
 
    - **实验 `method=post|uia|auto`**：`post`=HWND PostMessage 单点；`uia`=UIA Invoke/Toggle/Expand/Select（无 pattern 则 fail-closed，不退 post/input）；`auto`=命中 stamp 上可 Invoke 等 → uia，否则 input（永不选 post；软 miss 同点再探一次；dry-run 报 `chosen_method` + `uia_reprobe`/`uia_first` + `foreground_used` / `foreground_click_count`）。均仅 left 单点 norm/xy/ids；drag/path 等请显式 `method=input`。没装 `uia` extra 时 `--method uia` 退出码 3 并给 `missing_extra` / `install`（同 `perceive --uia`）；`auto` 退回 input 并在 `warnings` 里说明。
-   - 链修饰键：`--hold-key ctrl`（MCP `hold_key`，接受 `ctrl`/`control`/`shift`/`alt`）在整条链的 click/hover 前按下，链结束（含失败）再松开。`--go` 时只在 stamp 窗在前台时才按（见下方检查），不在前台加 `--focus`。不是 `--hold`（那是鼠标长按）。Explorer/Office/列表多选：`--hold-key ctrl` + 多个 `--norm`/`--ids`，界面要落稳再加 `--gap`。Shift+click 头尾可以两次点击、不设 hold_key；需要时再用 `--hold-key shift`。
+   - 链修饰键：`--hold-key ctrl`（MCP `hold_key`，接受 `ctrl`/`control`/`shift`/`alt`）在链的第一个点击/拖/滚时按下，链结束（含失败）再松开；同一次调用里必须有 norm/xy/ids 点击、拖动或滚轮，否则 `reason: hold_key_needs_pointer_step`（组合键用 `--key ctrl+pagedown`）。`--go` 时只在 stamp 窗在前台时才按（见下方检查），不在前台加 `--focus`。不是 `--hold`（那是鼠标长按）。Explorer/Office/列表多选：`--hold-key ctrl` + 多个 `--norm`/`--ids`，界面要落稳再加 `--gap`。Shift+click 头尾可以两次点击、不设 hold_key；需要时再用 `--hold-key shift`。
    - 会动的选中（动画/弹起）用 `--gap 0.4`；按钮、丝带、浏览器标签保持默认 0.12，不要全局加大。
-   - 键：`--type` / `--text` 剪贴板+Ctrl+V 并还原（MCP 字段是 `text`）；`--key` 可写多次并按出现顺序执行，也可 `ctrl+a,enter`
+   - 键：`--type` / `--text` 剪贴板+Ctrl+V 并还原（MCP 字段是 `text`）；`--key` 可写多次并按出现顺序执行，也可 `ctrl+a,enter`。键名：`a`-`z`、`0`-`9`、`f1`-`f24`、`num0`-`num9`、`enter` `tab` `esc` `space` `backspace` `delete` `insert` `home` `end` `pageup` `pagedown` `up` `down` `left` `right` `ctrl` `shift` `alt` `win` `menu` `capslock` `numlock` `scrolllock` `printscreen` `pause`、标点 `comma` `period` `minus` `equals` `semicolon` `slash` `backslash` `quote` `backquote` `bracketleft` `bracketright`、`volumeup` `volumedown` `volumemute`。不分大小写，`_`/`-` 忽略，`page_down`/`PgDn`/`Return`/`Escape`/`del` 也认。未知键名连 dry-run 都 `ok:false` + `reason: unknown_key` + `valid_keys`。
    - **已有字的输入框用 `--replace`（MCP `replace=true`）。** 它在每次 `--type` 前先按 ctrl+a，粘贴就替换原文；不加时 click+type 会插到光标处（实测 about:blank 变成 `chrome://blankhttps//...`）。一次做完：`act --norm 491,63 --type URL --replace --key enter --go`。
    - **被挡住的窗口可以 perceive，但 `--go` 不会把输入送进别的窗口。** 窗口 stamp 上每一步发送前都核：点击 / 拖动起点和终点 / 滚轮的那个屏幕点，最上层窗口必须是 stamp 窗（或它拥有的对话框、弹窗、菜单），否则 `ok=false` + `pointer_refused_step` + `point_window`（真正在那里的 hwnd 和标题）；每个 `--type`/`--key` 前 stamp 窗（或它拥有的窗，比如刚点开的对话框）必须在前台（点击之后也核），否则 `keyboard_refused_step`。`--hold-key` 也算按键：在第一个点击/拖/滚的点通过后、且 stamp 窗（或它拥有的窗）在前台时才按下，否则 `hold_key_refused_step`，一个键都不按。被拒那步及之后都不发。要先把它拉到前台加 `--focus`（MCP `focus=true`）：拉前台后再核 identity 和点/前台，仍被挡（比如置顶窗）照样拒绝。dry-run 的 `occluded_points` 列出现在被挡的点并给警告。只管 `method=input` 和 auto 里选了 input 的步；uia / post 不变。屏幕 stamp 没有窗口可核：键必须同一次 act 里先点，且只在那次点到的窗口在前台时发送。
    - **ids 不是静默聚焦**：同一次 `act` 里 `ids`/`norm`/`xy` 会先真正点击，再 `text` 粘贴。点的必须是可编辑框本身；点到标签/按钮再 type 不会自动聚焦输入框。`scroll`+位置会变成 hover 不点击，此时同链 `text` 也不会靠 ids 聚焦。
-   - `--button right`；`--hover`；`--scroll -3` / `down:3` / `up:3`
+   - `--button right`；`--hover`；`--scroll -3` / `down:3` / `up:3`（负数或 down = 滚轮向下、往页面底部；正数或 up = 往顶部）
+   - 被拒时结果带 `reason`（如 `point_covered`、`not_foreground`、`identity_changed`）、`hint`（下一步，比如 "retry with focus=true"）和挡路窗口 `blocking_window {hwnd, title}`。
    - **正文超链接页用 `scroll` + `xy`/`norm`/`ids`，只定位不点。** 同链有 scroll 又有位置时，位置步是 hover（光标移过去）再滚轮，不左键点。不要先单独 xy 再 scroll（会点进文章）。只传 scroll、不传点：仍在 last_screen 或当前光标滚。`--hover` 仍可用；scroll+xy 已隐含 hover。
    - 笔画 / 拖：一次**按住**的折线。`--drag-norm 200,300;450,280;600,450` 或 `--drag`（窗口像素）。`--step-px` 默认 4。底层是 LEFTDOWN 后连续 `SendInput` MOVE，再 LEFTUP（光标空跑不算拖）。
 6. **拖窗口** — 同一套按住折线。perceive 默认只有客户区，标题栏不在里面。用 `windows` 那张桌面 `map` 的 stamp（显式 `--stamp <windows 的 stamp>`，会读 `<stamp>.windows.json`；不传 `--stamp` 不会选到它），从标题栏附近 `norm` 拖到目标。还没单独验收，当普通拖。

@@ -59,9 +59,11 @@ Windows on another virtual desktop, or cloaked windows, may come back blank.
 A minimized window is reported with `capture.skipped = "minimized"`. A window
 that is parked off-screen (left/top at -32000 without being minimized) or whose
 client area is under 8 px on a side (for example 144x1) fails with `ok: false`,
-no stamp and a `degenerate_client` field, also with `--focus`. A client area
-under 80 px on a side is captured with a warning, because `act` refuses such
-stamps.
+no stamp, a `degenerate_client` field, `reason` (`offscreen` or `tiny_client`)
+and a `hint`, also with `--focus`. `--focus` doesn't move such a window back:
+restore it from the taskbar, or select it and press Win+Shift+Left/Right, then
+perceive again. A client area under 80 px on a side is captured with a warning,
+because `act` refuses such stamps.
 
 `--capture dwm` is **experimental** and not part of `auto`. It renders a DWM
 thumbnail into an off-screen window and reads it back with BitBlt, but DWM
@@ -78,6 +80,23 @@ renamed into place), so `act` never reads a half-written stamp.
 
 - `act` runs clicks first, then `--type` / `--key` in the order given on the
   command line. The MCP `act` tool runs clicks, then `text`, then `key`.
+- `--key` takes key names or chords: `a`-`z`, `0`-`9`, `f1`-`f24`, `num0`-`num9`,
+  `enter`, `tab`, `esc`, `space`, `backspace`, `delete`, `insert`, `home`, `end`,
+  `pageup`, `pagedown`, `up`, `down`, `left`, `right`, `ctrl`, `shift`, `alt`,
+  `win`, `menu`, `capslock`, `numlock`, `scrolllock`, `printscreen`, `pause`,
+  punctuation (`comma`, `period`, `minus`, `equals`, `semicolon`, `slash`,
+  `backslash`, `quote`, `backquote`, `bracketleft`, `bracketright`) and
+  `volumeup` / `volumedown` / `volumemute`. Case, `_` and `-` are ignored, and
+  common spellings work too (`page_down`, `PgDn`, `Return`, `Escape`, `del`).
+  Join a chord with `+` (`ctrl+shift+t`) and list several keys with commas
+  (`tab,enter`). An unknown name fails the plan, dry run included, with
+  `reason: "unknown_key"` and `valid_keys`; `act --help` prints the list.
+- `--scroll` takes wheel notches: a negative number or `down:N` scrolls down
+  (toward the bottom of the page), a positive number or `up:N` scrolls up.
+- `--hold-key` (MCP `hold_key`) holds a modifier during the clicks, drags and
+  scrolls of the same call, so it needs at least one of them; on its own (or
+  with only keys) `act` fails with `reason: "hold_key_needs_pointer_step"`. For
+  a key chord use `--key ctrl+pagedown` instead.
 - `--replace` (MCP `replace=true`) sends `ctrl+a` right before each `--type`, so
   the text replaces what the field holds instead of being inserted at the caret:
   `act --norm 491,63 --type https://example.org --replace --key enter --go`.
@@ -103,6 +122,11 @@ renamed into place), so `act` never reads a half-written stamp.
   are covered right now in `occluded_points` and warns. This applies to
   `--method input` and to `--method auto` steps that chose input; `uia` and
   `post` don't need the point to be visible and are unchanged.
+- Every refusal also carries `reason` (a stable code such as `point_covered`,
+  `not_foreground`, `not_foreground_after_focus`, `point_covered_after_focus`,
+  `identity_changed` or `no_window_stamp`), `hint` (what to do next, for example
+  "retry with focus=true") and, when another window is in the way,
+  `blocking_window {hwnd, title}`.
 - Screen-space stamps have no window to compare points with. Keys on them need a
   click first in the same `act` and are sent only while the window that click
   landed on is in front; `--hold-key` needs the window under its first point
@@ -141,6 +165,13 @@ Nothing machine-specific is hard-coded. Defaults and overrides:
 | Extra MCP Host names (e.g. a tailnet name behind a proxy) | none | `CU_PERCEIVE_ALLOWED_HOSTS=a,b` or `mcp --allow-host a` |
 | WSL distro for UNC paths | `Ubuntu` | `CU_PERCEIVE_WSL_DISTRO` |
 | Capture backend | `auto` | `CU_PERCEIVE_CAPTURE` |
+
+The CLI and the MCP server each resolve the output dir on their own. The CLI
+defaults to `%LOCALAPPDATA%\cu-perceive\shots\perceive` for the user running
+it, while a server may run as another user or with its own `CU_PERCEIVE_OUT`, so
+the two can write stamps to different folders. Use the `json` / `map` / `png`
+paths each result returns (and pass `--stamp` / `stamp=` explicitly) instead of
+assuming a folder.
 
 ## Run
 
