@@ -170,10 +170,13 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         focus: bool = False,
         capture: str = "",
     ):
-        """Pin one window (or primary screen). Writes raw + 0-1000 map. Default ocr=false.
+        """perceive_window does not focus; act go needs the window in front or focus=true.
+        Pin one window (or primary screen). Writes raw + 0-1000 map. Default ocr=false.
         hwnd 0 and empty title/exe = primary screen. Returns JSON plus a compressed map (0-1000 still valid; clicks use stamp width/height).
         The window is captured where it is, even behind other windows; focus stays put. focus=true raises/restores it first.
         Minimized window without focus=true -> ok=false, minimized=true, no stamp (restore it or pass focus=true).
+        Window parked off-screen (-32000) or under 8 px -> ok=false, reason=offscreen|tiny_client, hint; move it back on-screen (focus=true does not help).
+        Use the returned json/map paths; the server's output dir may differ from the CLI's.
         capture: auto (WGC -> PrintWindow) | wgc | printwindow | screen (needs focus=true) | dwm (experimental, black on Win11).
         map_inline=false = JSON/path only. ocr=true only for text ids. yolo=true runs ScreenParser (class names as item text).
         uia=true (S4) walks UIA under pinned hwnd; additive uia_nodes with 0-1000 norm (same as grid). Default all off. No click.
@@ -205,7 +208,8 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         except MissingExtraError as e:
             return e.to_dict()
         if out.get("ok") is False and not out.get("stamp"):
-            return {k: out.get(k) for k in ("ok", "error", "minimized", "hwnd", "window", "capture", "focused") if k in out}
+            keep = ("ok", "error", "reason", "hint", "minimized", "degenerate_client", "hwnd", "window", "capture", "focused")
+            return {k: out.get(k) for k in keep if k in out}
         payload = {
             "stamp": out["stamp"],
             "count": len(out["items"]),
@@ -278,7 +282,10 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         replace: bool = False,
         focus: bool = False,
     ):
-        """
+        """norm="x,y" (0-1000 map) | xy="x,y" (stamp px) | ids="3"; scroll="down:3"|"-3" (negative/down = wheel down, toward the page bottom; positive/up = toward the top); drag_norm="x1,y1;x2,y2"; text="..." + replace=true; key="enter"|"ctrl+a"|"pagedown"; hold_key=ctrl|shift|alt (needs a click/drag/scroll); focus=true; go=true sends (default: dry run).
+        perceive_window does not focus; act go needs the window in front or focus=true.
+        Refusals return ok=false with reason (code), hint (next step) and blocking_window {hwnd, title}.
+
         Plan/run against a stamp. go default false. Prefer norm (map 0-1000) or xy.
 
         FLAT STRING FIELDS ONLY (not a JSON steps array). Examples:
@@ -289,7 +296,12 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
 
         norm/xy: "x,y" or "x:y"; multi with ";" e.g. "177,752;500,200".
         ids: comma string / int / list; needs prior ocr/yolo perceive.
-        text=paste+restore. key like ctrl+c (comma-separated ok).
+        text=paste+restore. key like ctrl+c (comma-separated ok). Unknown key -> ok=false, reason=unknown_key, valid_keys.
+        Keys: a-z, 0-9, f1-f24, num0-num9, alt, backquote, backslash, backspace, bracketleft,
+              bracketright, capslock, comma, ctrl, delete, down, end, enter, equals, esc, home, insert,
+              left, menu, minus, numlock, pagedown, pageup, pause, period, printscreen, quote, right,
+              scrolllock, semicolon, shift, slash, space, tab, up, volumedown, volumemute, volumeup, win
+          (case-insensitive; page_down / PgDn / Return / Escape / del also work).
         ids+text in ONE call: ids are real clicks first, then text - NOT a silent focus flag.
         Order is click(s) -> text -> key. replace=true adds ctrl+a right before the text so it
         replaces what the field holds (e.g. norm=address bar, text=URL, replace=true, key=enter).
@@ -304,8 +316,9 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         go=true: foreground_click_count counts clicks actually sent (0 if refused);
         planned_foreground_click_count is the plan.
         scroll+xy/norm/ids => hover then wheel (NO left-click) - will not focus an input.
-        hold>0 = long-press. hold_key=ctrl|shift|alt across the chain (not mouse hold); on go it is
-        pressed only while the stamp window (or one it owns) is in front, else hold_key_refused_step.
+        hold>0 = long-press. hold_key=ctrl|shift|alt across the chain (not mouse hold); needs a
+        norm/xy/ids click, drag or scroll in the same call (else reason=hold_key_needs_pointer_step).
+        On go it is pressed only while the stamp window (or one it owns) is in front, else hold_key_refused_step.
         method=input (default SendInput) | post (S1) | uia (S2) | auto (S3).
         post/uia/auto: single left clicks only (norm/xy/ids); reject drag/path/scroll/type/hold.
         uia: Invoke|Toggle|Expand|Select; no silent fallback. auto: probe UIA → chosen_method=uia|input (never post); go runs chosen only.

@@ -5,6 +5,7 @@ import json
 import sys
 
 from .capture import CAPTURE_CHOICES
+from .keys import key_names_summary
 
 
 def _act_type_key_order(argv: list[str] | None) -> list[dict] | None:
@@ -96,7 +97,16 @@ def main(argv: list[str] | None = None) -> int:
     w.add_argument("--hwnd", type=int, help="look up one hwnd")
     w.add_argument("--no-map", action="store_true", help="json only, skip the desktop ruler map")
 
-    a = sub.add_parser("act", help="click ids from a perceive frame (chain, one shot)")
+    a = sub.add_parser(
+        "act",
+        help="click ids from a perceive frame (chain, one shot)",
+        epilog=(
+            "perceive does not focus; act --go needs the window in front or --focus. "
+            f"--key names: {key_names_summary()} (case-insensitive; page_down, PgDn, Return, Escape, del also work; "
+            "chords with +, several keys with commas). --scroll: negative or down:N = wheel down (toward the page "
+            "bottom), positive or up:N = wheel up. --hold-key needs a click, drag or scroll in the same call."
+        ),
+    )
     a.add_argument(
         "--stamp",
         help="perceive stamp, default latest perceive json (--go then needs a window stamp with identity)",
@@ -134,18 +144,18 @@ def main(argv: list[str] | None = None) -> int:
         help="select all (ctrl+a) right before each --type so the text replaces the field instead of inserting at the caret",
     )
     a.add_argument("--slow-type", action="store_true", help="per-char SendInput instead of paste")
-    a.add_argument("--key", help="tap keys: enter,tab,esc,backspace, or chords like ctrl+c")
+    a.add_argument("--key", help="tap keys: enter,tab,pagedown,f5,1, or chords like ctrl+c / ctrl+shift+t (all names: see below)")
     a.add_argument("--drag", help="hold-drag window pixels polyline: x1,y1,x2,y2;x3,y3")
     a.add_argument("--drag-norm", dest="drag_norm", help="hold-drag 0-1000 polyline: 200,300;400,280")
     a.add_argument("--path", help="experimental: path.json (0-1000 polylines) -> one press-and-drag")
     a.add_argument("--path-id", dest="path_id", type=int, default=0, help="which paths[].id to draw (default 0)")
     a.add_argument("--close", action="store_true", help="force-close polyline (append first point again)")
     a.add_argument("--step-px", dest="step_px", type=int, default=None, help="approx pixels between stroke samples (default 4; experimental --path default 2)")
-    a.add_argument("--scroll", help="wheel: 3 / -3 / down:3 / up:3 (negative or down = wheel down)")
+    a.add_argument("--scroll", help="wheel notches: 3 / -3 / down:3 / up:3 (negative or down = wheel down, toward the page bottom; positive or up = toward the top)")
     a.add_argument("--button", default="left", help="left|right|middle")
     a.add_argument("--hover", action="store_true", help="move onto target, do not click")
     a.add_argument("--hold", type=float, default=0, help="seconds to hold click before release; with xy/norm/ids = long-press")
-    a.add_argument("--hold-key", dest="hold_key", choices=["ctrl", "control", "shift", "alt"], default=None, help="hold modifier across the chain (ctrl/control/shift/alt); not --hold mouse long-press")
+    a.add_argument("--hold-key", dest="hold_key", choices=["ctrl", "control", "shift", "alt"], default=None, help="hold modifier across the chain's clicks/drags/scrolls (ctrl/control/shift/alt); needs one of those in the same call; not --hold mouse long-press")
     a.add_argument("--wait", help="seconds to wait at end of chain")
     a.add_argument("--gap", type=float, default=0.12)
     a.add_argument(
@@ -397,6 +407,10 @@ def main(argv: list[str] | None = None) -> int:
             for s in specs:
                 if s.get("kind") == "type":
                     s["input_via"] = "keys"
+        if not specs and args.hold_key:
+            from .act import HOLD_KEY_HINT, hold_key_scope_error
+
+            raise SystemExit(f"{hold_key_scope_error(specs, args.hold_key)}; {HOLD_KEY_HINT}")
         if not specs:
             raise SystemExit(
                 "act needs a click, --uia-name, --type/--text, --key, --drag, --drag-norm, --path, or --scroll"
