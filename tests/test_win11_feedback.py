@@ -178,6 +178,13 @@ class TestReplace(_TmpDir):
         calls = []
         with mock.patch("cu_perceive.input.click_xy", side_effect=lambda *a, **k: calls.append("click")), \
                 mock.patch("cu_perceive.input.tap_key", side_effect=lambda k: calls.append(f"key:{k}")), \
+                mock.patch("cu_perceive.input.prepare_paste",
+                           side_effect=lambda t: calls.append(f"stage:{t}") or {
+                               "ok": True, "staged": True, "save_ok": True, "saved": "prev",
+                               "text": t, "n": len(str(t))}), \
+                mock.patch("cu_perceive.input.finish_paste",
+                           side_effect=lambda s: calls.append(f"type:{s.get('text')}") or {
+                               "ok": True, "restored": True, "via": "clipboard"}), \
                 mock.patch("cu_perceive.input.enter_text", side_effect=lambda t, via="paste": calls.append(f"type:{t}")), \
                 mock.patch("cu_perceive.input.clear_field_for_replace",
                            side_effect=lambda **k: calls.append("clear") or {
@@ -187,7 +194,7 @@ class TestReplace(_TmpDir):
                 mock.patch("time.sleep"):
             out = run_chain(_screen_frame(), parse_steps(norm="491,63", text="URL", key="enter", replace=True), dry_run=False)
         self.assertTrue(out["ok"], out)
-        self.assertEqual(calls, ["click", "clear", "type:URL", "key:enter"])
+        self.assertEqual(calls, ["click", "stage:URL", "clear", "type:URL", "key:enter"])
         self.assertEqual(out["steps"][1]["replace_clear"]["method"], "value_pattern")
 
 

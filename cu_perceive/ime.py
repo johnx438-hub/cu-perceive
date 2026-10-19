@@ -3,7 +3,8 @@
 Microsoft Pinyin (HKL 0x08040804) swallows ASCII keys while each tap still
 reports success. Probe uses the target thread's GetKeyboardLayout and
 ImmGetOpenStatus. ``ime=off`` sends WM_INPUTLANGCHANGEREQUEST to that window
-(not the server's thread) and closes its IME, then restores both.
+(not the server's thread) for an already-installed Latin layout, closes its
+IME, then restores both. It does not call LoadKeyboardLayout.
 """
 from __future__ import annotations
 
@@ -11,8 +12,6 @@ import sys
 from ctypes import wintypes
 
 WM_INPUTLANGCHANGEREQUEST = 0x0050
-KLF_NOTELLSHELL = 0x00000080
-ENGLISH_US_KLID = "00000409"
 # LANG_CHINESE, LANG_JAPANESE, LANG_KOREAN — layouts that compose ASCII.
 _IME_PRIMARY = frozenset({0x04, 0x11, 0x12})
 
@@ -123,10 +122,98 @@ def probe_ime(hwnd: int, *, user32=None, imm32=None) -> dict:
     return out
 
 
-def suspend_ime(hwnd: int, *, user32=None, imm32=None) -> dict:
-    """Close the target window's IME and request en-US. Returns a restore token.
+# Primary language ids that use a Latin keyboard. English is preferred.
+_LATIN_PRIMARY = frozenset({
+    0x09,  # en
+    0x07,  # de
+    0x0C,  # fr
+    0x0A,  # es
+    0x16,  # pt
+    0x10,  # it
+    0x13,  # nl
+    0x1D,  # sv
+    0x06,  # da
+    0x14,  # no
+    0x0B,  # fi
+    0x15,  # pl
+    0x05,  # cs
+    0x0E,  # hu
+    0x18,  # ro
+    0x1F,  # tr
+    0x2A,  # vi
+    0x21,  # id
+    0x3E,  # ms
+    0x0F,  # is
+    0x1B,  # sk
+    0x24,  # sl
+    0x25,  # et
+    0x26,  # lv
+    0x27,  # lt
+})
 
-    Raises ImeError when the switch itself fails. Does not change the server process layout.
+
+def primary_lang(hkl: int) -> int:
+    return (int(hkl) & 0xFFFF) & 0x3FF
+
+
+def pick_installed_latin(layouts) -> int | None:
+    """An already-installed English layout, else another Latin one. Never a new HKL."""
+    installed = []
+    for raw in layouts or []:
+        try:
+            hkl = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if hkl:
+            installed.append(hkl)
+    english = [h for h in installed if primary_lang(h) == 0x09]
+    for hkl in english:
+        if (hkl & 0xFFFF) == 0x0409:
+            return hkl
+    if english:
+        return english[0]
+    for hkl in installed:
+        if primary_lang(hkl) in _LATIN_PRIMARY:
+            return hkl
+    return None
+
+
+def installed_layouts(user32) -> list[int]:
+    """HKLs from GetKeyboardLayoutList. Empty when the list cannot be read."""
+    import ctypes
+
+    try:
+        _bind(user32, "GetKeyboardLayoutList", [ctypes.c_int, ctypes.c_void_p], ctypes.c_int)
+        count = int(user32.GetKeyboardLayoutList(0, None) or 0)
+    except Exception:
+        return []
+    if count <= 0:
+        return []
+    buf = (ctypes.c_void_p * count)()
+    try:
+        got = int(user32.GetKeyboardLayoutList(count, ctypes.cast(buf, ctypes.c_void_p)) or 0)
+    except Exception:
+        return []
+    out: list[int] = []
+    for i in range(max(0, got)):
+        try:
+            hkl = int(buf[i] or 0)
+        except (TypeError, ValueError):
+            continue
+        if hkl:
+            out.append(hkl)
+    return out
+
+
+def suspend_ime(hwnd: int, *, user32=None, imm32=None, layouts=None) -> dict:
+    """Close the target window's IME and, when one is installed, request a Latin layout.
+
+    Uses GetKeyboardLayoutList. Never calls LoadKeyboardLayout, so a missing
+    en-US layout is not added to the user's language list. With no Latin layout
+    installed, only the IME is closed.
+
+    Raises ImeError when the requested switch itself fails. Does not change the
+    server process layout.
     """
     info = probe_ime(hwnd, user32=user32, imm32=imm32)
     if user32 is None and imm32 is None:
@@ -134,20 +221,18 @@ def suspend_ime(hwnd: int, *, user32=None, imm32=None) -> dict:
         imm32 = _load_imm32()
     if user32 is None:
         raise ImeError("ime=off needs Windows to switch the target window's layout")
-    import ctypes
-
     hwnd = int(hwnd)
-    try:
-        _bind(user32, "LoadKeyboardLayoutW", [wintypes.LPCWSTR, wintypes.UINT], wintypes.HANDLE)
-        _bind(user32, "SendMessageW", [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM], wintypes.LPARAM)
-        english = int(user32.LoadKeyboardLayoutW(ENGLISH_US_KLID, KLF_NOTELLSHELL) or 0)
-        if not english:
-            raise ImeError("LoadKeyboardLayoutW(00000409) returned 0")
-        user32.SendMessageW(hwnd, WM_INPUTLANGCHANGEREQUEST, 0, english)
-    except ImeError:
-        raise
-    except Exception as e:
-        raise ImeError(f"could not switch hwnd {hwnd} to English: {e}") from e
+    if layouts is None:
+        layouts = installed_layouts(user32)
+    latin = pick_installed_latin(layouts)
+    layout_switched = False
+    if latin:
+        try:
+            _bind(user32, "SendMessageW", [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM], wintypes.LPARAM)
+            user32.SendMessageW(hwnd, WM_INPUTLANGCHANGEREQUEST, 0, int(latin))
+            layout_switched = True
+        except Exception as e:
+            raise ImeError(f"could not switch hwnd {hwnd} to an installed Latin layout: {e}") from e
 
     closed = False
     if imm32 is not None and info.get("ime_open"):
@@ -164,12 +249,18 @@ def suspend_ime(hwnd: int, *, user32=None, imm32=None) -> dict:
                     imm32.ImmReleaseContext(hwnd, himc)
         except Exception as e:
             raise ImeError(f"could not close the IME on hwnd {hwnd}: {e}") from e
+    if not layout_switched and not closed and not info.get("ime_open"):
+        # Nothing to close and no Latin layout. Still a successful no-op switch
+        # only when the IME was already closed; the caller warns about the layout.
+        pass
 
     return {
         "hwnd": hwnd,
         "hkl": info.get("hkl"),
         "ime_open": info.get("ime_open"),
-        "english_hkl": english,
+        "english_hkl": int(latin) if latin else None,
+        "layout_switched": layout_switched,
+        "closed_only": not layout_switched,
         "closed": closed,
         "_user32": user32,
         "_imm32": imm32,

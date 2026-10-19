@@ -153,14 +153,14 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument(
         "--replace",
         action="store_true",
-        help="clear the focused edit before each --type (ValuePattern, EM_SETSEL, or Home+Shift+End+Delete — not Ctrl+A, which a classic WinForms TextBox ignores) and check it is empty",
+        help="clear the focused edit before each --type (End+Shift+Home+Delete for an edit/mask, else ValuePattern or EM_SETSEL — not Ctrl+A) and check it is empty",
     )
     a.add_argument("--slow-type", action="store_true", help="per-char SendInput instead of paste (same as --via keys)")
     a.add_argument(
         "--ime",
         choices=["off"],
         default=None,
-        help='off: for --go, switch the target window to an English layout and close its IME, then restore both. An active IME is always reported (ime_active warning)',
+        help='off: for --go, close the target window IME and switch it to an already-installed English/Latin layout (never loads a new one), then restore both',
     )
     a.add_argument("--key", help="tap keys: enter,tab,pagedown,f5,1, or chords like ctrl+c / ctrl+shift+t (all names: see below)")
     a.add_argument("--drag", help="hold-drag window pixels polyline: x1,y1,x2,y2;x3,y3")

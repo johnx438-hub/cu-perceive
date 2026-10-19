@@ -530,10 +530,12 @@ def perceive(
                 uia_nodes = list(uia_res.get("uia_nodes") or [])
                 uia_meta = {
                     k: uia_res[k]
-                    for k in ("uia_count", "uia_visited", "uia_truncated", "uia_occluded", "caps")
+                    for k in ("uia_count", "uia_visited", "uia_truncated", "uia_occluded", "uia_timeout", "caps")
                     if k in uia_res
                 }
                 uia_meta["uia_ms"] = uia_ms
+                if uia_res.get("warnings"):
+                    warnings.extend(str(w) for w in uia_res["warnings"])
 
         payload = {
             "stamp": stamp,

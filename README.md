@@ -147,6 +147,11 @@ every json in a large output directory.
   Text / DataItem / readonly Edit content (labels, message-box text, grid
   cells), not only clickable controls, and drops nodes whose center is covered
   by another element (occluded MDI children) with `uia_occluded` counting them.
+  Occlusion uses `uiautomation.ControlsAreSame`. An empty `GetRuntimeId()` is
+  not treated as a different control, so hwnd-less toolbars, menus, grid cells
+  and lookup rows stay. Read-only grid cells include `readonly`. A UIA walk
+  that runs longer than 20s (`CU_PERCEIVE_UIA_WALK_TIMEOUT`, seconds; `0`
+  disables) returns the nodes collected so far plus a warning (`uia_timeout`).
 - MCP tools refuse arguments they don't declare instead of dropping them: the
   call returns an error whose text is JSON with `reason: "unknown_args"`,
   `unknown_args` and `valid_args`, and nothing runs. That includes
@@ -160,26 +165,36 @@ every json in a large output directory.
   `reason: "hold_key_needs_pointer_step"`. For a key chord use
   `--key ctrl+pagedown` instead.
 - `--replace` (MCP `replace=true`) clears the focused edit before each
-  `--type`, then types. It tries ValuePattern.SetValue(""), then EM_SETSEL +
-  WM_CLEAR on a WinForms Edit, then Home, Shift+End, Delete. It does not send
-  Ctrl+A (a classic WinForms TextBox ignores that, so the text used to be
-  appended). If the field can be read back and is still not empty, the act
-  stops with `reason: "replace_failed"` and does not type.
+  `--type`, then types. An edit or masked edit (a WinForms MaskedTextBox is an
+  Edit, and `SetValue("")` only blanks its display) is cleared with End,
+  Shift+Home, Delete, then EM_SETSEL + WM_CLEAR. Other value patterns use
+  SetValue. It does not send Ctrl+A. If the field can be read back and is
+  still not empty, the act stops with `reason: "replace_failed"` and does not
+  type. Paste writes the clipboard before that clear, so a clipboard failure
+  does not wipe the field. After typing, the focused value is read back:
+  `typed_verified` is true, false, or null, and a mismatch is
+  `reason: "typed_mismatch"` (never `ok: true`).
   `act --norm 491,63 --type https://example.org --replace --key enter --go`.
 - `--via paste|keys` (MCP `via`) chooses how `--type` / `text` is entered.
   `paste` (default) puts the text on the clipboard and sends Ctrl+V, then
-  restores the previous Unicode clipboard text (best effort). Clipboard
-  failures return `ok: false` and `reason: "clipboard_failed"`; the helper
-  runs in a child process so a native clipboard fault cannot kill the server.
+  restores the previous Unicode clipboard text. An empty clipboard is emptied
+  again so the pasted text does not linger. Clipboard failures return
+  `ok: false` and `reason: "clipboard_failed"`. Get/set run in one long-lived
+  helper process so a native clipboard fault cannot kill the server and a
+  paste does not pay for a new process each time.
   `keys` (CLI `--slow-type` is the same) sends each character with SendInput
   unicode — use it when a DataGridView cell ignores Ctrl+V because it is not
-  in edit mode.
-- `--ime off` (MCP `ime="off"`) switches the **target window** to an English
-  layout and closes its IME for that act, then restores both. It does not
-  change the system default. Every act on a window stamp reports `ime`
-  (`hkl_hex`, `lang_id`, `ime_open`, `ime_active`). When an IME is active and
-  the chain types or taps keys, the result includes an `ime_active` warning:
-  the IME can swallow keys while each step still says `tapped: true`.
+  in edit mode. A paste whose read-back does not change is `typed_mismatch`.
+- `--ime off` (MCP `ime="off"`) closes the target window's IME and switches
+  that window to an **already installed** English or other Latin layout
+  (`GetKeyboardLayoutList`). It never loads a layout the user has not
+  installed. With no Latin layout, it only closes the IME. It then checks the
+  layout actually changed; if it did not, the act stops with `reason:
+  "ime_failed"`. The previous layout and IME state are restored afterwards.
+  It does not change the system default. When `ime=off` handled the layout,
+  the result does not also warn `ime_active`. Without `ime=off`, an active IME
+  on a chain that types or taps keys adds that warning: the IME can swallow
+  keys while each step still says `tapped: true`.
 - Mouse input goes to the window on top at that point, and keys go to the
   window in front, even when the stamped window is behind another one. So with
   `--go` on a window stamp, each step is checked right before it is sent:
@@ -189,7 +204,8 @@ every json in a large output directory.
     actually there);
   - each `--type` / `--key` needs the stamped window, or a window it owns (for
     example a dialog the click just opened), in the foreground, also after a
-    click. Otherwise it refuses with `keyboard_refused_step`;
+    click, and keyboard focus inside that window. Otherwise it refuses with
+    `keyboard_refused_step` (`not_foreground` or `focus_outside`);
   - `--hold-key` counts as a key: it is pressed at the first click, drag or
     scroll, once that step's point has passed and only if the stamped window
     (or one it owns) is in the foreground. Otherwise it refuses with
@@ -228,9 +244,11 @@ every json in a large output directory.
 - On `--go`, `foreground_click_count` counts the SendInput clicks actually sent
   (0 when the run is refused). A dry run also leaves it at 0; the plan is
   `planned_foreground_click_count`. Concurrent `--go` / `go=true` acts in one
-  process run one at a time. A live act lists top-level windows that appeared
-  during the call in `new_windows` (`hwnd`, `title`, `class`) and the foreground
-  window after the act in `after`.
+  process run one at a time. A live act takes its window snapshot inside that
+  lock, then polls for about 600ms (`CU_PERCEIVE_NEW_WINDOW_WAIT_MS`) so a
+  dialog that appears just after the click is listed in `new_windows`
+  (`hwnd`, `title`, `class`). `after` is the foreground window when the act
+  returns.
 - `--method uia` without the `uia` extra exits with code 3 and prints the same
   `missing_extra` / `install` fields as `perceive --uia`. `--method auto`
   without it falls back to input and says so in `warnings`.

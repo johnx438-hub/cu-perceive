@@ -58,6 +58,12 @@ class _Live(unittest.TestCase):
             mock.patch("cu_perceive.input.drag_path",
                        side_effect=lambda *a, **k: self.calls.append("drag") or {"samples": 2}),
             mock.patch("cu_perceive.input.tap_key", side_effect=lambda k: self.calls.append(f"key:{k}")),
+            mock.patch("cu_perceive.input.prepare_paste",
+                       side_effect=lambda t: {"ok": True, "staged": True, "save_ok": True,
+                                              "saved": "prev", "text": t, "n": len(str(t))}),
+            mock.patch("cu_perceive.input.finish_paste",
+                       side_effect=lambda s: self.calls.append(f"type:{s.get('text')}") or {
+                           "ok": True, "restored": True, "via": "clipboard"}),
             mock.patch("cu_perceive.input.enter_text",
                        side_effect=lambda t, via="paste": self.calls.append(f"type:{t}")),
             mock.patch("cu_perceive.input.clear_field_for_replace",

@@ -1,14 +1,18 @@
 """S4 perceive --uia: bbox->norm helper + filter/caps."""
 from __future__ import annotations
 
+import time
 import unittest
+from unittest import mock
 
 from cu_perceive.uia import (
     UIA_CONTENT_MAX,
     UIA_MAX_DEPTH,
     UIA_MAX_NODES,
     UIA_VALUE_MAX,
+    collect_uia_nodes,
     control_center_occluded,
+    read_control_value,
     screen_bbox_to_norm,
     should_keep_uia_node,
     truncate_uia_value,
@@ -199,6 +203,18 @@ class TestOccludedMdi(unittest.TestCase):
         self.assertFalse(control_center_occluded(back, box, hit_at=lambda x, y: cell))
         self.assertFalse(control_center_occluded(back, box, hit_at=lambda x, y: None))
 
+    def test_empty_runtime_id_is_not_occlusion(self):
+        # GetRuntimeId() is () for hwnd-less nodes on some machines. That used
+        # to mark every toolbar, menu, grid cell and lookup row occluded.
+        cell = _Node("qty", runtime=())
+        same = _Node("qty", runtime=())
+        other = _Node("covered", runtime=(7, 1))
+        box = (0, 0, 40, 20)
+        self.assertFalse(control_center_occluded(cell, box, hit_at=lambda x, y: same))
+        self.assertTrue(control_center_occluded(cell, box, hit_at=lambda x, y: other))
+        child = _Node("code", parent=cell, runtime=())
+        self.assertFalse(control_center_occluded(cell, box, hit_at=lambda x, y: child))
+
 
 class TestCapsDefaults(unittest.TestCase):
     def test_caps(self):
@@ -221,6 +237,94 @@ class TestCapsDefaults(unittest.TestCase):
             if len(kept) >= max_nodes:
                 break
         self.assertEqual(len(kept), 5)
+
+
+class _Rect:
+    left, top, right, bottom = 0, 0, 80, 24
+
+
+class TestReadonlyAndTimeout(unittest.TestCase):
+    def test_grid_cell_readonly_comes_from_legacy_state(self):
+        class Pat:
+            Value = "XS-0001"
+
+            def IsReadOnly(self):
+                return True
+
+        class Cell:
+            def GetPattern(self, pid):
+                return Pat()
+
+        auto = mock.Mock()
+        auto.PatternId.ValuePattern = 1
+        with mock.patch("cu_perceive.uia._auto", return_value=auto):
+            value, readonly = read_control_value(Cell())
+        self.assertEqual(value, "XS-0001")
+        self.assertIs(readonly, True)
+
+    def test_readonly_state_bit_when_value_pattern_has_no_flag(self):
+        class Leg:
+            State = 0x40
+
+        class Cell:
+            def GetPattern(self, pid):
+                if pid == "legacy":
+                    return Leg()
+                return None
+
+            def GetPropertyValue(self, pid):
+                raise RuntimeError("no property")
+
+        auto = mock.Mock()
+        auto.PatternId.ValuePattern = 1
+        auto.PatternId.LegacyIAccessiblePattern = "legacy"
+        auto.PropertyId.ValueIsReadOnlyProperty = 30046
+        with mock.patch("cu_perceive.uia._auto", return_value=auto):
+            _value, readonly = read_control_value(Cell())
+        self.assertIs(readonly, True)
+
+    def test_walk_timeout_returns_partial_nodes(self):
+        class Root:
+            Name = "Save"
+            ControlTypeName = "ButtonControl"
+            BoundingRectangle = _Rect()
+
+            def GetPattern(self, pid):
+                return None
+
+            def GetPropertyValue(self, pid):
+                return False
+
+            def GetRuntimeId(self):
+                return (1, 2)
+
+            def GetChildren(self):
+                time.sleep(2)
+                return []
+
+        class Auto:
+            class PatternId:
+                ValuePattern = 1
+                LegacyIAccessiblePattern = 2
+
+            class PropertyId:
+                ValueIsReadOnlyProperty = 30046
+
+            def ControlFromHandle(self, hwnd):
+                return Root()
+
+            def ControlFromPoint(self, x, y):
+                return Root()
+
+        with mock.patch("cu_perceive.uia._auto", return_value=Auto()), \
+                mock.patch("cu_perceive.uia.list_available_patterns", return_value=["Invoke"]):
+            res = collect_uia_nodes(
+                5, width=200, height=100, origin_left=0, origin_top=0, timeout_s=0.15,
+            )
+        self.assertTrue(res["ok"], res)
+        self.assertTrue(res.get("uia_timeout"))
+        self.assertTrue(any("timed out" in w for w in res.get("warnings") or []))
+        self.assertEqual([n["name"] for n in res["uia_nodes"]], ["Save"])
 
 
 if __name__ == "__main__":

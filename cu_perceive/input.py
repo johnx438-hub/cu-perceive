@@ -1,10 +1,12 @@
 """Low-level mouse/keyboard. Unicode type, drag, wheel. IME switching lives in ime.py."""
 from __future__ import annotations
 
+import atexit
 import ctypes
 import json
 import os
 import sys
+import threading
 import time
 from ctypes import wintypes
 
@@ -407,6 +409,15 @@ def _with_open_clipboard(fn, *, tries: int = CLIPBOARD_OPEN_TRIES):
     raise ClipboardError(f"clipboard operation failed: {last}")
 
 
+def clipboard_empty_inprocess() -> None:
+    """Empty the clipboard. Raises ClipboardError. Used so a paste does not leave a secret behind."""
+
+    def clear(cb) -> None:
+        cb.EmptyClipboard()
+
+    _with_open_clipboard(clear)
+
+
 def clipboard_set_inprocess(text: str) -> None:
     """Set CF_UNICODETEXT in this process. Raises ClipboardError. Used by the helper child and tests."""
     import win32con
@@ -442,6 +453,9 @@ def _clipboard_inprocess(op: str, text: str | None) -> dict:
         if op == "set":
             clipboard_set_inprocess("" if text is None else str(text))
             return {"ok": True}
+        if op == "empty":
+            clipboard_empty_inprocess()
+            return {"ok": True}
         return {"ok": False, "reason": "clipboard_failed", "error": f"bad clipboard op {op!r}"}
     except ClipboardError as e:
         return {"ok": False, "reason": e.reason, "error": str(e)}
@@ -460,49 +474,128 @@ def _parse_clipboard_stdout(raw: bytes) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def _clipboard_subprocess(op: str, text: str | None) -> dict:
-    """Run the clipboard op in a child so a native fault (heap corruption) cannot kill the server."""
+def _worker_failure(returncode, stdout: bytes = b"", stderr: bytes = b"") -> dict:
+    """Map a dead clipboard helper to ok=false. A native crash must not escape."""
+    parsed = _parse_clipboard_stdout(stdout or b"")
+    if parsed is not None and not parsed.get("ok"):
+        parsed.setdefault("reason", "clipboard_failed")
+        return parsed
+    err = (stderr or b"").decode("utf-8", "replace").strip()[-400:]
+    detail = f"clipboard helper exited {returncode}"
+    if err:
+        detail = f"{detail}: {err}"
+    return {"ok": False, "reason": "clipboard_failed", "error": detail}
+
+
+_CLIPBOARD_WORKER_LOCK = threading.Lock()
+_clipboard_worker: dict = {"proc": None}
+
+
+def _kill_clipboard_worker(proc) -> None:
+    if proc is None:
+        return
+    try:
+        proc.kill()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=2)
+    except Exception:
+        pass
+
+
+def _shutdown_clipboard_worker() -> None:
+    with _CLIPBOARD_WORKER_LOCK:
+        proc = _clipboard_worker.get("proc")
+        _clipboard_worker["proc"] = None
+    _kill_clipboard_worker(proc)
+
+
+atexit.register(_shutdown_clipboard_worker)
+
+
+def _start_clipboard_worker():
+    """One long-lived helper. Spawning a process per get/set cost about 1.5s per paste."""
     import subprocess
 
-    payload = json.dumps({"op": op, "text": text}, ensure_ascii=False).encode("utf-8")
     env = os.environ.copy()
     env["CU_PERCEIVE_CLIPBOARD_CHILD"] = "1"
     kwargs: dict = {
-        "input": payload,
-        "capture_output": True,
-        "timeout": 12,
+        "stdin": subprocess.PIPE,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.DEVNULL,
         "env": env,
     }
     if sys.platform == "win32":
         kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
-    try:
-        proc = subprocess.run([sys.executable, "-m", "cu_perceive.clipboard_worker"], **kwargs)
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "reason": "clipboard_failed", "error": "clipboard helper timed out"}
-    except Exception as e:
-        return {"ok": False, "reason": "clipboard_failed", "error": f"clipboard helper failed to start: {e}"}
-    parsed = _parse_clipboard_stdout(proc.stdout or b"")
-    if proc.returncode != 0 or parsed is None:
-        if parsed is not None and not parsed.get("ok"):
+    return subprocess.Popen(
+        [sys.executable, "-m", "cu_perceive.clipboard_worker", "--serve"],
+        **kwargs,
+    )
+
+
+def _clipboard_worker_call(op: str, text: str | None, *, timeout: float = 8.0) -> dict:
+    """One JSON line in, one JSON line out. A dead helper is restarted on the next call."""
+    payload = (json.dumps({"op": op, "text": text}, ensure_ascii=False) + "\n").encode("utf-8")
+    with _CLIPBOARD_WORKER_LOCK:
+        proc = _clipboard_worker.get("proc")
+        if proc is None or proc.poll() is not None:
+            try:
+                proc = _start_clipboard_worker()
+            except Exception as e:
+                _clipboard_worker["proc"] = None
+                return {
+                    "ok": False,
+                    "reason": "clipboard_failed",
+                    "error": f"clipboard helper failed to start: {e}",
+                }
+            _clipboard_worker["proc"] = proc
+        try:
+            proc.stdin.write(payload)
+            proc.stdin.flush()
+        except Exception as e:
+            _clipboard_worker["proc"] = None
+            _kill_clipboard_worker(proc)
+            return {"ok": False, "reason": "clipboard_failed", "error": f"clipboard helper failed: {e}"}
+        box: dict = {}
+
+        def _read() -> None:
+            try:
+                box["line"] = proc.stdout.readline()
+            except Exception as e:
+                box["err"] = e
+
+        reader = threading.Thread(target=_read, name="cu-perceive-clipboard-read", daemon=True)
+        reader.start()
+        reader.join(timeout)
+        if reader.is_alive():
+            _clipboard_worker["proc"] = None
+            _kill_clipboard_worker(proc)
+            return {"ok": False, "reason": "clipboard_failed", "error": "clipboard helper timed out"}
+        if box.get("err") is not None or not box.get("line"):
+            code = proc.poll()
+            _clipboard_worker["proc"] = None
+            _kill_clipboard_worker(proc)
+            if box.get("err") is not None:
+                return {"ok": False, "reason": "clipboard_failed", "error": f"clipboard helper failed: {box['err']}"}
+            return _worker_failure(code if code is not None else "unknown", b"")
+        parsed = _parse_clipboard_stdout(box["line"])
+        if parsed is None:
+            return {"ok": False, "reason": "clipboard_failed", "error": "clipboard helper returned nothing"}
+        if not parsed.get("ok"):
             parsed.setdefault("reason", "clipboard_failed")
-            return parsed
-        err = (proc.stderr or b"").decode("utf-8", "replace").strip()[-400:]
-        detail = f"clipboard helper exited {proc.returncode}"
-        if err:
-            detail = f"{detail}: {err}"
-        return {"ok": False, "reason": "clipboard_failed", "error": detail}
-    if not parsed.get("ok"):
-        parsed.setdefault("reason", "clipboard_failed")
-    return parsed
+        else:
+            parsed.pop("reason", None)
+        return parsed
 
 
 def clipboard_rpc(op: str, text: str | None = None) -> dict:
-    """Clipboard get/set that always returns {ok: bool}. A native crash stays in the helper process."""
+    """Clipboard get/set/empty that always returns {ok: bool}. A native crash stays in the helper."""
     child = os.environ.get("CU_PERCEIVE_CLIPBOARD_CHILD") == "1"
     inproc = child or os.environ.get("CU_PERCEIVE_CLIPBOARD_INPROCESS") == "1"
     if inproc:
         return _clipboard_inprocess(op, text)
-    return _clipboard_subprocess(op, text)
+    return _clipboard_worker_call(op, text)
 
 
 def clipboard_get() -> str | None:
@@ -530,23 +623,30 @@ def _ctrl_v() -> None:
     time.sleep(0.08)
 
 
-def paste_text(text: str, restore: bool = True) -> dict:
-    """Clipboard + Ctrl+V. Saves and restores the previous Unicode text, best effort.
+def _restore_staged(staged: dict) -> tuple[bool, str | None]:
+    """Put the previous Unicode text back. An empty clipboard is emptied again."""
+    if not staged or not staged.get("save_ok"):
+        return False, None
+    saved = staged.get("saved")
+    if saved is None:
+        back = clipboard_rpc("empty")
+    else:
+        back = clipboard_rpc("set", "" if saved is None else str(saved))
+    if back.get("ok"):
+        return True, None
+    return False, back.get("error") or "could not restore the clipboard"
 
-    Every failure returns ok=false and reason=clipboard_failed. A native clipboard fault
-    is contained in the helper process and comes back as that result, not a dead server.
+
+def prepare_paste(text: str) -> dict:
+    """Save the current clipboard and set ``text``. Does not send Ctrl+V and does not clear a field.
+
+    Call this before replace clears the edit, so a clipboard failure leaves the field alone.
     """
     text = "" if text is None else str(text)
-    saved = None
-    save_ok = False
-    save_error = None
-    if restore:
-        got = clipboard_rpc("get")
-        if got.get("ok"):
-            saved = got.get("text")
-            save_ok = True
-        else:
-            save_error = got.get("error") or "could not read the clipboard"
+    got = clipboard_rpc("get")
+    save_ok = bool(got.get("ok"))
+    saved = got.get("text") if save_ok else None
+    save_error = None if save_ok else (got.get("error") or "could not read the clipboard")
     put = clipboard_rpc("set", text)
     if not put.get("ok"):
         return {
@@ -556,31 +656,97 @@ def paste_text(text: str, restore: bool = True) -> dict:
             "error": put.get("error") or "clipboard_set failed",
             "n": len(text),
             "restored": False,
+            "staged": False,
+            "save_ok": save_ok,
+            "saved": saved,
+            "save_error": save_error,
         }
+    return {
+        "ok": True,
+        "via": "clipboard",
+        "staged": True,
+        "text": text,
+        "n": len(text),
+        "save_ok": save_ok,
+        "saved": saved,
+        "save_error": save_error,
+    }
+
+
+def discard_paste(staged: dict | None) -> dict:
+    """Restore the clipboard when a later step (clear, focus) refuses to type."""
+    if not staged or not staged.get("staged"):
+        return {"ok": True, "restored": False}
+    restored, err = _restore_staged(staged)
+    out = {"ok": True, "restored": restored}
+    if err:
+        out["clipboard_restore_error"] = err
+    return out
+
+
+def finish_paste(staged: dict) -> dict:
+    """Ctrl+V the text already on the clipboard, then restore what prepare_paste saved."""
+    if not staged or not staged.get("ok"):
+        failed = staged or {"ok": False, "reason": "clipboard_failed", "error": "clipboard was not staged"}
+        failed.setdefault("reason", "clipboard_failed")
+        return failed
     send_error = None
     try:
         time.sleep(0.05)
         _ctrl_v()
     except Exception as e:
         send_error = e
-    restored = False
-    restore_error = None
-    # Best effort: put the user's previous Unicode text back. Non-text clipboard data
-    # cannot be saved this way. A failed restore does not undo a paste that already landed.
-    if restore and save_ok and saved is not None:
-        back = clipboard_rpc("set", saved)
-        restored = bool(back.get("ok"))
-        if not restored:
-            restore_error = back.get("error") or "could not restore the clipboard"
-    out = {"ok": send_error is None, "via": "clipboard", "n": len(text), "restored": restored}
+    restored, restore_error = _restore_staged(staged)
+    out = {
+        "ok": send_error is None,
+        "via": "clipboard",
+        "n": staged.get("n", 0),
+        "restored": restored,
+    }
     if send_error is not None:
         out["reason"] = "clipboard_failed"
         out["error"] = f"paste failed: {send_error}"
-    if save_error:
-        out["clipboard_save_error"] = save_error
+    if staged.get("save_error"):
+        out["clipboard_save_error"] = staged["save_error"]
     if restore_error:
         out["clipboard_restore_error"] = restore_error
     return out
+
+
+def paste_text(text: str, restore: bool = True) -> dict:
+    """Clipboard + Ctrl+V. Saves and restores the previous Unicode text, best effort.
+
+    An empty clipboard is restored to empty so the pasted text does not linger.
+    Every failure returns ok=false and reason=clipboard_failed. A native clipboard fault
+    is contained in the helper process and comes back as that result, not a dead server.
+    """
+    text = "" if text is None else str(text)
+    if not restore:
+        put = clipboard_rpc("set", text)
+        if not put.get("ok"):
+            return {
+                "ok": False,
+                "via": "clipboard",
+                "reason": put.get("reason") or "clipboard_failed",
+                "error": put.get("error") or "clipboard_set failed",
+                "n": len(text),
+                "restored": False,
+            }
+        send_error = None
+        try:
+            time.sleep(0.05)
+            _ctrl_v()
+        except Exception as e:
+            send_error = e
+        out = {"ok": send_error is None, "via": "clipboard", "n": len(text), "restored": False}
+        if send_error is not None:
+            out["reason"] = "clipboard_failed"
+            out["error"] = f"paste failed: {send_error}"
+        return out
+    staged = prepare_paste(text)
+    if not staged.get("ok"):
+        return staged
+    return finish_paste(staged)
 
 
 def type_keys(text: str, gap: float = 0.012) -> dict:
@@ -663,10 +829,12 @@ def _foreground_focus_hwnd() -> int:
     return int(info.hwndFocus or 0)
 
 
-def _discover_focused_edit() -> tuple[object | None, int, str]:
-    """(ValuePattern or None, edit hwnd, class name). Best effort; never raises."""
+def _discover_focused_edit() -> tuple[object | None, int, str, str]:
+    """(ValuePattern or None, edit hwnd, class name, control type). Best effort; never raises."""
     pattern = None
     hwnd = 0
+    class_name = ""
+    control_type = ""
     try:
         import uiautomation as auto
 
@@ -680,6 +848,14 @@ def _discover_focused_edit() -> tuple[object | None, int, str]:
                 pattern = ctrl.GetPattern(auto.PatternId.ValuePattern)
             except Exception:
                 pattern = None
+            try:
+                control_type = str(getattr(ctrl, "ControlTypeName", "") or "")
+            except Exception:
+                control_type = ""
+            try:
+                class_name = str(getattr(ctrl, "ClassName", "") or "")
+            except Exception:
+                class_name = ""
     except Exception:
         pattern = None
     if not hwnd:
@@ -687,12 +863,40 @@ def _discover_focused_edit() -> tuple[object | None, int, str]:
             hwnd = _foreground_focus_hwnd()
         except Exception:
             hwnd = 0
-    class_name = ""
-    try:
-        class_name = _window_class_name(hwnd) if hwnd else ""
-    except Exception:
-        class_name = ""
-    return pattern, hwnd, class_name
+    if hwnd and not class_name:
+        try:
+            class_name = _window_class_name(hwnd)
+        except Exception:
+            class_name = ""
+    return pattern, hwnd, class_name, control_type
+
+
+def read_focused_value() -> str | None:
+    """ValuePattern of the focused control, or None when it cannot be read."""
+    pattern, _hwnd, _class_name, _ctype = _discover_focused_edit()
+    return _pattern_value(pattern) if pattern is not None else None
+
+
+def typed_matches(expected: str, actual: str | None) -> bool | None:
+    """True/False when the focused value can be compared; None when it cannot.
+
+    Mask literals are ignored (typed ``20261019`` matches ``2026-10-19``).
+    A longer value is not a match, so an appended ``WEB-02WEB-02`` fails.
+    """
+    if actual is None:
+        return None
+    exp = "" if expected is None else str(expected)
+    act = str(actual)
+    if act.strip() == exp.strip():
+        return True
+
+    def alnum(s: str) -> str:
+        return "".join(ch for ch in s if ch.isalnum())
+
+    exp_n, act_n = alnum(exp), alnum(act)
+    if exp_n and exp_n == act_n:
+        return True
+    return False
 
 
 def _pattern_value(pattern) -> str | None:
@@ -705,81 +909,34 @@ def _pattern_value(pattern) -> str | None:
     return str(value)
 
 
-def clear_field_for_replace(
-    *,
-    pattern=None,
-    hwnd: int = 0,
-    class_name: str | None = None,
-    send_message=None,
-    text_length=None,
-    allow_keyboard: bool | None = None,
-    discover: bool | None = None,
-) -> dict:
-    """Empty the focused edit before a replace-type.
+def _looks_masked(class_name: str | None, control_type: str | None = None) -> bool:
+    return "masked" in f"{class_name or ''} {control_type or ''}".lower()
 
-    WinForms TextBox ignores Ctrl+A, so this does not send it. Order:
-    ValuePattern.SetValue('') -> EM_SETSEL(0,-1)+WM_CLEAR on an Edit hwnd ->
-    Home, Shift+End, Delete. When the field can be read back and is still
-    non-empty, ok=false and reason=replace_failed (the caller must not type).
+
+def _looks_edit(class_name: str | None, control_type: str | None = None) -> bool:
+    if _looks_masked(class_name, control_type):
+        return True
+    if _class_is_edit(class_name):
+        return True
+    return "edit" in (control_type or "").lower()
+
+
+def _value_empty(current: str | None, *, masked: bool) -> bool | None:
+    if current is None:
+        return None
+    if current == "":
+        return True
+    if masked and not any(ch.isalnum() for ch in current):
+        return True
+    return False
+
+
+def _field_empty(pattern, hwnd: int, text_length, *, masked: bool) -> bool | None:
+    """True/False when the edit can be read; None when it cannot.
+
+    WM_GETTEXTLENGTH wins for a normal edit. A masked control whose ValuePattern
+    still contains digits is not empty, even when SetValue('') made the display blank.
     """
-    notes: list[str] = []
-    if discover is None:
-        discover = pattern is None and not hwnd and send_message is None and text_length is None and class_name is None
-    if discover:
-        pattern, hwnd, class_name = _discover_focused_edit()
-        if send_message is None and user32 is not None:
-            send_message = _send_message_w
-        if text_length is None and user32 is not None:
-            text_length = _gettext_length
-    if allow_keyboard is None:
-        allow_keyboard = user32 is not None
-
-    if pattern is not None:
-        try:
-            pattern.SetValue("")
-            current = _pattern_value(pattern)
-            if current == "":
-                return {"ok": True, "method": "value_pattern", "empty": True, "verified": True}
-            if current is not None:
-                notes.append(f"ValuePattern.SetValue left {current!r}")
-        except Exception as e:
-            notes.append(f"ValuePattern.SetValue failed: {e}")
-
-    if hwnd and send_message is not None and _class_is_edit(class_name):
-        try:
-            send_message(int(hwnd), EM_SETSEL, 0, -1)
-            send_message(int(hwnd), WM_CLEAR, 0, 0)
-            n = text_length(int(hwnd)) if text_length is not None else None
-            if n == 0:
-                return {"ok": True, "method": "em_setsel", "empty": True, "verified": True}
-            if n is not None:
-                notes.append(f"EM_SETSEL left {n} chars")
-        except Exception as e:
-            notes.append(f"EM_SETSEL failed: {e}")
-
-    if not allow_keyboard:
-        return {
-            "ok": True,
-            "method": "unavailable",
-            "empty": None,
-            "verified": False,
-            "notes": notes,
-        }
-
-    try:
-        tap_key("home")
-        tap_combo("shift+end")
-        tap_key("delete")
-    except Exception as e:
-        return {
-            "ok": False,
-            "reason": "replace_failed",
-            "error": f"keyboard clear failed: {e}",
-            "notes": notes,
-            "empty": None,
-            "verified": False,
-        }
-
     current = _pattern_value(pattern) if pattern is not None else None
     n = None
     if text_length is not None and hwnd:
@@ -787,19 +944,121 @@ def clear_field_for_replace(
             n = text_length(int(hwnd))
         except Exception:
             n = None
-    if current == "" or n == 0:
-        return {"ok": True, "method": "home_shift_end", "empty": True, "verified": True, "notes": notes}
-    if (current not in (None, "")) or (n not in (None, 0)):
+    if n is not None:
+        if n > 0:
+            return False
+        if masked and current and any(ch.isalnum() for ch in current):
+            return False
+        return True
+    return _value_empty(current, masked=masked)
+
+
+def _keyboard_clear_selection() -> None:
+    """End, Shift+Home, Delete. Selects a WinForms mask; Ctrl+A and SetValue('') do not."""
+    tap_key("end")
+    tap_combo("shift+home")
+    tap_key("delete")
+
+
+def clear_field_for_replace(
+    *,
+    pattern=None,
+    hwnd: int = 0,
+    class_name: str | None = None,
+    control_type: str | None = None,
+    send_message=None,
+    text_length=None,
+    allow_keyboard: bool | None = None,
+    discover: bool | None = None,
+) -> dict:
+    """Empty the focused edit before a replace-type.
+
+    Edit and masked edits (WinForms MaskedTextBox is an Edit class) are cleared
+    with End, Shift+Home, Delete. SetValue('') on a mask only blanks the display
+    and leaves the old date in place, so it is not used for those controls.
+    EM_SETSEL+WM_CLEAR is the fallback for a normal Edit. When the field can be
+    read back and is still non-empty, ok=false and reason=replace_failed.
+    """
+    notes: list[str] = []
+    if discover is None:
+        discover = (
+            pattern is None and not hwnd and send_message is None
+            and text_length is None and class_name is None and control_type is None
+        )
+    if discover:
+        pattern, hwnd, class_name, control_type = _discover_focused_edit()
+        if send_message is None and user32 is not None:
+            send_message = _send_message_w
+        if text_length is None and user32 is not None:
+            text_length = _gettext_length
+    if allow_keyboard is None:
+        allow_keyboard = user32 is not None
+    masked = _looks_masked(class_name, control_type)
+    edit = _looks_edit(class_name, control_type)
+
+    def _done(method: str):
+        empty = _field_empty(pattern, int(hwnd or 0), text_length, masked=masked)
+        if empty is True:
+            return {"ok": True, "method": method, "empty": True, "verified": True, "notes": notes}
+        return None
+
+    if edit or masked:
+        if allow_keyboard:
+            try:
+                _keyboard_clear_selection()
+            except Exception as e:
+                notes.append(f"keyboard clear failed: {e}")
+            done = _done("end_shift_home")
+            if done:
+                return done
+        if hwnd and send_message is not None and _class_is_edit(class_name) and not masked:
+            try:
+                send_message(int(hwnd), EM_SETSEL, 0, -1)
+                send_message(int(hwnd), WM_CLEAR, 0, 0)
+            except Exception as e:
+                notes.append(f"EM_SETSEL failed: {e}")
+            done = _done("em_setsel")
+            if done:
+                return done
+    else:
+        if pattern is not None:
+            try:
+                pattern.SetValue("")
+            except Exception as e:
+                notes.append(f"ValuePattern.SetValue failed: {e}")
+            done = _done("value_pattern")
+            if done:
+                return done
+        if allow_keyboard:
+            try:
+                _keyboard_clear_selection()
+            except Exception as e:
+                notes.append(f"keyboard clear failed: {e}")
+            done = _done("end_shift_home")
+            if done:
+                return done
+
+    empty = _field_empty(pattern, int(hwnd or 0), text_length, masked=masked)
+    if empty is False:
         return {
             "ok": False,
             "reason": "replace_failed",
-            "error": "field still has text after ValuePattern, EM_SETSEL, and Home+Shift+End+Delete",
-            "method": "home_shift_end",
+            "error": "field still has text after End+Shift+Home+Delete"
+            + ("" if masked or edit else " and ValuePattern.SetValue"),
+            "method": "end_shift_home" if edit or masked else "value_pattern",
             "empty": False,
             "verified": True,
             "notes": notes,
         }
-    return {"ok": True, "method": "home_shift_end", "empty": None, "verified": False, "notes": notes}
+    if not allow_keyboard and not edit:
+        return {"ok": True, "method": "unavailable", "empty": None, "verified": False, "notes": notes}
+    return {
+        "ok": True,
+        "method": "end_shift_home" if (edit or masked) else "unavailable",
+        "empty": None,
+        "verified": False,
+        "notes": notes,
+    }
 
 MOUSEEVENTF_RIGHTDOWN = 0x0008
 MOUSEEVENTF_RIGHTUP = 0x0010

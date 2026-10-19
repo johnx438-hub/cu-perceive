@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -1319,6 +1320,9 @@ def _keyboard_target_error(
         _set_refusal(out, "foreground_unreadable", "retry; if it keeps failing, re-perceive")
         return f"could not read the foreground window ({e}); keyboard step refused"
     if ok:
+        focus_err = _focus_target_error(out, target, label)
+        if focus_err:
+            return focus_err
         return None
     fg_title = _window_title(fg) if fg else None
     if not focus or not window_stamp:
@@ -1365,7 +1369,73 @@ def _keyboard_target_error(
             f"{label} is still not in the foreground after --focus (foreground hwnd {fg} "
             f"{fg_title!r}); keyboard step refused"
         )
+    focus_err = _focus_target_error(out, target, label)
+    if focus_err:
+        return focus_err
     return None
+
+
+def _focus_target_error(out: dict, target: int, label: str) -> str | None:
+    """None when keyboard focus is inside the target, or when it cannot be read.
+
+    Foreground alone is not enough: replace can clear a field via UIA while
+    SendInput delivers the text to a different focused window, and the act
+    still looked successful.
+    """
+    try:
+        from .windows import focus_matches
+
+        ok, focused = focus_matches(int(target))
+    except Exception:
+        return None
+    if ok is not False:
+        return None
+    _set_refusal(
+        out, "focus_outside",
+        "click the target field so it has keyboard focus, then retry",
+        {"hwnd": focused} if focused else None,
+    )
+    return (
+        f"{label} is in the foreground but keyboard focus is hwnd {focused}, "
+        "not inside it; typing refused"
+    )
+
+
+def _note_typed_readback(out: dict, step: dict, expected: str, target_hwnd: int = 0) -> bool:
+    """Set typed_verified from the focused control. False means the act must stop.
+
+    true: the value matches. false: it does not (typed_mismatch, never ok).
+    null: the value could not be read, or focus is not a live window (unit-test hwnds).
+    """
+    if target_hwnd:
+        try:
+            from .windows import focus_matches
+
+            inside, _focused = focus_matches(int(target_hwnd))
+        except Exception:
+            inside = None
+        if inside is not True:
+            step["typed_verified"] = None
+            out["typed_verified"] = None
+            return True
+    try:
+        from .input import read_focused_value, typed_matches
+
+        actual = read_focused_value()
+        match = typed_matches(expected, actual)
+    except Exception:
+        actual, match = None, None
+    step["typed_verified"] = match
+    out["typed_verified"] = match
+    if actual is not None:
+        step["typed_readback"] = actual[:120]
+    if match is False:
+        shown = actual if actual is not None else ""
+        out["ok"] = False
+        out["reason"] = "typed_mismatch"
+        out["error"] = f"focused control value is {shown!r} after typing {expected!r}"
+        return False
+    return True
 
 
 def _keyboard_refuse(out: dict, n: int, err: str) -> dict:
@@ -1552,12 +1622,48 @@ def _snapshot_windows() -> list[dict] | None:
         return None
 
 
+NEW_WINDOW_WAIT_S = 0.6
+NEW_WINDOW_POLL_S = 0.05
+
+
+def new_window_wait_s() -> float:
+    """How long to poll for a dialog that appears just after input. 0 disables the wait.
+
+    ``CU_PERCEIVE_NEW_WINDOW_WAIT_MS`` (default 600). Act often returns in
+    16–80 ms, before a WinForms dialog exists.
+    """
+    raw = os.environ.get("CU_PERCEIVE_NEW_WINDOW_WAIT_MS", "").strip().lower()
+    if raw in ("0", "off", "none"):
+        return 0.0
+    if not raw:
+        return NEW_WINDOW_WAIT_S
+    try:
+        ms = float(raw)
+    except ValueError:
+        return NEW_WINDOW_WAIT_S
+    return max(0.0, ms / 1000.0)
+
+
+def _poll_new_windows(before: list[dict] | None) -> tuple[list[dict], list[dict] | None]:
+    """Snapshot, then poll until a new top-level window shows up or the wait elapses."""
+    timeout = new_window_wait_s()
+    latest = _snapshot_windows()
+    found = diff_new_windows(before, latest) if before is not None and latest is not None else []
+    waited = 0.0
+    while not found and waited < timeout:
+        step = min(NEW_WINDOW_POLL_S, timeout - waited)
+        time.sleep(step)
+        waited += NEW_WINDOW_POLL_S
+        latest = _snapshot_windows()
+        if before is None or latest is None:
+            break
+        found = diff_new_windows(before, latest)
+    return found, latest
+
+
 def _attach_new_windows(out: dict, before: list[dict] | None) -> None:
-    after = _snapshot_windows()
-    if before is not None and after is not None:
-        out["new_windows"] = diff_new_windows(before, after)
-    else:
-        out["new_windows"] = []
+    found, _latest = _poll_new_windows(before)
+    out["new_windows"] = found
     try:
         from .windows import foreground_brief
 
@@ -1584,11 +1690,13 @@ def _note_ime(out: dict, frame: dict, steps: list[dict], ime_mode: str | None) -
         return
     out["ime"] = {k: info.get(k) for k in ("hkl_hex", "lang_id", "ime_open", "ime_active", "thread_id")}
     keyboard = any(s.get("via") in ("type", "key") for s in steps)
-    if info.get("ime_active") and keyboard:
+    # ime=off handles the layout itself. Warning ime_active after that is a false alarm.
+    if info.get("ime_active") and keyboard and ime_mode != "off":
         out["warnings"] = (out.get("warnings") or []) + [
             f"ime_active: target thread layout {info.get('hkl_hex')} (lang {info.get('lang_id')}, "
             f"ime_open={info.get('ime_open')}). An IME can swallow keys while each step still reports "
-            'tapped=true. Pass ime="off" to switch that window to English for this act and restore it after.'
+            'tapped=true. Pass ime="off" to switch that window to an installed Latin layout for this act '
+            "and restore it after."
         ]
     if ime_mode == "off" and out.get("dry_run"):
         out["warnings"] = (out.get("warnings") or []) + [
@@ -1618,6 +1726,36 @@ def _suspend_ime_for_act(out: dict, frame: dict, steps: list[dict], ime_mode: st
         out["reason"] = "ime_failed"
         out["error"] = str(e)
         return out
+    state = _ime_restore.state or {}
+    switched = bool(state.get("layout_switched"))
+    out["ime_layout_switched"] = switched
+    if state.get("closed_only"):
+        out["warnings"] = (out.get("warnings") or []) + [
+            "ime=off closed the IME only; no English or Latin keyboard layout is installed, "
+            "so none was loaded"
+        ]
+    if switched:
+        from .ime import probe_ime
+
+        after = probe_ime(int(hwnd))
+        want = int(state.get("english_hkl") or 0)
+        got = int(after.get("hkl") or 0) if after.get("ok") else 0
+        if after.get("ok") and (after.get("ime_active") or (want and got != want)):
+            out["ok"] = False
+            out["ime_verified"] = False
+            out["reason"] = "ime_failed"
+            out["error"] = (
+                f"ime=off did not switch hwnd {hwnd} "
+                f"(still {after.get('hkl_hex')}, ime_open={after.get('ime_open')})"
+            )
+            return out
+        out["ime_verified"] = True if after.get("ok") else None
+        if after.get("ok"):
+            out["ime"] = {
+                k: after.get(k) for k in ("hkl_hex", "lang_id", "ime_open", "ime_active", "thread_id")
+            }
+    else:
+        out["ime_verified"] = False if state.get("closed_only") else None
     return None
 
 
@@ -1650,10 +1788,10 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
             "hint": 'omit ime, or pass ime="off" to switch the target window to English for this act',
         }
     if not dry_run and not getattr(_live_lock_state, "held", False):
-        before = _snapshot_windows()
         with LIVE_ACT_LOCK:
             _live_lock_state.held = True
             _ime_restore.state = None
+            before = _snapshot_windows()
             out = None
             try:
                 out = run_chain(
@@ -2074,7 +2212,8 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                 time.sleep(gap)
         return out
     from .input import (
-        clear_field_for_replace, click_xy, drag_path, enter_text, hover_xy, key_down, key_up, scroll_xy, tap_key,
+        clear_field_for_replace, click_xy, discard_paste, drag_path, enter_text, finish_paste, hover_xy,
+        key_down, key_up, prepare_paste, read_focused_value, scroll_xy, tap_key, typed_matches,
     )
     held = False
     clicked = False
@@ -2127,6 +2266,21 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                     scroll_xy(step["notches"])
                 step["scrolled"] = True
             elif via == "type":
+                input_via = step.get("input_via") or "paste"
+                staged = None
+                # Stage the clipboard before replace clears the field. A failed
+                # set must not wipe what the user already typed.
+                if input_via != "keys":
+                    try:
+                        staged = prepare_paste(step["text"])
+                    except Exception as e:
+                        staged = {"ok": False, "reason": "clipboard_failed", "error": str(e)}
+                    if not staged.get("ok"):
+                        step["typed"] = False
+                        out["ok"] = False
+                        out["reason"] = staged.get("reason") or "clipboard_failed"
+                        out["error"] = staged.get("error") or "clipboard_set failed"
+                        return out
                 if step.get("replace"):
                     try:
                         cleared = clear_field_for_replace()
@@ -2138,6 +2292,8 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                         if k in cleared
                     }
                     if not cleared.get("ok"):
+                        if staged is not None:
+                            discard_paste(staged)
                         out["ok"] = False
                         out["reason"] = cleared.get("reason") or "replace_failed"
                         out["error"] = cleared.get("error") or "replace could not clear the field before typing"
@@ -2147,7 +2303,10 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                             "replace could not read the field back to confirm it was empty before typing"
                         ]
                 try:
-                    typed = enter_text(step["text"], via=step.get("input_via") or "paste")
+                    if input_via == "keys":
+                        typed = enter_text(step["text"], via="keys")
+                    else:
+                        typed = finish_paste(staged)
                 except Exception as e:
                     typed = {"ok": False, "reason": "clipboard_failed", "error": str(e)}
                 if isinstance(typed, dict) and typed.get("ok") is False:
@@ -2157,7 +2316,7 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                     out["error"] = typed.get("error") or "text input failed"
                     return out
                 step["typed"] = True
-                step["input_via"] = step.get("input_via") or "paste"
+                step["input_via"] = input_via
                 if isinstance(typed, dict):
                     if "restored" in typed:
                         step["clipboard_restored"] = bool(typed.get("restored"))
@@ -2167,6 +2326,9 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                     ):
                         if typed.get(key):
                             out["warnings"] = (out.get("warnings") or []) + [f"{label}: {typed[key]}"]
+                target_hwnd = int((frame or {}).get("hwnd") or 0) or int(clicked_window or 0)
+                if not _note_typed_readback(out, step, step["text"], target_hwnd):
+                    return out
             elif via == "key":
                 tap_key(step["key"])
                 step["tapped"] = True

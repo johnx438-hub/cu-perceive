@@ -6,6 +6,9 @@ Soft-miss (no preferred pattern on a real element): one same-point reprobe, then
 """
 from __future__ import annotations
 
+import os
+import threading
+import time
 from typing import Any
 
 # Preference order (S2 contract): Invoke -> Toggle -> ExpandCollapse Expand -> Select
@@ -384,6 +387,22 @@ def public_element_info(
 
 UIA_MAX_NODES = 200
 UIA_MAX_DEPTH = 16
+# One real tree walk hung for over 3 minutes. Stop and return what we have.
+UIA_WALK_TIMEOUT_S = 20.0
+
+
+def uia_walk_timeout_s() -> float | None:
+    """Seconds for one UIA tree walk. None waits with no limit (env 0 / off)."""
+    raw = os.environ.get("CU_PERCEIVE_UIA_WALK_TIMEOUT", "").strip().lower()
+    if raw in ("0", "off", "none", "inf"):
+        return None
+    if not raw:
+        return UIA_WALK_TIMEOUT_S
+    try:
+        val = float(raw)
+    except ValueError:
+        return UIA_WALK_TIMEOUT_S
+    return val if val > 0 else None
 UIA_VALUE_MAX = 120
 # Name/value nodes that are not already preferred (Text, DataItem, ...).
 # Kept so a text-only reader can see labels, message-box bodies, and grid cells,
@@ -559,11 +578,16 @@ def should_keep_uia_node(
 
 
 def _runtime_id(control) -> tuple | None:
+    """Runtime id, including an empty tuple. None when it cannot be read.
+
+    An empty tuple is a real result on some machines (hwnd-less nodes). It must
+    not be treated as "unknown", or every such node looks occluded.
+    """
     try:
         rid = control.GetRuntimeId()
     except Exception:
         return None
-    if not rid:
+    if rid is None:
         return None
     try:
         return tuple(rid)
@@ -571,11 +595,39 @@ def _runtime_id(control) -> tuple | None:
         return None
 
 
+def _controls_are_same(a, b) -> bool | None:
+    """``uiautomation.ControlsAreSame``, or None when it cannot be used.
+
+    Test fakes have no ``Element``. Real controls do, and ControlsAreSame is
+    what distinguishes them when GetRuntimeId() is ``()``.
+    """
+    if a is None or b is None:
+        return None
+    if not hasattr(a, "Element") or not hasattr(b, "Element"):
+        return None
+    try:
+        import uiautomation as auto
+
+        fn = getattr(auto, "ControlsAreSame", None)
+        if fn is None:
+            return None
+        return bool(fn(a, b))
+    except Exception:
+        return None
+
+
 def _same_uia(a, b) -> bool:
     if a is b:
         return True
+    same = _controls_are_same(a, b)
+    if same is not None:
+        return same
     ida, idb = _runtime_id(a), _runtime_id(b)
-    return bool(ida and idb and ida == idb)
+    if ida is None or idb is None:
+        return False
+    # () == () matches ControlsAreSame. Dropping that equality hid every
+    # hwnd-less toolbar, menu, status bar, grid cell and lookup row.
+    return ida == idb
 
 
 def _uia_is_descendant(ancestor, node, *, limit: int = 32) -> bool:
@@ -619,29 +671,85 @@ def control_center_occluded(control, bbox, *, hit_at) -> bool:
     return True
 
 
+# UIA_ValueIsReadOnlyPropertyId. DataGridView cells often expose this even when
+# the ValuePattern wrapper's IsReadOnly attribute is missing.
+_VALUE_IS_READONLY = 30046
+_STATE_SYSTEM_READONLY = 0x40
+
+
+def _coerce_bool(flag) -> bool | None:
+    if isinstance(flag, bool):
+        return flag
+    if isinstance(flag, int):
+        return bool(flag)
+    if isinstance(flag, str):
+        s = flag.strip().lower()
+        if s in ("true", "1", "yes"):
+            return True
+        if s in ("false", "0", "no"):
+            return False
+    return None
+
+
+def _read_flag(obj, names: tuple[str, ...]) -> bool | None:
+    if obj is None:
+        return None
+    for name in names:
+        try:
+            flag = getattr(obj, name)
+        except Exception:
+            continue
+        if callable(flag):
+            try:
+                flag = flag()
+            except Exception:
+                continue
+        got = _coerce_bool(flag)
+        if got is not None:
+            return got
+    return None
+
+
 def read_control_value(control) -> tuple[str | None, bool | None]:
-    """(ValuePattern.Value truncated, IsReadOnly or None). Never raises."""
+    """(ValuePattern.Value truncated, IsReadOnly or None). Never raises.
+
+    Read-only grid cells often have no ``IsReadOnly`` attribute on the pattern
+    object. This also checks the ValueIsReadOnly property and the legacy
+    accessible state bit.
+    """
+    auto = None
+    pat = None
     try:
         auto = _auto()
         pat = control.GetPattern(auto.PatternId.ValuePattern)
     except Exception:
-        return None, None
-    if pat is None:
-        return None, None
+        pat = None
     value = None
-    readonly = None
-    try:
-        raw = pat.Value
-        if raw is not None:
-            value = truncate_uia_value(raw)
-    except Exception:
-        value = None
-    try:
-        flag = getattr(pat, "IsReadOnly", None)
-        if flag is not None:
-            readonly = bool(flag)
-    except Exception:
-        readonly = None
+    if pat is not None:
+        try:
+            raw = pat.Value
+            if raw is not None:
+                value = truncate_uia_value(raw)
+        except Exception:
+            value = None
+    readonly = _read_flag(pat, ("IsReadOnly", "CurrentIsReadOnly"))
+    if readonly is None and auto is not None:
+        try:
+            pid = getattr(getattr(auto, "PropertyId", None), "ValueIsReadOnlyProperty", _VALUE_IS_READONLY)
+            readonly = _coerce_bool(control.GetPropertyValue(pid))
+        except Exception:
+            readonly = None
+    if readonly is None and auto is not None:
+        try:
+            leg_id = getattr(auto.PatternId, "LegacyIAccessiblePattern", None)
+            leg = control.GetPattern(leg_id) if leg_id is not None else None
+            raw_state = getattr(leg, "State", None) if leg is not None else None
+            if callable(raw_state):
+                raw_state = raw_state()
+            if isinstance(raw_state, int) and not isinstance(raw_state, bool):
+                readonly = bool(raw_state & _STATE_SYSTEM_READONLY)
+        except Exception:
+            pass
     return value, readonly
 
 
@@ -679,6 +787,7 @@ def collect_uia_nodes(
     max_nodes: int = UIA_MAX_NODES,
     max_depth: int = UIA_MAX_DEPTH,
     skip_empty_name: bool = False,
+    timeout_s: float | None = None,
 ) -> dict[str, Any]:
     """Walk UIA tree under stamp hwnd; return compact nodes with norm bboxes.
 
@@ -723,6 +832,11 @@ def collect_uia_nodes(
     truncated = False
     occluded_n = 0
     content_kept = 0
+    timed_out = False
+    if timeout_s is None:
+        timeout_s = uia_walk_timeout_s()
+    deadline = None if timeout_s is None else time.monotonic() + float(timeout_s)
+    state_lock = threading.Lock()
 
     def hit_at(x: int, y: int):
         try:
@@ -731,8 +845,11 @@ def collect_uia_nodes(
             return None
 
     def walk(ctrl, depth: int) -> None:
-        nonlocal truncated, visited, occluded_n, content_kept
-        if truncated:
+        nonlocal truncated, visited, occluded_n, content_kept, timed_out
+        if truncated or timed_out:
+            return
+        if deadline is not None and time.monotonic() >= deadline:
+            timed_out = True
             return
         if depth > int(max_depth):
             return
@@ -799,12 +916,16 @@ def collect_uia_nodes(
                         node["preferred_action"] = preferred
                     if value is not None:
                         node["value"] = value
-                    if readonly:
-                        node["readonly"] = True
-                    nodes.append(node)
+                    if isinstance(readonly, bool) and (
+                        readonly or value is not None or content_only or "edit" in ctype.lower()
+                    ):
+                        node["readonly"] = readonly
+                    with state_lock:
+                        nodes.append(node)
+                        kept_n = len(nodes)
                     if content_only:
                         content_kept += 1
-                    if len(nodes) >= int(max_nodes):
+                    if kept_n >= int(max_nodes):
                         truncated = True
                         return
         except Exception:
@@ -818,22 +939,44 @@ def collect_uia_nodes(
                 break
             walk(ch, depth + 1)
 
-    try:
-        walk(root, 0)
-    except Exception as e:
+    walk_error: list[BaseException] = []
+
+    def _run_walk() -> None:
+        try:
+            walk(root, 0)
+        except Exception as e:
+            walk_error.append(e)
+
+    if timeout_s is None:
+        _run_walk()
+    else:
+        worker = threading.Thread(target=_run_walk, name="cu-perceive-uia-walk", daemon=True)
+        worker.start()
+        worker.join(float(timeout_s))
+        if worker.is_alive():
+            timed_out = True
+    if walk_error and not timed_out:
         return {
             "ok": False,
-            "error": f"UIA tree walk failed: {e}",
+            "error": f"UIA tree walk failed: {walk_error[0]}",
             "uia_nodes": [],
             "caps": {"max_nodes": int(max_nodes), "max_depth": int(max_depth)},
         }
 
-    return {
+    with state_lock:
+        snapshot = list(nodes)
+    warnings: list[str] = []
+    if timed_out:
+        warnings.append(
+            f"UIA tree walk timed out after {float(timeout_s or 0):.0f}s; "
+            f"returning {len(snapshot)} partial nodes"
+        )
+    result = {
         "ok": True,
-        "uia_nodes": nodes,
-        "uia_count": len(nodes),
+        "uia_nodes": snapshot,
+        "uia_count": len(snapshot),
         "uia_visited": visited,
-        "uia_truncated": truncated,
+        "uia_truncated": truncated or timed_out,
         "uia_occluded": occluded_n,
         "caps": {
             "max_nodes": int(max_nodes),
@@ -843,6 +986,10 @@ def collect_uia_nodes(
             "content_max": UIA_CONTENT_MAX,
         },
     }
+    if timed_out:
+        result["uia_timeout"] = True
+        result["warnings"] = warnings
+    return result
 
 
 # --- E4: resolve UIA name/id -> map norm (still click via norm + method) ---

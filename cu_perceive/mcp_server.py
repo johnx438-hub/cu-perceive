@@ -184,8 +184,8 @@ def _compact_rows(payload: dict) -> None:
             }
             if n.get("value") is not None:
                 row["value"] = n.get("value")
-            if n.get("readonly"):
-                row["readonly"] = True
+            if isinstance(n.get("readonly"), bool):
+                row["readonly"] = n["readonly"]
             rows.append(row)
         payload["uia_nodes"] = rows
     payload["compact"] = True
@@ -313,7 +313,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         ocr/uia/yolo are optional extras; if missing the reply has ok=false and the exact pip command in "install".
         ocr/yolo run in a worker process with a timeout (CU_PERCEIVE_DETECT_TIMEOUT, default 30 s): a hung worker is
         restarted and the stamp comes back without detections plus a warning. Unknown arguments are refused (reason=unknown_args).
-        compact=true: items as {id, text, kind, center_norm}; uia_nodes keep name, control_type, center_norm, and value (readonly when set). Text/DataItem/Edit content stays. Occluded nodes are omitted (uia_occluded). center_norm goes straight into act norm.
+        compact=true: items as {id, text, kind, center_norm}; uia_nodes keep name, control_type, center_norm, value, and readonly. Text/DataItem/Edit content stays. Occluded nodes are omitted (uia_occluded); an empty runtime id is not occlusion. A walk that times out returns partial nodes and uia_timeout. center_norm goes straight into act norm.
         E2 light verify: roi="L,T,W,H" or roi_norm="CX,CY[,HALF]" (mutually exclusive) crops after full grab; map 0-1000 is ROI-local.
         out_dir optional: Windows path or /mnt/c/... ; response also has map_wsl / png_wsl (lowercase drive)."""
         hwnd_n = _nz_int(hwnd)
@@ -388,6 +388,8 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
                 payload["uia_truncated"] = out["uia_truncated"]
             if "uia_occluded" in out:
                 payload["uia_occluded"] = out["uia_occluded"]
+            if out.get("uia_timeout"):
+                payload["uia_timeout"] = True
             payload["ok"] = out.get("ok", True)
             if out.get("error"):
                 payload["error"] = out["error"]
@@ -448,10 +450,12 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         scroll counts are wheel notches (one notch ~3 lines), not pixels; more than 50 is capped at 50 with scroll_clamped=true and a warning.
         ids: comma string / int / list; needs prior ocr/yolo perceive.
         text=paste+restore by default (via="paste"|"keys"; keys = SendInput unicode, for a grid cell that ignores Ctrl+V). key like ctrl+c (comma-separated ok). Unknown key -> ok=false, reason=unknown_key, valid_keys.
-        Clipboard errors return ok=false reason=clipboard_failed (the server stays up). Previous clipboard text is restored best-effort.
-        ime="off" switches the target window to English for this act and restores it. An active IME is reported as ime_active in warnings.
+        Clipboard errors return ok=false reason=clipboard_failed (the server stays up). Previous clipboard text is restored; an empty clipboard is emptied again. Paste is staged before replace clears the field.
+        After typing, typed_verified is true/false/null from a read-back. A mismatch is reason=typed_mismatch (never ok=true).
+        ime="off" closes the target IME and switches that window to an already-installed Latin layout (never loads a new one), then verifies and restores. A handled ime=off does not also warn ime_active.
+        Typing also requires keyboard focus inside the target window (reason=focus_outside when it is not).
         Concurrent go=true acts run one at a time. A dry run reports foreground_click_count=0; the plan is planned_foreground_click_count.
-        go=true adds new_windows [{hwnd, title, class}] for top-level windows that appeared, and after {foreground_hwnd, title, class}.
+        go=true adds new_windows [{hwnd, title, class}] for top-level windows that appeared (polled ~600ms, CU_PERCEIVE_NEW_WINDOW_WAIT_MS), and after {foreground_hwnd, title, class}.
         Keys: a-z, 0-9, f1-f24, num0-num9, alt, backquote, backslash, backspace, bracketleft,
               bracketright, capslock, comma, ctrl, delete, down, end, enter, equals, esc, home, insert,
               left, menu, minus, numlock, pagedown, pageup, pause, period, printscreen, quote, right,
@@ -459,8 +463,8 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
           (case-insensitive; page_down / PgDn / Return / Escape / del also work).
         ids+text in ONE call: ids are real clicks first, then text - NOT a silent focus flag.
         Order is click(s) -> text -> key. replace=true clears the focused edit before the text
-        (ValuePattern.SetValue, EM_SETSEL on a WinForms Edit, or Home+Shift+End+Delete — not Ctrl+A,
-        which a classic TextBox ignores) and checks the field is empty before typing.
+        (End+Shift+Home+Delete for an edit or masked edit — SetValue("") does not clear a
+        WinForms MaskedTextBox — else ValuePattern or EM_SETSEL; not Ctrl+A) and checks the field is empty before typing.
         go=true on a window stamp: each click / drag start+end / scroll point must be on the stamp
         window (or a window it owns) and each text/key needs it in the foreground, even after a
         click; otherwise ok=false (pointer_refused_step + point_window, or keyboard_refused_step).

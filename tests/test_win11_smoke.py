@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
 import sys
 import threading
 import time
@@ -10,12 +9,19 @@ import unittest
 from unittest import mock
 
 from cu_perceive.act import diff_new_windows, normalize_input_via, parse_steps, run_chain
-from cu_perceive.ime import layout_ime_active, normalize_ime, probe_ime, restore_ime, suspend_ime
+from cu_perceive.ime import (
+    layout_ime_active, normalize_ime, pick_installed_latin, probe_ime, restore_ime, suspend_ime,
+)
 from cu_perceive.input import (
     ClipboardError,
+    _clipboard_worker,
+    _shutdown_clipboard_worker,
+    _worker_failure,
     clear_field_for_replace,
+    clipboard_rpc,
     clipboard_set_inprocess,
     paste_text,
+    typed_matches,
     unicode_clipboard_bytes,
 )
 
@@ -109,10 +115,36 @@ class TestClipboard(unittest.TestCase):
         self.assertTrue(out["restored"])
         self.assertEqual(seen, [("get", None), ("set", "4"), ("set", "keep me")])
 
+    def test_empty_clipboard_is_emptied_again(self):
+        seen = []
+
+        def rpc(op, text=None):
+            seen.append((op, text))
+            if op == "get":
+                return {"ok": True, "text": None}
+            return {"ok": True}
+
+        with mock.patch("cu_perceive.input.clipboard_rpc", side_effect=rpc), \
+                mock.patch("cu_perceive.input._ctrl_v"):
+            out = paste_text("secret")
+        self.assertTrue(out["ok"], out)
+        self.assertTrue(out["restored"])
+        self.assertEqual(seen, [("get", None), ("set", "secret"), ("empty", None)])
+
     def test_helper_crash_returns_ok_false(self):
-        proc = subprocess.CompletedProcess(args=["helper"], returncode=0xC0000374, stdout=b"", stderr=b"heap")
-        with mock.patch("subprocess.run", return_value=proc), \
-                mock.patch("cu_perceive.input._ctrl_v") as ctrl:
+        failed = _worker_failure(0xC0000374, b"", b"heap")
+        self.assertFalse(failed["ok"])
+        self.assertEqual(failed["reason"], "clipboard_failed")
+        self.assertIn("exited", failed["error"])
+        self.assertIn("heap", failed["error"])
+        proc = mock.Mock()
+        proc.poll.side_effect = [None, 0xC0000374]
+        proc.stdin = mock.Mock()
+        proc.stdout = mock.Mock()
+        proc.stdout.readline.return_value = b""
+        _clipboard_worker["proc"] = proc
+        self.addCleanup(_shutdown_clipboard_worker)
+        with mock.patch("cu_perceive.input._ctrl_v") as ctrl:
             out = paste_text("4", restore=False)
         self.assertFalse(out["ok"])
         self.assertEqual(out["reason"], "clipboard_failed")
@@ -120,16 +152,35 @@ class TestClipboard(unittest.TestCase):
         ctrl.assert_not_called()
 
     def test_helper_json_error_is_clipboard_failed(self):
-        proc = subprocess.CompletedProcess(
-            args=["helper"], returncode=1,
-            stdout=json.dumps({"ok": False, "reason": "clipboard_failed", "error": "OpenClipboard"}).encode(),
-            stderr=b"",
+        proc = mock.Mock()
+        proc.poll.return_value = None
+        proc.stdin = mock.Mock()
+        proc.stdout = mock.Mock()
+        proc.stdout.readline.return_value = (
+            json.dumps({"ok": False, "reason": "clipboard_failed", "error": "OpenClipboard"}).encode() + b"\n"
         )
-        with mock.patch("subprocess.run", return_value=proc):
+        _clipboard_worker["proc"] = proc
+        self.addCleanup(_shutdown_clipboard_worker)
+        with mock.patch("cu_perceive.input._start_clipboard_worker", return_value=proc):
             out = paste_text("B2003", restore=False)
         self.assertFalse(out["ok"])
         self.assertEqual(out["reason"], "clipboard_failed")
         self.assertIn("OpenClipboard", out["error"])
+
+    def test_persistent_worker_is_reused(self):
+        proc = mock.Mock()
+        proc.poll.return_value = None
+        proc.stdin = mock.Mock()
+        proc.stdout = mock.Mock()
+        proc.stdout.readline.side_effect = [b'{"ok": true, "text": null}\n', b'{"ok": true}\n']
+        starts = []
+        _clipboard_worker["proc"] = None
+        self.addCleanup(_shutdown_clipboard_worker)
+        with mock.patch("cu_perceive.input._start_clipboard_worker", side_effect=lambda: starts.append(1) or proc):
+            self.assertTrue(clipboard_rpc("get")["ok"])
+            self.assertTrue(clipboard_rpc("set", "4")["ok"])
+        self.assertEqual(starts, [1])
+        self.assertEqual(proc.stdin.write.call_count, 2)
 
 
 class TestIme(unittest.TestCase):
@@ -158,17 +209,21 @@ class TestIme(unittest.TestCase):
         user32.GetKeyboardLayout.assert_called_with(9)
         imm.ImmReleaseContext.assert_called_with(42, 1)
 
-    def test_off_switches_that_window_and_restores(self):
+    def test_off_uses_installed_english_and_does_not_load_one(self):
+        self.assertEqual(pick_installed_latin([0x08040804, 0x08090809]), 0x08090809)
+        self.assertEqual(pick_installed_latin([0x08040804, 0x04090409, 0x08090809]), 0x04090409)
+        self.assertIsNone(pick_installed_latin([0x08040804]))
         user32 = mock.Mock()
         user32.GetWindowThreadProcessId.return_value = 9
         user32.GetKeyboardLayout.return_value = 0x08040804
-        user32.LoadKeyboardLayoutW.return_value = 0x04090409
         imm = mock.Mock()
         imm.ImmGetContext.return_value = 5
         imm.ImmGetOpenStatus.return_value = 1
-        state = suspend_ime(77, user32=user32, imm32=imm)
+        state = suspend_ime(77, user32=user32, imm32=imm, layouts=[0x08040804, 0x08090809])
+        user32.LoadKeyboardLayoutW.assert_not_called()
         hwnd, msg, _w, hkl = user32.SendMessageW.call_args[0]
-        self.assertEqual((hwnd, msg, hkl), (77, 0x0050, 0x04090409))
+        self.assertEqual((hwnd, msg, hkl), (77, 0x0050, 0x08090809))
+        self.assertTrue(state["layout_switched"])
         imm.ImmSetOpenStatus.assert_called_with(5, False)
         user32.SendMessageW.reset_mock()
         imm.ImmSetOpenStatus.reset_mock()
@@ -177,6 +232,20 @@ class TestIme(unittest.TestCase):
         self.assertTrue(rest["ok"], rest)
         self.assertEqual(user32.SendMessageW.call_args[0][3], 0x08040804)
         imm.ImmSetOpenStatus.assert_called_with(5, True)
+
+    def test_off_closes_ime_when_no_latin_layout_is_installed(self):
+        user32 = mock.Mock()
+        user32.GetWindowThreadProcessId.return_value = 9
+        user32.GetKeyboardLayout.return_value = 0x08040804
+        imm = mock.Mock()
+        imm.ImmGetContext.return_value = 5
+        imm.ImmGetOpenStatus.return_value = 1
+        state = suspend_ime(77, user32=user32, imm32=imm, layouts=[0x08040804])
+        user32.SendMessageW.assert_not_called()
+        user32.LoadKeyboardLayoutW.assert_not_called()
+        self.assertTrue(state["closed_only"])
+        self.assertFalse(state["layout_switched"])
+        imm.ImmSetOpenStatus.assert_called_with(5, False)
 
 
 class TestActImeAndVia(unittest.TestCase):
@@ -195,6 +264,7 @@ class TestActImeAndVia(unittest.TestCase):
                 mock.patch("cu_perceive.ime.probe_ime", return_value=info):
             planned = run_chain(_window(), parse_steps(key="a"), dry_run=True, ime="off")
         self.assertTrue(any("ime=off will switch" in w for w in planned["warnings"]))
+        self.assertFalse(any(w.startswith("ime_active:") for w in planned["warnings"]))
 
     def test_ime_off_restores_even_after_the_act(self):
         calls = []
@@ -269,22 +339,64 @@ class TestReplaceClear(unittest.TestCase):
         self.assertEqual(pat.value, "")
         tap.assert_not_called()
 
-    def test_em_setsel_when_setvalue_does_not_stick(self):
+    def test_em_setsel_when_keys_do_not_stick(self):
         pat = _Sticky("WEB-02")
         sent = []
 
         def send(hwnd, msg, wparam, lparam):
             sent.append((hwnd, msg, wparam, lparam))
 
-        out = clear_field_for_replace(
-            pattern=pat, hwnd=5, class_name="Edit", send_message=send,
-            text_length=lambda h: 0, discover=False, allow_keyboard=True,
-        )
+        def length(_h):
+            return 0 if any(row[1] == 0x0303 for row in sent) else 4
+
+        with mock.patch("cu_perceive.input.tap_key"), mock.patch("cu_perceive.input.tap_combo"):
+            out = clear_field_for_replace(
+                pattern=pat, hwnd=5, class_name="Edit", send_message=send,
+                text_length=length, discover=False, allow_keyboard=True,
+            )
         self.assertEqual(out["method"], "em_setsel")
         self.assertEqual(sent[0][1:], (0x00B1, 0, -1))
         self.assertEqual(sent[1][1], 0x0303)
+        self.assertEqual(pat.value, "WEB-02")
 
-    def test_home_shift_end_then_fail_if_still_filled(self):
+    def test_masked_edit_clears_with_keys_not_setvalue(self):
+        pat = _Pattern("2020-01-01")
+        taps = []
+
+        def tap(k):
+            taps.append(k)
+            if k == "delete":
+                pat.value = ""
+
+        with mock.patch("cu_perceive.input.tap_key", side_effect=tap), \
+                mock.patch("cu_perceive.input.tap_combo", side_effect=lambda k: taps.append(k)):
+            out = clear_field_for_replace(
+                pattern=pat, class_name="WindowsForms10.EDIT.app", control_type="EditControl",
+                discover=False, allow_keyboard=True,
+            )
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["method"], "end_shift_home")
+        self.assertEqual(taps, ["end", "shift+home", "delete"])
+        self.assertEqual(pat.value, "")
+
+        sticky = _Pattern("2020-01-01")
+        calls = []
+        real_set = sticky.SetValue
+
+        def lying(v):
+            calls.append(v)
+            real_set(v)
+
+        sticky.SetValue = lying
+        with mock.patch("cu_perceive.input.tap_key"), mock.patch("cu_perceive.input.tap_combo"):
+            failed = clear_field_for_replace(
+                pattern=sticky, class_name="MaskedTextBox", discover=False, allow_keyboard=True,
+            )
+        self.assertFalse(failed["ok"])
+        self.assertEqual(failed["reason"], "replace_failed")
+        self.assertEqual(calls, [])
+
+    def test_end_shift_home_then_fail_if_still_filled(self):
         pat = _Sticky("WEB-02WEB-02")
         taps = []
         with mock.patch("cu_perceive.input.tap_key", side_effect=lambda k: taps.append(k)), \
@@ -296,8 +408,14 @@ class TestReplaceClear(unittest.TestCase):
             )
         self.assertFalse(out["ok"])
         self.assertEqual(out["reason"], "replace_failed")
-        self.assertEqual(taps, ["home", "shift+end", "delete"])
+        self.assertEqual(taps, ["end", "shift+home", "delete"])
         self.assertNotIn("ctrl+a", taps)
+
+    def test_typed_matches_ignores_mask_literals_and_rejects_append(self):
+        self.assertTrue(typed_matches("20261019", "2026-10-19"))
+        self.assertFalse(typed_matches("WEB-02", "WEB-02WEB-02"))
+        self.assertIsNone(typed_matches("B2003", None))
+        self.assertFalse(typed_matches("B2003", "old"))
 
 
 class TestNewWindowsAndLock(unittest.TestCase):
@@ -349,6 +467,114 @@ class TestNewWindowsAndLock(unittest.TestCase):
                 t.join(5)
                 self.assertFalse(t.is_alive())
         self.assertEqual(order, ["down", "up", "down", "up", "down", "up"])
+
+    def test_poll_waits_for_a_dialog_that_appears_late(self):
+        snaps = iter([
+            [{"hwnd": 1, "title": "app", "class": "EzDemo"}],
+            [{"hwnd": 1, "title": "app", "class": "EzDemo"}],
+            [{"hwnd": 1, "title": "app", "class": "EzDemo"},
+             {"hwnd": 9, "title": "保存成功", "class": "#32770"}],
+        ])
+        with mock.patch("cu_perceive.act._snapshot_windows", side_effect=lambda: next(snaps)), \
+                mock.patch("cu_perceive.windows.foreground_brief", return_value=None), \
+                mock.patch("cu_perceive.input.click_xy"), \
+                mock.patch("time.sleep") as slept:
+            out = run_chain(_screen(), parse_steps(norm="1,1"), dry_run=False)
+        self.assertEqual(out["new_windows"], [{"hwnd": 9, "title": "保存成功", "class": "#32770"}])
+        self.assertGreaterEqual(slept.call_count, 1)
+
+    def test_focus_outside_refuses_before_clear_or_type(self):
+        calls = []
+        with mock.patch("cu_perceive.act.check_stamp", return_value={"ok": True}), \
+                mock.patch("cu_perceive.act.stamp_identity_error", return_value=None), \
+                mock.patch("cu_perceive.windows.foreground_matches", return_value=(True, 42)), \
+                mock.patch("cu_perceive.windows.focus_matches", return_value=(False, 99)), \
+                mock.patch("cu_perceive.input.clear_field_for_replace",
+                           side_effect=lambda **k: calls.append("clear")), \
+                mock.patch("cu_perceive.input.prepare_paste",
+                           side_effect=lambda t: calls.append("stage")), \
+                mock.patch("cu_perceive.input.enter_text",
+                           side_effect=lambda *a, **k: calls.append("type")), \
+                mock.patch("time.sleep"):
+            out = run_chain(_window(), parse_steps(text="hello", replace=True), dry_run=False)
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["reason"], "focus_outside")
+        self.assertEqual(out["keyboard_refused_step"], 0)
+        self.assertEqual(calls, [])
+
+    def test_readback_mismatch_is_not_ok(self):
+        with mock.patch("cu_perceive.act.check_stamp", return_value={"ok": True}), \
+                mock.patch("cu_perceive.act.stamp_identity_error", return_value=None), \
+                mock.patch("cu_perceive.windows.foreground_matches", return_value=(True, 42)), \
+                mock.patch("cu_perceive.windows.focus_matches", return_value=(True, 42)), \
+                mock.patch("cu_perceive.input.enter_text", return_value={"ok": True, "via": "keys"}), \
+                mock.patch("cu_perceive.input.read_focused_value", return_value="old"), \
+                mock.patch("cu_perceive.act._snapshot_windows", return_value=[]), \
+                mock.patch("cu_perceive.windows.foreground_brief", return_value=None), \
+                mock.patch("time.sleep"):
+            out = run_chain(_window(), parse_steps(text="B2003", input_via="keys"), dry_run=False)
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["reason"], "typed_mismatch")
+        self.assertIs(out["typed_verified"], False)
+
+    def test_ime_off_does_not_warn_when_the_switch_sticks(self):
+        active = {
+            "ok": True, "hkl": 0x08040804, "hkl_hex": "0x08040804", "lang_id": "0x0804",
+            "ime_open": True, "ime_active": True, "thread_id": 9,
+        }
+        english = {
+            "ok": True, "hkl": 0x08090809, "hkl_hex": "0x08090809", "lang_id": "0x0809",
+            "ime_open": False, "ime_active": False, "thread_id": 9,
+        }
+        probes = iter([active, english])
+
+        def suspend(hwnd, **k):
+            return {
+                "hwnd": int(hwnd), "hkl": 0x08040804, "ime_open": True, "closed": True,
+                "layout_switched": True, "english_hkl": 0x08090809, "closed_only": False,
+            }
+
+        with mock.patch("cu_perceive.act.check_stamp", return_value={"ok": True}), \
+                mock.patch("cu_perceive.act.stamp_identity_error", return_value=None), \
+                mock.patch("cu_perceive.windows.foreground_matches", return_value=(True, 42)), \
+                mock.patch("cu_perceive.windows.focus_matches", return_value=(None, 0)), \
+                mock.patch("cu_perceive.ime.probe_ime", side_effect=lambda *a, **k: next(probes)), \
+                mock.patch("cu_perceive.ime.suspend_ime", side_effect=suspend), \
+                mock.patch("cu_perceive.ime.restore_ime", return_value={"ok": True, "restored": True}), \
+                mock.patch("cu_perceive.input.tap_key", return_value={"ok": True}), \
+                mock.patch("cu_perceive.act._snapshot_windows", return_value=[]), \
+                mock.patch("cu_perceive.windows.foreground_brief", return_value=None), \
+                mock.patch("time.sleep"):
+            out = run_chain(_window(), parse_steps(key="a"), dry_run=False, ime="off")
+        self.assertTrue(out["ok"], out)
+        self.assertTrue(out["ime_verified"])
+        self.assertFalse(any(str(w).startswith("ime_active:") for w in out.get("warnings") or []))
+
+    def test_ime_off_fails_when_the_layout_stays(self):
+        active = {
+            "ok": True, "hkl": 0x08040804, "hkl_hex": "0x08040804", "lang_id": "0x0804",
+            "ime_open": True, "ime_active": True, "thread_id": 9,
+        }
+
+        def suspend(hwnd, **k):
+            return {
+                "hwnd": int(hwnd), "hkl": 0x08040804, "ime_open": True, "closed": True,
+                "layout_switched": True, "english_hkl": 0x04090409, "closed_only": False,
+            }
+
+        with mock.patch("cu_perceive.act.check_stamp", return_value={"ok": True}), \
+                mock.patch("cu_perceive.act.stamp_identity_error", return_value=None), \
+                mock.patch("cu_perceive.ime.probe_ime", return_value=active), \
+                mock.patch("cu_perceive.ime.suspend_ime", side_effect=suspend), \
+                mock.patch("cu_perceive.ime.restore_ime", return_value={"ok": True, "restored": True}), \
+                mock.patch("cu_perceive.input.tap_key") as tap, \
+                mock.patch("cu_perceive.act._snapshot_windows", return_value=[]), \
+                mock.patch("cu_perceive.windows.foreground_brief", return_value=None), \
+                mock.patch("time.sleep"):
+            out = run_chain(_window(), parse_steps(key="a"), dry_run=False, ime="off")
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["reason"], "ime_failed")
+        tap.assert_not_called()
 
 
 if __name__ == "__main__":
