@@ -128,11 +128,20 @@ every json in a large output directory.
   with `scroll_clamped: true` and a warning; repeat the call to go further.
 - MCP `act` takes points as `"x,y"` strings (`"177,752;500,200"` for several)
   or as arrays: `norm=[640,500]`, `xy=[[10,20],[30,40]]`, also for `drag` /
-  `drag_norm`.
+  `drag_norm`. Four numbers (the `norm` box of an OCR item or UIA node,
+  left,top,right,bottom) click the center of that box, with a warning. The
+  mouse button is `button` (`left` / `right` / `middle`). `step_px` only sets
+  drag smoothness; passing it without a drag adds a warning.
+- A stamp older than 120 s adds `stamp_stale: true` and a warning. Pass
+  `max_age_sec` to refuse old stamps instead.
+- MCP `perceive_window(compact=true)` returns items (and `uia_nodes`) as
+  `{id, text, kind, center_norm}` only; `center_norm` goes straight into
+  `act(norm=...)`.
 - MCP tools refuse arguments they don't declare instead of dropping them: the
   call returns an error whose text is JSON with `reason: "unknown_args"`,
   `unknown_args` and `valid_args`, and nothing runs. That includes
-  `steps=[{...}]` (act has only flat fields). `act` takes `dry_run` as an alias:
+  `steps=[{...}]` (act has only flat fields). Keys starting with `_` (such as
+  `_meta`) are dropped silently. `act` takes `dry_run` as an alias:
   `dry_run=true` forces a dry run even with `go=true`, and `dry_run=false` on
   its own doesn't send anything (only `go=true` sends). Both cases add a warning.
 - `--hold-key` (MCP `hold_key`) holds a modifier during the clicks, drags and
