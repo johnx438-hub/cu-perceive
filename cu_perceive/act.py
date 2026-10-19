@@ -488,7 +488,9 @@ def plan_steps(frame: dict, specs: list[dict]) -> list[dict]:
                 step["replace"] = True
             steps.append(step)
         elif kind == "key":
-            step = {"via": "key", "key": spec["key"]}
+            from .keys import check_key_spec
+
+            step = {"via": "key", "key": check_key_spec(spec["key"])}
             if spec.get("replace"):
                 step["replace"] = True
             steps.append(step)
@@ -745,6 +747,26 @@ def enrich_auto_steps(frame: dict, steps: list[dict], *, double: bool = False) -
 
 
 HOLD_KEYS = {"ctrl": "ctrl", "control": "ctrl", "shift": "shift", "alt": "alt"}
+
+
+HOLD_KEY_POINTER_KINDS = ("id", "xy", "norm", "uia_name", "drag", "scroll")
+HOLD_KEY_HINT = (
+    'add the pointer step to the same call, e.g. norm="500,500" scroll="down:3" hold_key="ctrl"; '
+    'for a key chord use key="ctrl+pagedown" instead'
+)
+
+
+def hold_key_scope_error(specs: list[dict], hold_key: str | None) -> str | None:
+    """hold_key is held across clicks, drags and scrolls, so it needs one in the same call."""
+    if hold_key in (None, ""):
+        return None
+    for s in specs or []:
+        if s.get("kind") in ("drag", "scroll") or (s.get("kind") in HOLD_KEY_POINTER_KINDS and not s.get("hover")):
+            return None
+    return (
+        f"hold_key={hold_key} needs a norm/xy/ids click, a drag/drag_norm, or a scroll in the same "
+        "act call (it is held down during those steps); this call has none"
+    )
 
 
 def normalize_hold_key(hold_key: str | None) -> str | None:
@@ -1008,6 +1030,29 @@ def _count_live_click(out: dict) -> None:
     out["foreground_used"] = True
 
 
+def _window_title(hwnd) -> str | None:
+    try:
+        from . import _win32
+
+        return _win32.window_title(int(hwnd))
+    except Exception:
+        return None
+
+
+def _set_refusal(out: dict, reason: str, hint: str, window: int | dict | None = None) -> None:
+    """Machine-readable side of a refusal: reason code, next step, and the window in the way."""
+    out["reason"] = reason
+    out["hint"] = hint
+    if isinstance(window, dict):
+        out["blocking_window"] = {"hwnd": window.get("hwnd"), "title": window.get("title")}
+    elif window:
+        out["blocking_window"] = {"hwnd": int(window), "title": _window_title(window)}
+
+
+HINT_FOCUS = "retry with focus=true (CLI --focus) to bring the stamp window to the front"
+HINT_REPERCEIVE = "re-perceive the window and act on the new stamp"
+
+
 def _identity_abort(out: dict, frame: dict, steps: list[dict], n: int) -> bool:
     """Re-check stamp identity right before live step n. True = aborted (out updated)."""
     err = stamp_identity_error(frame)
@@ -1016,6 +1061,7 @@ def _identity_abort(out: dict, frame: dict, steps: list[dict], n: int) -> bool:
     out["ok"] = False
     out["error"] = f"window identity check before step {n} failed: {err}"
     out["identity_abort_step"] = n
+    _set_refusal(out, "identity_changed", HINT_REPERCEIVE)
     for s in steps:
         s.pop("_uia_control", None)
         s.pop("_uia_action", None)
@@ -1060,11 +1106,13 @@ def _bring_forward(frame: dict, out: dict) -> str | None:
     try:
         force_foreground(hwnd)
     except Exception as e:
+        _set_refusal(out, "focus_failed", "click the stamp window once by hand, then retry")
         return f"--focus could not bring stamp window {hwnd} forward ({e})"
     out["focused_window"] = True
     time.sleep(FOCUS_SETTLE_S)
     err = stamp_identity_error(frame)
     if err:
+        _set_refusal(out, "identity_changed", HINT_REPERCEIVE)
         return f"window identity check after --focus failed: {err}"
     return None
 
@@ -1100,6 +1148,11 @@ def _keyboard_target_error(
     elif clicked_window:
         target, label = int(clicked_window), f"clicked window {clicked_window}"
     else:
+        _set_refusal(
+            out, "no_window_stamp",
+            "add a norm/xy/ids click on the target field first, or perceive the window "
+            "(hwnd/title/exe) and pass that stamp",
+        )
         return (
             "keyboard step without a preceding click needs a window stamp: keys go to the "
             "foreground window and this stamp has no window to check against; add a click on "
@@ -1108,9 +1161,11 @@ def _keyboard_target_error(
     try:
         ok, fg = _foreground_ok(target, settle=settle)
     except Exception as e:
+        _set_refusal(out, "foreground_unreadable", "retry; if it keeps failing, re-perceive")
         return f"could not read the foreground window ({e}); keyboard step refused"
     if ok:
         return None
+    fg_title = _window_title(fg) if fg else None
     if not focus or not window_stamp:
         hint = (
             "add a click on the target field, or pass --focus (MCP focus=true) to bring the "
@@ -1118,16 +1173,35 @@ def _keyboard_target_error(
             if window_stamp
             else "re-run once that window is in front"
         )
-        return f"{label} is not in the foreground (foreground hwnd {fg}), so keys would go to another window; {hint}"
+        _set_refusal(
+            out, "not_foreground",
+            HINT_FOCUS if window_stamp else "bring the clicked window to the front, then retry",
+            {"hwnd": fg, "title": fg_title} if fg else None,
+        )
+        return (
+            f"{label} is not in the foreground (foreground hwnd {fg} {fg_title!r}), so keys would go "
+            f"to another window; {hint}"
+        )
     err = _bring_forward(frame, out)
     if err:
         return err + "; keyboard step refused"
     try:
         ok, fg = _foreground_ok(target, settle=False)
     except Exception as e:
+        _set_refusal(out, "foreground_unreadable", "retry; if it keeps failing, re-perceive")
         return f"could not read the foreground window after --focus ({e}); keyboard step refused"
     if not ok:
-        return f"{label} is still not in the foreground after --focus (foreground hwnd {fg}); keyboard step refused"
+        fg_title = _window_title(fg) if fg else None
+        _set_refusal(
+            out, "not_foreground_after_focus",
+            "Windows kept another window in front; click the stamp window once by hand (or close "
+            f"{fg_title or 'the window in front'!s}), then retry",
+            {"hwnd": fg, "title": fg_title} if fg else None,
+        )
+        return (
+            f"{label} is still not in the foreground after --focus (foreground hwnd {fg} "
+            f"{fg_title!r}); keyboard step refused"
+        )
     return None
 
 
@@ -1198,10 +1272,12 @@ def _point_target_error(frame: dict, step: dict, *, focus: bool, out: dict) -> t
     try:
         err, info, covered = check()
     except Exception as e:
+        _set_refusal(out, "point_unreadable", "retry; if it keeps failing, re-perceive")
         return f"could not check which window is under the target point ({e})", None
     if not covered:
         return None, None
     if not focus:
+        _set_refusal(out, "point_covered", HINT_FOCUS + ", or pick a point that is not covered", info)
         return err + "; bring that window to the front (--focus / MCP focus=true) or re-perceive", info
     ferr = _bring_forward(frame, out)
     if ferr:
@@ -1209,8 +1285,15 @@ def _point_target_error(frame: dict, step: dict, *, focus: bool, out: dict) -> t
     try:
         err2, info2, covered = check()
     except Exception as e:
+        _set_refusal(out, "point_unreadable", "retry; if it keeps failing, re-perceive")
         return f"could not check which window is under the target point after --focus ({e})", None
     if covered:
+        _set_refusal(
+            out, "point_covered_after_focus",
+            f"{(info2 or {}).get('title') or 'the covering window'} stays on top (always-on-top?); "
+            "move or close it, then retry",
+            info2,
+        )
         return err2 + " even after --focus", info2
     return None, None
 
@@ -1287,19 +1370,27 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
     is in the foreground. Otherwise the step is refused. focus: bring the stamp window
     forward instead, re-check identity, then re-check the point or foreground.
     """
+    base = {
+        "ok": False,
+        "dry_run": bool(dry_run),
+        "stamp": (frame or {}).get("stamp"),
+        "hwnd": (frame or {}).get("hwnd"),
+        "coord_space": (frame or {}).get("coord_space"),
+        "origin": (frame or {}).get("origin"),
+        "steps": [],
+    }
+    hold_err = hold_key_scope_error(specs, hold_key)
+    if hold_err:
+        return {**base, "error": hold_err, "reason": "hold_key_needs_pointer_step", "hint": HOLD_KEY_HINT}
     if not specs:
         return {
-            "ok": False,
-            "dry_run": bool(dry_run),
-            "stamp": (frame or {}).get("stamp"),
-            "hwnd": (frame or {}).get("hwnd"),
-            "coord_space": (frame or {}).get("coord_space"),
-            "origin": (frame or {}).get("origin"),
-            "steps": [],
+            **base,
             "error": (
                 "no actionable steps: pass flat fields norm/xy/ids/text/key/drag/drag_norm/scroll "
                 '(e.g. norm="935,69"). Unknown keys like steps=[{...}] are ignored by MCP - not executed.'
             ),
+            "reason": "no_steps",
+            "hint": 'pass e.g. norm="500,500", scroll="down:3", text="hi", or key="enter"',
         }
     method_n = normalize_method(method)
     if method_n in ("post", "uia", "auto"):
@@ -1338,20 +1429,21 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                 "origin": (frame or {}).get("origin"),
                 "steps": [],
             }
+    from .keys import UnknownKeyError, key_names
+
     try:
         steps = plan_steps(frame or {}, specs)
-    except ValueError as e:
+    except UnknownKeyError as e:
         return {
-            "ok": False,
-            "dry_run": bool(dry_run),
+            **base,
             "method": method_n,
-            "stamp": (frame or {}).get("stamp"),
-            "hwnd": (frame or {}).get("hwnd"),
-            "coord_space": (frame or {}).get("coord_space"),
-            "origin": (frame or {}).get("origin"),
-            "steps": [],
             "error": str(e),
+            "reason": "unknown_key",
+            "hint": "use one of valid_keys, e.g. key=\"pagedown\" or key=\"ctrl+end\"",
+            "valid_keys": key_names(),
         }
+    except ValueError as e:
+        return {**base, "method": method_n, "error": str(e)}
     hold = normalize_hold_key(hold_key)
     out = {
         "ok": True,
@@ -1438,6 +1530,7 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
     if stamp_bad and (not dry_run or strict_stamp or wrong_window):
         out["ok"] = False
         out["error"] = stamp_check.get("error") or "stamp check failed; re-perceive"
+        _set_refusal(out, "identity_changed" if wrong_window else "stamp_check_failed", HINT_REPERCEIVE)
         if method_n in ("uia", "auto"):
             for s in steps:
                 s.pop("_uia_control", None)
@@ -1483,6 +1576,7 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
     if implicit_err:
         out["ok"] = False
         out["error"] = implicit_err
+        _set_refusal(out, "implicit_screen_stamp", "pass stamp=<stamp> explicitly, or perceive the window first")
         for s in steps:
             s.pop("_uia_control", None)
             s.pop("_uia_action", None)

@@ -227,7 +227,7 @@ def _capture_pinned(hwnd: int, *, focus: bool, capture: str) -> dict:
     from .capture import DWM_EXPERIMENTAL_WARNING, EXPERIMENTAL_BACKENDS, CaptureError, WindowMinimizedError
     from .windows import (
         RESTORE_SETTLE_S,
-        capture_geometry_problem,
+        classify_client_geometry,
         capture_looks_implausible,
         capture_window_image,
         force_foreground,
@@ -248,6 +248,8 @@ def _capture_pinned(hwnd: int, *, focus: bool, capture: str) -> dict:
                 "Restore it yourself, or re-run with focus=true (CLI --focus) to restore and raise it."
             ),
             "capture": {"backend": None, "attempts": [], "skipped": "minimized"},
+            "reason": "minimized",
+            "hint": "restore the window yourself, or retry with focus=true (CLI --focus)",
         }
     identity = window_identity(hwnd)
     if focus:
@@ -293,12 +295,13 @@ def _capture_pinned(hwnd: int, *, focus: bool, capture: str) -> dict:
         image_size = (int(img_w), int(img_h))
     except Exception:
         image_size = None
-    geom_err, geom_warn = capture_geometry_problem(origin, image_size)
+    geom_reason, geom_err, geom_hint, geom_warn = classify_client_geometry(origin, image_size)
     if geom_err:
-        hint = " (even after --focus restored and raised it)" if focus else "; --focus restores and raises it"
         return {
             "ok": False,
-            "error": f"hwnd={hwnd}: {geom_err}{hint}",
+            "error": f"hwnd={hwnd}: {geom_err}",
+            "reason": geom_reason,
+            "hint": geom_hint,
             "capture": result.meta(),
             "degenerate_client": {**{k: (origin or {}).get(k) for k in ("left", "top", "width", "height")},
                                   "image": list(image_size) if image_size else None},
@@ -352,8 +355,9 @@ def _no_stamp_payload(res: dict, *, hwnd: int, win: dict | None, focus: bool) ->
         out["minimized"] = True
     if res.get("capture"):
         out["capture"] = res["capture"]
-    if res.get("degenerate_client"):
-        out["degenerate_client"] = res["degenerate_client"]
+    for k in ("degenerate_client", "reason", "hint"):
+        if res.get(k):
+            out[k] = res[k]
     return out
 
 

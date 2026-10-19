@@ -277,41 +277,63 @@ MIN_CLIENT_PX = 8
 SMALL_CLIENT_PX = 80
 
 
-def capture_geometry_problem(origin: dict | None, image_size: tuple[int, int] | None = None) -> tuple[str | None, str | None]:
-    """(error, warning) for a pinned capture's client geometry.
+GHOST_HINT = (
+    "move the window back on-screen (restore it from the taskbar, or select it and press "
+    "Win+Shift+Left/Right, or close the dialog that parked it), then perceive again; "
+    "focus=true does not help here"
+)
+TINY_HINT = "restore or resize the window so it has a usable client area, then perceive again"
 
-    error: the window is parked off-screen (left/top <= -10000, e.g. a "ghost" window
-    that is not iconic but sits at -32000), or its client area / image is degenerate
-    (under MIN_CLIENT_PX on a side, e.g. 144x1). Such a frame is useless to plan on.
-    warning: a client area under SMALL_CLIENT_PX on a side; act treats such stamps as
+
+def classify_client_geometry(
+    origin: dict | None, image_size: tuple[int, int] | None = None
+) -> tuple[str | None, str | None, str | None, str | None]:
+    """(reason, error, hint, warning) for a pinned capture's client geometry.
+
+    reason "offscreen": the window is parked off-screen (left/top <= -10000, e.g. a "ghost"
+    window that is not iconic but sits at -32000). Raising it doesn't move it back, so the
+    hint says to move it on-screen instead of retrying with focus.
+    reason "tiny_client": the client area / image is under MIN_CLIENT_PX on a side (144x1).
+    warning only: a client area under SMALL_CLIENT_PX on a side; act treats such stamps as
     minimized stubs and refuses them.
     """
     if not origin:
-        return "window has no client area", None
+        return "tiny_client", "window has no client area", TINY_HINT, None
     try:
         left, top = int(origin.get("left", 0)), int(origin.get("top", 0))
         w, h = int(origin.get("width", 0)), int(origin.get("height", 0))
     except (TypeError, ValueError):
-        return f"window client geometry is unreadable ({origin!r})", None
+        return "tiny_client", f"window client geometry is unreadable ({origin!r})", TINY_HINT, None
     if image_size is not None:
         w, h = min(w, int(image_size[0])), min(h, int(image_size[1]))
     if left <= OFFSCREEN_PARK or top <= OFFSCREEN_PARK:
         return (
+            "offscreen",
             f"window is parked off-screen at ({left},{top}) with a {w}x{h} client area: it is not "
             "minimized but is not on any monitor (a 'ghost' window, often after minimizing it while "
-            "one of its dialogs was open); restore it or move it onto a monitor, then perceive again"
-        ), None
+            f"one of its dialogs was open); {GHOST_HINT}",
+            GHOST_HINT,
+            None,
+        )
     if w < MIN_CLIENT_PX or h < MIN_CLIENT_PX:
         return (
-            f"window client area is only {w}x{h} px, too small to perceive; restore or resize it, "
-            "then perceive again"
-        ), None
+            "tiny_client",
+            f"window client area is only {w}x{h} px, too small to perceive; {TINY_HINT}",
+            TINY_HINT,
+            None,
+        )
     if w < SMALL_CLIENT_PX or h < SMALL_CLIENT_PX:
-        return None, (
+        return None, None, None, (
             f"window client area is only {w}x{h} px; act treats stamps under {SMALL_CLIENT_PX} px "
             "on a side as minimized stubs and will refuse them"
         )
-    return None, None
+    return None, None, None, None
+
+
+def capture_geometry_problem(origin: dict | None, image_size: tuple[int, int] | None = None) -> tuple[str | None, str | None]:
+    """(error, warning) for a pinned capture's client geometry; see classify_client_geometry."""
+    _reason, err, _hint, warn = classify_client_geometry(origin, image_size)
+    return err, warn
 
 
 def desktop_capture_sizes() -> set[tuple[int, int]]:
