@@ -29,6 +29,7 @@ from cu_perceive.browser.tools import (
     browser_session,
     browser_status,
     browser_tabs,
+    bsk_require_go,
     reset_browser_state,
 )
 
@@ -187,41 +188,86 @@ class TestDryRunAndGo(BrowserCase):
         self.assertTrue(warned["ok"], warned)
         self.assertTrue(any("read-only" in note for note in warned["warnings"]))
 
-    def test_click_dry_run_matches_the_go_argv(self):
+    def test_click_runs_by_default_and_dry_run_previews(self):
         obs = self.observe()
-        dry = browser_act(verb="click", session="abcd", ref="@e3", observation_id=obs["observation_id"])
+        oid = obs["observation_id"]
+        preview = browser_act(verb="click", session="abcd", ref="@e3", observation_id=oid, dry_run=True)
+        self.assertTrue(preview["ok"], preview)
+        self.assertTrue(preview["dry_run"])
+        self.assertEqual(preview["ref"], "@e3")
+        self.assertEqual(preview["command"][0], str(self.bsk))
+        self.assertEqual(preview["command"][1:], ["click", "--session", "abcd", "@e3", "--json"])
+        self.assertIn("preview only", preview["warnings"][0])
+        self.assertEqual(len(self.calls()), 1)
+
+        # go is accepted and does not gate. dry_run=true still previews.
+        forced = browser_act(
+            verb="click", session="abcd", ref="@e3", observation_id=oid, go=True, dry_run=True
+        )
+        self.assertTrue(forced["dry_run"])
+        self.assertIn("preview only", forced["warnings"][0])
+        self.assertNotIn("overrides go=true", " ".join(forced.get("warnings") or []))
+        self.assertEqual(len(self.calls()), 1)
+
+        live = browser_act(verb="click", session="abcd", ref="@e3", observation_id=oid)
+        self.assertTrue(live["ok"], live)
+        self.assertFalse(live["dry_run"])
+        self.assertEqual(live["result"], {"tab_id": 1, "x": 1, "y": 2})
+        self.assertEqual(self.calls()[-1], preview["command"][1:])
+
+        again = browser_act(
+            verb="click", session="abcd", ref="e3", observation_id=oid, go=False, dry_run=False
+        )
+        self.assertTrue(again["ok"], again)
+        self.assertFalse(again["dry_run"])
+        self.assertEqual(again["ref"], "@e3")
+        self.assertFalse(any("pass go=true" in note for note in again.get("warnings") or []))
+        self.assertEqual(self.calls()[-1], preview["command"][1:])
+
+    def test_require_go_restores_the_dry_run_gate(self):
+        os.environ["CU_PERCEIVE_BSK_REQUIRE_GO"] = "1"
+        obs = self.observe()
+        oid = obs["observation_id"]
+        dry = browser_act(verb="click", session="abcd", ref="@e3", observation_id=oid)
         self.assertTrue(dry["ok"], dry)
         self.assertTrue(dry["dry_run"])
-        self.assertEqual(dry["ref"], "@e3")
-        self.assertEqual(dry["command"][0], str(self.bsk))
         self.assertEqual(dry["command"][1:], ["click", "--session", "abcd", "@e3", "--json"])
         self.assertEqual(len(self.calls()), 1)
 
-        forced = browser_act(
-            verb="click", session="abcd", ref="@e3", observation_id=obs["observation_id"], go=True, dry_run=True
-        )
-        self.assertTrue(forced["dry_run"])
-        self.assertIn("dry_run=true overrides go=true", forced["warnings"][0])
-        self.assertEqual(len(self.calls()), 1)
-
-        idle = browser_act(
-            verb="click", session="abcd", ref="e3", observation_id=obs["observation_id"], dry_run=False
-        )
+        idle = browser_act(verb="click", session="abcd", ref="@e3", observation_id=oid, dry_run=False)
         self.assertTrue(idle["dry_run"])
         self.assertEqual(idle["ref"], "@e3")
         self.assertIn("pass go=true", idle["warnings"][0])
         self.assertEqual(len(self.calls()), 1)
 
-        live = browser_act(verb="click", session="abcd", ref="@e3", observation_id=obs["observation_id"], go=True)
+        forced = browser_act(
+            verb="click", session="abcd", ref="@e3", observation_id=oid, go=True, dry_run=True
+        )
+        self.assertTrue(forced["dry_run"])
+        self.assertIn("dry_run=true overrides go=true", forced["warnings"][0])
+        self.assertEqual(len(self.calls()), 1)
+
+        live = browser_act(verb="click", session="abcd", ref="@e3", observation_id=oid, go=True)
         self.assertTrue(live["ok"], live)
         self.assertFalse(live["dry_run"])
-        self.assertEqual(live["result"], {"tab_id": 1, "x": 1, "y": 2})
         self.assertEqual(self.calls()[-1], dry["command"][1:])
+
+    def test_require_go_env_values(self):
+        for value in ("", "0", "false", "no", "off", "  ", "2"):
+            os.environ["CU_PERCEIVE_BSK_REQUIRE_GO"] = value
+            self.assertFalse(bsk_require_go(), repr(value))
+        os.environ.pop("CU_PERCEIVE_BSK_REQUIRE_GO", None)
+        self.assertFalse(bsk_require_go())
+        for value in ("1", "true", "YES", " on "):
+            os.environ["CU_PERCEIVE_BSK_REQUIRE_GO"] = value
+            self.assertTrue(bsk_require_go(), repr(value))
 
     def test_aliases_and_other_verbs_plan_the_bsk_argv(self):
         obs = self.observe()
         oid = obs["observation_id"]
-        filled = browser_act(verb="type", session="abcd", ref="@e3", observation_id=oid, value="hello world")
+        filled = browser_act(
+            verb="type", session="abcd", ref="@e3", observation_id=oid, value="hello world", dry_run=True
+        )
         self.assertEqual(filled["verb"], "fill")
         self.assertEqual(
             filled["command"][1:],
@@ -229,22 +275,24 @@ class TestDryRunAndGo(BrowserCase):
         )
         self.assertTrue(any("runs as fill" in note for note in filled["warnings"]))
 
-        pressed = browser_act(verb="key", session="abcd", ref="@e3", observation_id=oid, key="Enter")
+        pressed = browser_act(
+            verb="key", session="abcd", ref="@e3", observation_id=oid, key="Enter", dry_run=True
+        )
         self.assertEqual(pressed["command"][1:], ["press", "--session", "abcd", "--ref", "@e3", "Enter", "--json"])
 
-        wheeled = browser_act(verb="scroll", session="abcd", delta_y=600)
+        wheeled = browser_act(verb="scroll", session="abcd", delta_y=600, dry_run=True)
         self.assertEqual(wheeled["verb"], "wheel")
         self.assertEqual(wheeled["command"][1:], ["wheel", "--session", "abcd", "--delta-x", "0", "--delta-y", "600", "--json"])
 
-        started = browser_session(action="start", browser="chrome")
+        started = browser_session(action="start", browser="chrome", dry_run=True)
         self.assertTrue(started["dry_run"])
         self.assertEqual(started["command"][1:], ["session", "start", "--browser", "chrome", "--json"])
         self.assertTrue(any("Agent Window" in note for note in started["warnings"]))
 
-        borrowed = browser_tabs(action="borrow", session="abcd", tab_id=7)
+        borrowed = browser_tabs(action="borrow", session="abcd", tab_id=7, dry_run=True)
         self.assertTrue(borrowed["dry_run"])
         self.assertEqual(borrowed["command"][1:], ["tab", "borrow", "7", "--session", "abcd", "--json"])
-        self.assertIn("confirm", borrowed["warnings"][0])
+        self.assertTrue(any("confirm" in note for note in borrowed["warnings"]))
         # Planning the borrow did not drop the observe, and did not spawn.
         self.assertEqual(len(self.calls()), 1)
         still = browser_act(verb="click", session="abcd", ref="@e3", observation_id=oid)
@@ -256,7 +304,9 @@ class TestDryRunAndGo(BrowserCase):
         self.assertEqual(opened["result"]["session_id"], "abcd")
 
     def test_selector_click_does_not_need_an_observe(self):
-        out = browser_act(verb="click", session="abcd", selector="#go", button="right", click_count=2)
+        out = browser_act(
+            verb="click", session="abcd", selector="#go", button="right", click_count=2, dry_run=True
+        )
         self.assertTrue(out["dry_run"], out)
         self.assertEqual(
             out["command"][1:],
@@ -264,6 +314,11 @@ class TestDryRunAndGo(BrowserCase):
         )
         self.assertTrue(any("selector" in note for note in out["warnings"]))
         self.assertEqual(self.calls(), [])
+
+        live = browser_act(verb="click", session="abcd", selector="#go", button="right", click_count=2)
+        self.assertTrue(live["ok"], live)
+        self.assertFalse(live["dry_run"])
+        self.assertEqual(self.calls(), [out["command"][1:]])
 
     def test_path_lookup_when_env_is_unset(self):
         os.environ.pop("CU_PERCEIVE_BSK")
@@ -504,6 +559,8 @@ class TestRegistrationAndNotices(unittest.TestCase):
         self.assertIn("perceive_window", skill)
         self.assertIn("browser_act", readme)
         self.assertIn("CU_PERCEIVE_BSK", readme)
+        self.assertIn("CU_PERCEIVE_BSK_REQUIRE_GO", readme)
+        self.assertIn("CU_PERCEIVE_BSK_REQUIRE_GO", skill)
 
 
 if __name__ == "__main__":

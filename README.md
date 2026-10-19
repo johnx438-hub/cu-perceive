@@ -19,7 +19,10 @@ One core, two faces:
   time). `act` re-checks it before planning and before every live step. A
   closed window whose HWND was reused by another process fails closed.
 - OCR, UIA and YOLO are optional extras, off by default.
-- Actions default to dry-run. `--go` / `go=true` only when the user said so.
+- Desktop `act` defaults to dry-run. `--go` / `go=true` only when the user said so.
+- Browser acting verbs run unless `dry_run=true`. `go` is accepted and does not
+  gate them. `CU_PERCEIVE_BSK_REQUIRE_GO=1` dry-runs those calls unless `go=true`
+  (`dry_run=true` still wins). Desktop `act` ignores that switch.
 - A web page inside Chrome or Edge is a browser task. Those tools call the
   external `bsk` CLI. Other apps, and the browser window as a desktop window,
   stay on `windows` / `perceive_window` / `act`.
@@ -228,17 +231,22 @@ page.
 | Tool | What it does | When it runs |
 |---|---|---|
 | `browser_status` | Daemon and connected browsers | Immediately |
-| `browser_session` | `list`, `start`, `stop` | `list` immediately; `start` and `stop` dry-run unless `go=true` |
+| `browser_session` | `list`, `start`, `stop` | `list` immediately; `start` and `stop` run unless `dry_run=true` |
 | `browser_observe` | `observe` or `snapshot`; returns `@eN` refs and an `observation_id` | Immediately |
-| `browser_tabs` | `list`, `create`, `close`, `select`, `borrow`, `return` | `list` immediately; the rest dry-run unless `go=true` |
-| `browser_act` | click, fill, press, navigate, and the other acting verbs | Dry-run unless `go=true` (`dry_run=true` wins) |
+| `browser_tabs` | `list`, `create`, `close`, `select`, `borrow`, `return` | `list` immediately; the rest run unless `dry_run=true` |
+| `browser_act` | click, fill, press, navigate, and the other acting verbs | Runs unless `dry_run=true` |
 
-A dry run returns `command` (the exact `bsk ... --json` argv) and `ref`, and
-does not start `bsk`. `browser_act` refuses a ref that is not from the latest
-`browser_observe` for that session (`reason: "stale_observation"`).
-`browser_tabs action=borrow` can ask the user to confirm in the browser, and
-only after `go=true`. A result whose reason is `input_outcome_unknown` means
-do not retry blindly; observe the page and decide from what it shows.
+`dry_run=true` returns `command` (the exact `bsk ... --json` argv) and `ref`,
+and does not start `bsk`. `go` is accepted on these tools and does not gate
+them, so a caller that passes `go` the way it does for desktop `act` still
+runs. `CU_PERCEIVE_BSK_REQUIRE_GO=1` (also `true`, `yes`, `on`) dry-runs acting
+verbs unless `go=true`, and `dry_run=true` still wins. Desktop `act` keeps its
+own dry-run default and ignores that switch. `browser_act` refuses a ref that
+is not from the latest `browser_observe` for that session
+(`reason: "stale_observation"`). `browser_tabs action=borrow` can ask the user
+to confirm in the browser when the command runs, which is the default. A
+result whose reason is `input_outcome_unknown` means do not retry blindly;
+observe the page and decide from what it shows.
 
 `bsk` runs on Windows with a connected Chromium-family browser. The tests here
 use a fake executable.
@@ -259,6 +267,7 @@ Nothing machine-specific is hard-coded. Defaults and overrides:
 | Capture backend | `auto` | `CU_PERCEIVE_CAPTURE` |
 | `bsk` executable (browser tools) | `bsk` on `PATH` | `CU_PERCEIVE_BSK` |
 | `bsk` subprocess timeout | 120 seconds | `CU_PERCEIVE_BSK_TIMEOUT` |
+| Browser acting verbs | run unless `dry_run=true` (`go` is ignored) | `CU_PERCEIVE_BSK_REQUIRE_GO=1` dry-runs unless `go=true` |
 
 The CLI and the MCP server each resolve the output dir on their own. The CLI
 defaults to `%LOCALAPPDATA%\cu-perceive\shots\perceive` for the user running

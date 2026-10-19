@@ -1,6 +1,13 @@
-"""MCP handlers. Read verbs run immediately; acting verbs dry-run unless ``go``."""
+"""MCP handlers. Read verbs run immediately. Acting verbs run unless ``dry_run=true``.
+
+``go`` is accepted and ignored, so a caller that uses the desktop ``act`` style
+still runs. ``CU_PERCEIVE_BSK_REQUIRE_GO=1`` restores dry-run unless ``go=true``
+(``dry_run=true`` still wins). Desktop ``act`` is a different tool and is unchanged.
+"""
 
 from __future__ import annotations
+
+import os
 
 from . import catalog
 from .backend import command_argv, get_backend, set_backend, timeout_sec
@@ -29,12 +36,26 @@ def _warnings(*groups: list[str] | None) -> list[str]:
     return out
 
 
-def _dry_notes(go: bool, dry_run: bool | None) -> list[str]:
-    if go and dry_run:
-        return ["dry_run=true overrides go=true: this was a dry run, nothing was sent"]
-    if dry_run is False and not go:
-        return ["dry_run=false does not send input; pass go=true to send"]
-    return []
+_REQUIRE_GO_ON = frozenset({"1", "true", "yes", "on"})
+
+
+def bsk_require_go() -> bool:
+    """True when browser acting verbs dry-run unless ``go=true``."""
+    return os.environ.get("CU_PERCEIVE_BSK_REQUIRE_GO", "").strip().lower() in _REQUIRE_GO_ON
+
+
+def _act_send(go: bool, dry_run: bool | None) -> tuple[bool, list[str]]:
+    """(run the command, notes). ``dry_run=true`` always previews. ``go`` gates only under the env switch."""
+    if dry_run:
+        if bsk_require_go() and go:
+            return False, ["dry_run=true overrides go=true: this was a dry run, nothing was sent"]
+        return False, ["dry_run=true: preview only, nothing was sent"]
+    if bsk_require_go():
+        notes = []
+        if dry_run is False and not go:
+            notes.append("dry_run=false does not send input; pass go=true to send")
+        return bool(go), notes
+    return True, []
 
 
 def _with_plan(payload: dict, plan: catalog.Plan, argv: list[str] | None, exe: str | None) -> dict:
@@ -67,10 +88,13 @@ def _execute(plan: catalog.Plan, *, go: bool, dry_run: bool | None) -> dict:
             if plan.selector:
                 refusal["selector"] = plan.selector
             return refusal
-    send = plan.read or (bool(go) and not dry_run)
-    notes = [] if plan.read else _dry_notes(bool(go), dry_run)
-    if plan.read and (go or dry_run is not None):
-        notes.append("this call is read-only and runs immediately; go and dry_run do not change it")
+    if plan.read:
+        send = True
+        notes = []
+        if go or dry_run is not None:
+            notes.append("this call is read-only and runs immediately; go and dry_run do not change it")
+    else:
+        send, notes = _act_send(bool(go), dry_run)
     notes.extend(plan.notes)
     if plan.selector and not plan.ref and not plan.read:
         notes.append(
@@ -159,12 +183,13 @@ def browser_session(
     go: bool = False,
     dry_run: bool | None = None,
 ):
-    """Start, stop, or list browser sessions. list runs immediately; start and stop dry-run unless go=true.
+    """Start, stop, or list browser sessions. list is read-only. start and stop run unless dry_run=true.
 
     action=start opens an Agent Window (browser= when more than one is connected;
     focus=true brings it forward) and returns its session id. action=stop takes that
-    session id, closes the window, and returns borrowed tabs. action=list is read-only.
-    dry_run=true beats go. Unknown arguments are refused (reason=unknown_args).
+    session id, closes the window, and returns borrowed tabs. go is accepted and does
+    not gate the call. CU_PERCEIVE_BSK_REQUIRE_GO=1 dry-runs start/stop unless go=true
+    (dry_run=true still wins). Desktop act is unchanged. Unknown arguments are refused.
     """
     return _guard(
         catalog.plan_session,
@@ -214,13 +239,14 @@ def browser_tabs(
     go: bool = False,
     dry_run: bool | None = None,
 ):
-    """List or change tabs. list runs immediately; create, close, select, borrow, and return dry-run unless go=true.
+    """List or change tabs. list is read-only. create, close, select, borrow, and return run unless dry_run=true.
 
     list takes scope=user|agent|all. create takes url. close, select, borrow, and return
     take tab_id. borrow moves a user tab into the Agent Window and may ask the user to
-    confirm once go=true. A successful create/close/select/borrow/return drops this
-    session's observe refs; call browser_observe again before browser_act.
-    dry_run=true beats go.
+    confirm, and that wait happens when the command runs. go is accepted and does not
+    gate the call. CU_PERCEIVE_BSK_REQUIRE_GO=1 dry-runs the acting actions unless
+    go=true (dry_run=true still wins). A successful create/close/select/borrow/return
+    drops this session's observe refs; call browser_observe again before browser_act.
     """
     return _guard(
         catalog.plan_tabs,
@@ -259,18 +285,19 @@ def browser_act(
     go: bool = False,
     dry_run: bool | None = None,
 ):
-    """Act in a browser session. Dry-run unless go=true; dry_run=true wins and nothing is sent.
+    """Act in a browser session. Runs unless dry_run=true. go is accepted and does not gate the call.
 
     verb: click, hover, wheel, scroll_to, focus, blur, fill, select, press, navigate,
     navigate_back, navigate_forward, reload. Aliases: type=fill, scroll=wheel, key=press,
     back=navigate_back, forward=navigate_forward.
-    A dry run returns command (the exact bsk argv, including --json) and ref, and does
-    not start bsk. go=true runs that argv. A ref must come from the latest browser_observe
-    for this session: pass its observation_id. An older ref is refused with
-    reason=stale_observation and bsk is not started.
+    dry_run=true returns command (the exact bsk argv, including --json) and ref, and does
+    not start bsk. CU_PERCEIVE_BSK_REQUIRE_GO=1 restores dry-run unless go=true, and
+    dry_run=true still wins. A ref must come from the latest browser_observe for this
+    session: pass its observation_id. An older ref is refused with reason=stale_observation
+    and bsk is not started.
     Unknown arguments are refused (reason=unknown_args) and nothing runs. bsk errors keep
     data.reason; input_outcome_unknown means do not retry blindly — observe first.
-    Desktop clicks stay on act. This tool does not drive a desktop window.
+    Desktop clicks stay on act, which still dry-runs unless go=true.
     """
     return _guard(
         catalog.plan_act,

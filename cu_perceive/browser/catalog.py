@@ -1,8 +1,9 @@
 """Verb allowlist and the argv a backend will run.
 
-Read verbs pass through. Act verbs are planned here and executed only when the
-caller passes ``go``. The argv is what ``bsk`` would be given, minus ``--json``
-(the backend appends that). It is also what a future in-process backend accepts.
+Read verbs pass through. Act verbs build the same argv; the tool layer runs it
+unless ``dry_run=true`` (or ``CU_PERCEIVE_BSK_REQUIRE_GO`` is set and ``go`` is
+not). The argv is what ``bsk`` would be given, minus ``--json`` (the backend
+appends that). It is also what a future in-process backend accepts.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ import re
 from dataclasses import dataclass, field
 
 
-# browser_act verbs. Every one of these dry-runs unless go=true.
+# browser_act verbs. The tool layer runs these unless dry_run=true.
 ACT_VERBS = (
     "click",
     "hover",
@@ -39,7 +40,7 @@ ACT_ALIASES = {
 # browser_observe kinds. Both run immediately.
 OBSERVE_KINDS = ("observe", "snapshot")
 
-# action -> "read" (runs now) or "act" (dry-run unless go).
+# action -> "read" (always runs) or "act" (runs unless dry_run=true).
 SESSION_ACTIONS = {"list": "read", "start": "act", "stop": "act"}
 TAB_ACTIONS = {
     "list": "read",
@@ -72,8 +73,7 @@ _WAIT = frozenset({"load", "domcontentloaded", "networkidle", "commit"})
 _SCOPES = frozenset({"user", "agent", "all"})
 
 _BORROW_WARNING = (
-    "tab borrow may ask the user to confirm in the browser; "
-    "go=true runs it and can wait for that answer"
+    "tab borrow may ask the user to confirm in the browser and can wait for that answer"
 )
 
 
