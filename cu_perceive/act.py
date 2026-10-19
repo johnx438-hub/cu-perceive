@@ -1866,6 +1866,33 @@ def _attach_new_windows(out: dict, before: list[dict] | None) -> None:
         out["after"] = fore
 
 
+_IME_CHAR_KEYS = {
+    "space", "comma", "period", "minus", "equals", "slash", "backslash", "semicolon", "quote",
+    "backquote", "bracketleft", "bracketright",
+}
+
+
+def ime_matters(steps: list[dict]) -> bool:
+    """True if an IME could swallow this act's input: typed text or a bare character key.
+
+    Hotkeys (enter, esc, tab, arrows, f1-f24, ctrl/alt/win combos) are virtual keys an IME
+    passes through, so a key-only act of those does not need ime=off.
+    """
+    for st in steps or []:
+        kind = st.get("via") or st.get("kind")
+        if kind == "type":
+            return True
+        if kind != "key":
+            continue
+        parts = [x.strip().lower() for x in str(st.get("key") or "").split("+") if x.strip()]
+        if not parts or any(m in ("ctrl", "alt", "win") for m in parts[:-1]):
+            continue
+        last = parts[-1]
+        if len(last) == 1 or last in _IME_CHAR_KEYS or (last.startswith("num") and last[3:].isdigit()):
+            return True
+    return False
+
+
 def _note_ime(out: dict, frame: dict, steps: list[dict], ime_mode: str | None) -> None:
     """Record the target thread's layout. Warn when an IME would swallow keys."""
     hwnd = (frame or {}).get("hwnd")
@@ -1890,7 +1917,7 @@ def _note_ime(out: dict, frame: dict, steps: list[dict], ime_mode: str | None) -
             'tapped=true. Pass ime="off" to switch that window to an installed Latin layout for this act '
             "and restore it after."
         ]
-    if ime_mode == "off" and out.get("dry_run"):
+    if ime_mode == "off" and out.get("dry_run") and ime_matters(steps):
         out["warnings"] = (out.get("warnings") or []) + [
             "ime=off will switch this window to an English layout and close its IME for the act, then restore both"
         ]
@@ -1899,6 +1926,12 @@ def _note_ime(out: dict, frame: dict, steps: list[dict], ime_mode: str | None) -
 def _suspend_ime_for_act(out: dict, frame: dict, steps: list[dict], ime_mode: str | None) -> dict | None:
     """Switch the stamp window to English. Returns an error dict to return, or None to continue."""
     if ime_mode != "off" or out.get("dry_run"):
+        return None
+    if not ime_matters(steps):
+        # Hotkeys (enter, f9, ctrl+s) are virtual keys; an IME does not swallow them, and some
+        # windows (MessageBox, dialogs) cannot switch layout at all. Nothing to protect: skip.
+        out["ime_skipped"] = "no_text_step"
+        out["notes"] = (out.get("notes") or []) + ["ime=off skipped: this act types no text (keys only)"]
         return None
     hwnd = (frame or {}).get("hwnd")
     if not hwnd:
@@ -2032,7 +2065,7 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
             **base,
             "error": (
                 "no actionable steps: pass flat fields norm/xy/ids/text/key/drag/drag_norm/scroll "
-                '(e.g. norm="935,69"). There is no steps=[{...}] field (MCP refuses it with reason=unknown_args).'
+                '(e.g. norm="935,69"), or on MCP act a steps=[{...}] chain whose steps carry those fields.'
             ),
             "reason": "no_steps",
             "hint": 'pass e.g. norm="500,500", scroll="down:3", text="hi", or key="enter"',

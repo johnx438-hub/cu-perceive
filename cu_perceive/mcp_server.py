@@ -401,6 +401,9 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
                 payload["uia_truncated"] = out["uia_truncated"]
             if "uia_occluded" in out:
                 payload["uia_occluded"] = out["uia_occluded"]
+            if out.get("uia_all_occluded"):
+                payload["uia_all_occluded"] = True
+                payload.setdefault("hint", "every UIA node is covered by another window: perceive_window(..., focus=true); if it is still covered, a topmost window is in the way and must be moved")
             if out.get("uia_timeout"):
                 payload["uia_timeout"] = True
             payload["ok"] = out.get("ok", True)
@@ -453,13 +456,13 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         with no stamp it picks that window's newest stamp, with a stamp it refuses one from another window
         (reason=hwnd_mismatch). Pass stamp or hwnd when several windows are open.
         dry_run=true forces a dry run even with go=true; dry_run=false alone does not send (go=true does).
-        Unknown arguments (steps=[...], x=, action=, ...) are refused with reason=unknown_args and valid_args; nothing runs.
+        Unknown arguments (x=, action=, click=, ...) are refused with reason=unknown_args and valid_args; nothing runs.
         Refusals return ok=false with reason (code), hint (next step) and blocking_window {hwnd, title}.
         ids are OCR item ids. When the stamp has no OCR items (ocr=false) an id is matched against uia_nodes (step id_source="uia"). An id that matches neither is reason=bad_ids with hint, item_ids and uia_ids; a uia_name that does not resolve is reason=uia_not_found.
 
         Plan/run against a stamp. go default false. Prefer norm (map 0-1000) or xy.
 
-        FLAT STRING FIELDS ONLY (not a JSON steps array). Examples:
+        Fields are flat (strings/numbers); for a multi-step chain pass steps=[{...}, ...], each step an object of the same flat fields (see steps below). Examples:
           click:  act(stamp="...", norm="935,69", go=true)
           chain:  act(stamp="...", ids="3", key="ctrl+a", text="hi", go=true)
           keys only: act(stamp="...", text="hi", replace=true, go=true, focus=true)

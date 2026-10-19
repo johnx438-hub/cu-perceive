@@ -101,8 +101,14 @@ def _guard(result: dict, stamp_hwnd: int, title_before: str | None, title_now: C
 def _brief(i: int, step: dict, result: dict) -> dict:
     keep = ("ok", "reason", "error", "hint", "dry_run", "steps", "typed_verified", "typed_note",
             "new_windows", "after", "blocking_window", "foreground_click_count",
-            "planned_foreground_click_count", "warnings", "stamp_ok")
-    return {"index": i, "step": step, **{k: result[k] for k in keep if k in result}}
+            "planned_foreground_click_count", "warnings", "stamp_ok", "ime_skipped")
+    b = {"index": i, "step": step, **{k: result[k] for k in keep if k in result}}
+    age = (result.get("stamp_check") or {}).get("age_sec")
+    if age is not None:
+        b["stamp_age_sec"] = round(float(age), 1)
+    if result.get("stamp_stale"):
+        b["stamp_stale"] = True
+    return b
 
 
 def run_steps(
@@ -159,6 +165,19 @@ def run_steps(
         out["remaining_steps"] = []
     out["completed_count"] = sum(1 for d in done if d.get("ok"))
     out.setdefault("stopped", False)
+    ages = [d["stamp_age_sec"] for d in done if d.get("stamp_age_sec") is not None]
+    if ages:
+        out["stamp_age_sec"] = max(ages)
+    stale = [d["index"] for d in done if d.get("stamp_stale")]
+    if stale:
+        # One summary instead of making the caller read each step; never a refusal
+        # (max_age_sec=N on the call is what refuses, per step).
+        out["stamp_stale"] = True
+        out["stamp_stale_from_step"] = stale[0]
+        out["warnings"] = (out.get("warnings") or []) + [
+            f"stamp went stale during the chain (from steps[{stale[0]}], {max(ages):.0f}s old at the end); "
+            "the chain was not refused. If the window may have changed, re-perceive; max_age_sec=N refuses instead"
+        ]
     if not send:
         out["planned_steps"] = [d.get("steps") for d in done]
     out["foreground_click_count"] = sum(int(d.get("foreground_click_count") or 0) for d in done)
