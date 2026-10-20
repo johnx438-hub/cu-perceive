@@ -71,6 +71,18 @@ def _grab(path: Path | None, hwnd: int | None = None, activate: bool = False):
     return arr, w, h
 
 
+def _conf(row: dict) -> float | None:
+    """OCR / detector confidence 0-1 (None for merged icon boxes that carry none)."""
+    for k in ("confidence", "score", "conf"):
+        v = row.get(k)
+        if v is not None:
+            try:
+                return round(float(v), 3)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 def _to_items(raw: list[dict], w: int, h: int) -> list[dict]:
     items = []
     for i, row in enumerate(raw, start=1):
@@ -86,6 +98,8 @@ def _to_items(raw: list[dict], w: int, h: int) -> list[dict]:
             "box": [x1, y1, x2, y2],
             "center": [(x1 + x2) // 2, (y1 + y2) // 2],
             "norm": [nx1, ny1, nx2, ny2],
+            "bbox_norm": [nx1, ny1, nx2, ny2],
+            "confidence": _conf(row),
         })
     return items
 
@@ -335,6 +349,21 @@ def _capture_pinned(hwnd: int, *, focus: bool, capture: str) -> dict:
                 f"{focus_info.get('focus_attempts')} attempts (foreground={focus_info.get('foreground_hwnd')}); "
                 "captured anyway, but act with focus=true will refuse until it can raise it"
             )
+    try:
+        from .windows import target_integrity_check
+
+        integ = target_integrity_check(hwnd)
+    except Exception:
+        integ = None
+    if integ and integ.get("target_integrity"):
+        extra["target_integrity"] = integ.get("target_integrity")
+        if integ.get("elevated_target"):
+            extra["elevated_target"] = True
+            warnings.append(
+                f"hwnd={hwnd} runs at {integ.get('target_integrity')} integrity, above cu-perceive "
+                f"({integ.get('self_integrity')}): it can be seen but not driven; act go will refuse "
+                "(reason=elevated_target). Restart cu-perceive as administrator to automate it"
+            )
     meta = result.meta()
     if stale_suspect_from_meta(meta):
         extra["stale_suspect"] = True
@@ -473,7 +502,8 @@ def perceive(
         capture_meta = res["capture"]
         warnings.extend(res.get("warnings") or [])
         pin_extra = {k: res[k] for k in ("foreground_ok", "focus_attempts", "foreground_hwnd",
-                                         "stale_suspect", "hwnd_replaced", "suggested_hwnd") if k in res}
+                                         "stale_suspect", "hwnd_replaced", "suggested_hwnd",
+                                         "target_integrity", "elevated_target") if k in res}
         h, w = bgr.shape[:2]
     else:
         bgr, w, h = _grab(src, hwnd=None, activate=False)

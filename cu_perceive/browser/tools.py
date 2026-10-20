@@ -195,10 +195,30 @@ def browser_status():
 
     Page tasks use the browser_* tools, which shell out to the bsk CLI
     (CU_PERCEIVE_BSK, otherwise PATH). Desktop apps stay on windows /
-    perceive_window / act. A missing bsk returns ok=false, reason=missing_dependency,
+    perceive_window / act. Also reports cu_perceive.integrity_level (medium/high): apps
+    running above it (as administrator) cannot be driven. A missing bsk returns ok=false, reason=missing_dependency,
     and an install hint. Does not click.
     """
-    return _guard(catalog.plan_status, catalog.Spec(verb="status"))
+    out = _guard(catalog.plan_status, catalog.Spec(verb="status"))
+    if isinstance(out, dict):
+        out["cu_perceive"] = _self_integrity_brief()
+    return out
+
+
+def _self_integrity_brief() -> dict:
+    """cu-perceive's own integrity level: targets above it (elevated apps) cannot receive input."""
+    try:
+        from ..windows import self_integrity
+
+        info = self_integrity()
+    except Exception as e:
+        return {"integrity_level": None, "elevated": None, "error": str(e)}
+    out = {"integrity_level": info.get("level"), "elevated": info.get("elevated")}
+    if info.get("error"):
+        out["error"] = info["error"]
+    if info.get("level") and not info.get("elevated"):
+        out["note"] = "windows running as administrator cannot be driven (act refuses with reason=elevated_target)"
+    return out
 
 
 def browser_session(

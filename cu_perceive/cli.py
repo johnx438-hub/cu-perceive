@@ -130,6 +130,12 @@ def main(argv: list[str] | None = None) -> int:
         help="E4: click UIA node by name from stamp uia_nodes (repeatable or comma-list); maps to norm, still method=auto|uia|input",
     )
     a.add_argument("--go", action="store_true", help="actually click; default is dry-run")
+    a.add_argument("--new-window-wait-ms", dest="new_window_wait_ms", type=float, default=None,
+                   help="after a click/Enter/Esc/F-key/Alt combo, wait up to this long for a new top-level window "
+                   "(default 1200, env CU_PERCEIVE_NEW_WINDOW_WAIT_MS; 0 = do not wait), then recheck once")
+    a.add_argument("--check-change", dest="check_change", action="store_true",
+                   help="with --go: grab the stamp window before and after and report screen_changed, "
+                   "changed_ratio, changed_bbox_norm, layout_reflow_suspected (pixels only)")
     a.add_argument(
         "--focus",
         action="store_true",
@@ -437,21 +443,32 @@ def main(argv: list[str] | None = None) -> int:
             )
         try:
             frame, path = load_frame(stamp=args.stamp, json_path=args.json, hwnd=args.hwnd)
-            out = run_chain(
-                frame,
-                specs,
-                dry_run=not args.go,
-                double=args.double,
-                gap=args.gap,
-                hold_key=args.hold_key,
-                method=getattr(args, "method", None) or "input",
-                max_age_sec=getattr(args, "max_age", None),
-                strict_stamp=bool(getattr(args, "strict_stamp", False)),
-                stamp_json_path=str(path) if path else None,
-                focus=bool(args.focus),
-                stamp_source=("explicit" if (args.stamp or args.json) else "latest") if path else None,
-                ime=getattr(args, "ime", None),
-            )
+            nw = getattr(args, "new_window_wait_ms", None)
+
+            def _run():
+                return run_chain(
+                    frame,
+                    specs,
+                    dry_run=not args.go,
+                    double=args.double,
+                    gap=args.gap,
+                    hold_key=args.hold_key,
+                    method=getattr(args, "method", None) or "input",
+                    max_age_sec=getattr(args, "max_age", None),
+                    strict_stamp=bool(getattr(args, "strict_stamp", False)),
+                    stamp_json_path=str(path) if path else None,
+                    focus=bool(args.focus),
+                    stamp_source=("explicit" if (args.stamp or args.json) else "latest") if path else None,
+                    ime=getattr(args, "ime", None),
+                    new_window_wait_s=None if nw is None else max(0.0, float(nw)) / 1000.0,
+                )
+
+            if getattr(args, "check_change", False) and args.go:
+                from .change import run_with_change_check
+
+                out = run_with_change_check(int(frame.get("hwnd") or 0) or None, _run)
+            else:
+                out = _run()
         except (MethodError, RuntimeError, FileNotFoundError, OSError, KeyError, ValueError) as e:
             err = {
                 "ok": False,

@@ -282,14 +282,15 @@ class UIParser:
         raw: list[tuple] = []
         for box, score in zip(boxes_xyxy, scores):
             x1, y1, x2, y2 = box
-            raw.append((x1, y1, x2, y2, "icon"))
+            raw.append((x1, y1, x2, y2, "icon", float(score)))
 
         # Sort top-to-bottom, left-to-right for stable IDs across frames
         raw.sort(key=lambda b: (int((b[1] + b[3]) / 2), int((b[0] + b[2]) / 2)))
 
         boxes: list[dict] = []
-        for x1, y1, x2, y2, label in raw:
+        for x1, y1, x2, y2, label, score in raw:
             boxes.append({
+                "confidence": round(score, 3),
                 "bbox": [
                     max(0, min(1000, int(x1 / orig_w * 1000))),
                     max(0, min(1000, int(y1 / orig_h * 1000))),

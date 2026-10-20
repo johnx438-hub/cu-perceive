@@ -134,7 +134,8 @@ class TestCompact(unittest.TestCase):
             res = _mcp_tools()["perceive_window"](image="x.png", compact=True, uia=True, map_inline=False)
         payload = json.loads(res)
         self.assertTrue(payload["compact"])
-        self.assertEqual(payload["items"], [{"id": 1, "text": "OK", "kind": "ocr", "center_norm": [200, 300]}])
+        self.assertEqual(payload["items"], [{"id": 1, "text": "OK", "kind": "ocr", "center_norm": [200, 300],
+                                             "bbox_norm": [100, 200, 300, 400]}])  # PR12: bbox kept
         self.assertEqual(payload["uia_nodes"],
                          [{"id": 1, "name": "File", "control_type": "MenuItem", "center_norm": [50, 25],
                            "value": "XS-0001"}])

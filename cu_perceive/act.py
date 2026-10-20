@@ -1052,6 +1052,47 @@ def stamp_identity_error(frame: dict | None) -> str | None:
     return verify_window_identity(hwnd, ident.get("pid"), ident.get("ctime"))
 
 
+ELEVATED_HINT = (
+    "the target runs elevated (as administrator); Windows UIPI drops input from a lower-integrity "
+    "process, so clicks and keys would silently do nothing. Restart cu-perceive as administrator, "
+    "or run the target without elevation"
+)
+
+
+def _target_integrity(out: dict, frame: dict) -> dict | None:
+    """Annotate out with target_integrity / self_integrity / elevated_target (window stamps)."""
+    if not _has_window(frame):
+        return None
+    try:
+        from .windows import target_integrity_check
+
+        info = target_integrity_check(int(frame["hwnd"]))
+    except Exception:
+        return None
+    for k in ("elevated_target", "target_integrity", "self_integrity"):
+        out[k] = info.get(k)
+    return info
+
+
+def _elevated_target_refusal(out: dict, frame: dict) -> bool:
+    """Live go: refuse (before any input) when the target's integrity is above ours."""
+    info = _target_integrity(out, frame)
+    if not info or not info.get("elevated_target"):
+        if info and info.get("elevated_target") is None and info.get("integrity_error"):
+            out["warnings"] = (out.get("warnings") or []) + [
+                f"could not read the target's integrity level ({info['integrity_error']}); if input "
+                "has no effect, the target may be elevated"
+            ]
+        return False
+    out["ok"] = False
+    out["error"] = (
+        f"target window {frame.get('hwnd')} runs at {info.get('target_integrity')} integrity, "
+        f"above cu-perceive ({info.get('self_integrity')}); nothing sent"
+    )
+    _set_refusal(out, "elevated_target", ELEVATED_HINT)
+    return True
+
+
 def _note_replacement(out: dict, frame: dict, hwnd: int) -> dict | None:
     """Fill hwnd_replaced / suggested_hwnd on out when the stamped hwnd was rebuilt."""
     try:
@@ -1832,7 +1873,9 @@ def _snapshot_windows() -> list[dict] | None:
         return None
 
 
-NEW_WINDOW_WAIT_S = 0.25
+NEW_WINDOW_WAIT_S = 1.2  # slow apps (Electron cold start) open dialogs after ~1 s
+NEW_WINDOW_RECHECK_S = 0.3  # one more look after the wait ran out empty
+NEW_WINDOW_CHAIN_STEP_S = 0.25  # non-final chain steps (field clicks) keep the short wait
 NEW_WINDOW_POLL_S = 0.05
 _WINDOW_OPEN_KEYS = frozenset({"enter", "return", "esc", "escape"})
 
@@ -1864,8 +1907,9 @@ def chain_may_open_window(steps) -> bool:
 def new_window_wait_s() -> float:
     """How long to poll for a dialog that appears just after input. 0 disables the wait.
 
-    ``CU_PERCEIVE_NEW_WINDOW_WAIT_MS`` (default 250). The wait runs only after a
-    step that can open a window, and it returns as soon as one appears.
+    ``CU_PERCEIVE_NEW_WINDOW_WAIT_MS`` (default 1200; MCP act new_window_wait_ms= per call).
+    The wait runs only after a step that can open a window, and it returns as soon as one
+    appears. An empty wait is followed by one recheck NEW_WINDOW_RECHECK_S later.
     """
     raw = os.environ.get("CU_PERCEIVE_NEW_WINDOW_WAIT_MS", "").strip().lower()
     if raw in ("0", "off", "none"):
@@ -1879,12 +1923,21 @@ def new_window_wait_s() -> float:
     return max(0.0, ms / 1000.0)
 
 
+def windows_snapshot_changed(before: list[dict] | None, after: list[dict] | None) -> bool | None:
+    """Any top-level window appeared, disappeared, or changed title. None = unknown."""
+    if before is None or after is None:
+        return None
+    key = lambda rows: {(int(w.get("hwnd") or 0), w.get("title") or "") for w in rows}  # noqa: E731
+    return key(before) != key(after)
+
+
 def _poll_new_windows(
-    before: list[dict] | None, timeout: float | None = None,
+    before: list[dict] | None, timeout: float | None = None, recheck: float = 0.0,
 ) -> tuple[list[dict], list[dict] | None]:
     """Snapshot, then poll until a new top-level window shows up or the wait elapses.
 
     ``timeout`` 0 takes one snapshot and does not sleep. A new window ends the wait early.
+    ``recheck`` > 0: when the wait ends empty, look once more after that delay.
     """
     if timeout is None:
         timeout = new_window_wait_s()
@@ -1899,13 +1952,25 @@ def _poll_new_windows(
         if before is None or latest is None:
             break
         found = diff_new_windows(before, latest)
+    if not found and recheck > 0 and before is not None and latest is not None:
+        time.sleep(recheck)
+        again = _snapshot_windows()
+        if again is not None:
+            latest = again
+            found = diff_new_windows(before, latest)
     return found, latest
 
 
-def _attach_new_windows(out: dict, before: list[dict] | None) -> None:
-    timeout = new_window_wait_s() if chain_may_open_window(out.get("steps")) else 0.0
-    found, _latest = _poll_new_windows(before, timeout)
+def _attach_new_windows(out: dict, before: list[dict] | None, wait_s: float | None = None) -> None:
+    may_open = chain_may_open_window(out.get("steps"))
+    timeout = (new_window_wait_s() if wait_s is None else max(0.0, float(wait_s))) if may_open else 0.0
+    recheck = NEW_WINDOW_RECHECK_S if timeout > 0 else 0.0
+    found, latest = _poll_new_windows(before, timeout, recheck)
     out["new_windows"] = found
+    out["new_window_wait_ms"] = int(round(timeout * 1000))
+    changed = windows_snapshot_changed(before, latest)
+    if changed is not None:
+        out["windows_snapshot_changed"] = changed
     try:
         from .windows import foreground_brief
 
@@ -2034,7 +2099,7 @@ def _suspend_ime_for_act(out: dict, frame: dict, steps: list[dict], ime_mode: st
     return None
 
 
-def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: bool = False, gap: float = 0.12, hold_key: str | None = None, method: str | None = None, max_age_sec: float | None = None, strict_stamp: bool = False, stamp_json_path: str | Path | None = None, origin_slop_px: int = 8, focus: bool = False, stamp_source: str | None = None, ime: str | None = None) -> dict:
+def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: bool = False, gap: float = 0.12, hold_key: str | None = None, method: str | None = None, max_age_sec: float | None = None, strict_stamp: bool = False, stamp_json_path: str | Path | None = None, origin_slop_px: int = 8, focus: bool = False, stamp_source: str | None = None, ime: str | None = None, new_window_wait_s: float | None = None) -> dict:
     """Plan specs against frame; dry_run=False sends input.
 
     stamp_source: "explicit" (--stamp/--json), "latest" (newest stamp picked implicitly)
@@ -2094,7 +2159,7 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                             f"ime restore failed: {rest.get('error') or 'unknown'}"
                         ]
                 if isinstance(out, dict):
-                    _attach_new_windows(out, before)
+                    _attach_new_windows(out, before, new_window_wait_s)
             return out if isinstance(out, dict) else {
                 "ok": False, "dry_run": False, "error": "act returned nothing", "steps": [],
             }
@@ -2320,6 +2385,12 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
     _note_ime(out, frame or {}, steps, ime_mode)
     if dry_run:
         warns = []
+        elev = _target_integrity(out, frame or {})
+        if elev and elev.get("elevated_target"):
+            warns.append(
+                f"target runs at {elev.get('target_integrity')} integrity, above cu-perceive "
+                f"({elev.get('self_integrity')}): --go will refuse with reason=elevated_target"
+            )
         if implicit_err:
             warns.append(implicit_err + "; --go will refuse")
         if unguarded:
@@ -2357,6 +2428,12 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
         out["ok"] = False
         out["error"] = implicit_err
         _set_refusal(out, "implicit_screen_stamp", "pass stamp=<stamp> explicitly, or perceive the window first")
+        for s in steps:
+            s.pop("_uia_control", None)
+            s.pop("_uia_action", None)
+        return out
+    elev_err = _elevated_target_refusal(out, frame or {})
+    if elev_err:
         for s in steps:
             s.pop("_uia_control", None)
             s.pop("_uia_action", None)

@@ -12,6 +12,7 @@ import numpy as np
 
 CHANGE_PIXEL_THRESHOLD = 12  # per-pixel max-channel delta that counts as changed (grabs are lossless)
 CHANGE_MIN_PIXELS = 8  # real pixels; a WinForms checkbox tick is ~21 px, so the floor stays tiny
+REFLOW_RATIO = 0.3  # more than 30% of the window changed: coordinates may all have moved
 CHANGE_STEP = 1  # full resolution: sampling every 2nd pixel missed most of a tick
 
 
@@ -84,6 +85,13 @@ def run_with_change_check(hwnd: int | None, run, *, grab=None, sleep=time.sleep,
     sleep(change_wait_s() if wait_s is None else wait_s)
     after = grab(hwnd)
     res = diff_images(before, after)
+    ratio = res.get("changed_ratio")
+    res["layout_reflow_suspected"] = bool(ratio is not None and ratio > REFLOW_RATIO)
+    if res["layout_reflow_suspected"]:
+        out["warnings"] = (out.get("warnings") or []) + [
+            f"{ratio:.0%} of the window changed: the layout may have reflowed (panel closed, page "
+            "switched, list re-sorted); re-perceive before reusing old coordinates"
+        ]
     if before is None or after is None:
         res["check_change_note"] = "window grab failed before or after; screen_changed unknown"
     out.update(res)
