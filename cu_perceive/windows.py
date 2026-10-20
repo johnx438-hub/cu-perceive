@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from .settings import get as _cfg
+
 
 def _window_service():
     from ._vendor.enikk.window import WindowService
@@ -311,9 +313,9 @@ def is_sentinel_origin(origin: dict | None) -> bool:
         h = int(origin.get('height', 0))
     except (TypeError, ValueError):
         return True
-    if left <= -10000 or top <= -10000:
+    if left <= OFFSCREEN_PARK or top <= OFFSCREEN_PARK:
         return True
-    if w < 80 or h < 80:
+    if w < int(_cfg("safety.small_client_px")) or h < int(_cfg("safety.small_client_px")):
         return True
     return False
 
@@ -362,16 +364,17 @@ def classify_client_geometry(
             GHOST_HINT,
             None,
         )
-    if w < MIN_CLIENT_PX or h < MIN_CLIENT_PX:
+    if w < int(_cfg("safety.min_client_px")) or h < int(_cfg("safety.min_client_px")):
         return (
             "tiny_client",
             f"window client area is only {w}x{h} px, too small to perceive; {TINY_HINT}",
             TINY_HINT,
             None,
         )
-    if w < SMALL_CLIENT_PX or h < SMALL_CLIENT_PX:
+    small_px = int(_cfg("safety.small_client_px"))
+    if w < small_px or h < small_px:
         return None, None, None, (
-            f"window client area is only {w}x{h} px; act treats stamps under {SMALL_CLIENT_PX} px "
+            f"window client area is only {w}x{h} px; act treats stamps under {small_px} px "
             "on a side as minimized stubs and will refuse them"
         )
     return None, None, None, None
@@ -441,7 +444,7 @@ def refresh_geom(hwnd: int) -> tuple[dict | None, dict | None]:
     was_iconic = bool(win32gui.IsIconic(hwnd))
     if was_iconic or is_sentinel_origin(origin):
         _window_service().force_foreground(hwnd)
-        time.sleep(RESTORE_SETTLE_S if was_iconic else 0.15)
+        time.sleep(float(_cfg("focus.restore_settle_s")) if was_iconic else float(_cfg("focus.refresh_settle_s")))
         origin = client_origin(hwnd)
     return origin, find_window(hwnd=hwnd)
 
@@ -528,7 +531,7 @@ def focus_and_verify(hwnd: int, *, retries: int = 1, settle: float | None = None
     raise_fn = raise_fn or force_foreground
     check_fn = check_fn or foreground_matches
     sleep = sleep or _time.sleep
-    settle = FOCUS_VERIFY_SETTLE_S if settle is None else settle
+    settle = float(_cfg("focus.verify_settle_s")) if settle is None else settle
     fg = 0
     errors: list[str] = []
     attempts = 0
@@ -745,7 +748,7 @@ def capture_hwnd(hwnd: int, activate: bool = False):
     hwnd = int(hwnd)
     if activate:
         force_foreground(hwnd)
-        time.sleep(RESTORE_SETTLE_S)
+        time.sleep(float(_cfg("focus.restore_settle_s")))
     origin = client_origin(hwnd)
     if origin is None:
         return None

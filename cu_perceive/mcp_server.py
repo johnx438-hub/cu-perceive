@@ -125,14 +125,38 @@ def strict_server_cls(server_cls):
 
 def offloaded(fn):
     """Async wrapper running sync tool ``fn`` in a worker thread. mcp 1.x calls sync tools on
-    the event loop, so one slow call (OCR) would otherwise stall every other tool call."""
+    the event loop, so one slow call (OCR) would otherwise stall every other tool call.
+
+    Dict results gain ``config_rev`` (``<hash>@<profile>``). ``profile`` / ``show_config``
+    on the tool, when declared, select the profile and attach the effective config.
+    """
     import functools
 
     @functools.wraps(fn)
     async def run(*args, **kwargs):
         import anyio.to_thread
 
-        return await anyio.to_thread.run_sync(functools.partial(fn, *args, **kwargs))
+        def _call():
+            from .settings import ConfigError, call_context, finish_response
+
+            profile = None
+            show = False
+            try:
+                bound = inspect.signature(fn).bind_partial(*args, **kwargs)
+                profile = bound.arguments.get("profile") or None
+                show = bool(bound.arguments.get("show_config"))
+            except TypeError:
+                pass
+            try:
+                with call_context(profile=profile, show_config=show):
+                    result = fn(*args, **kwargs)
+            except ConfigError as exc:
+                return finish_response({"ok": False, "reason": "bad_args", "error": str(exc)})
+            if isinstance(result, dict):
+                return finish_response(result)
+            return result
+
+        return await anyio.to_thread.run_sync(_call)
 
     return run
 
@@ -181,26 +205,28 @@ def _wait_s(ms):
         return None
 
 
+def _chain_step_s() -> float:
+    from .settings import get as _cfg
+
+    return float(_cfg("popup.chain_step_s"))
+
+
 def _chain_step_wait(ms, step: dict, i: int, n: int):
     """Chains wait long only on the last / expect_change step; field clicks keep 250 ms.
 
     Returns the explicit wait (seconds) when the caller passed new_window_wait_ms, else None.
     """
-    from .act import NEW_WINDOW_CHAIN_STEP_S
-
     full = _wait_s(ms)
     if full is None or i == n - 1 or step.get("expect_change"):
         return full
-    return min(NEW_WINDOW_CHAIN_STEP_S, full)
+    return min(_chain_step_s(), full)
 
 
 def _chain_step_cap(ms, step: dict, i: int, n: int):
     """Without an explicit wait, non-final steps cap the default wait at 250 ms (reason chain_step)."""
-    from .act import NEW_WINDOW_CHAIN_STEP_S
-
     if _wait_s(ms) is not None or i == n - 1 or step.get("expect_change"):
         return None
-    return NEW_WINDOW_CHAIN_STEP_S
+    return _chain_step_s()
 
 
 def _compact_rows(payload: dict) -> None:
@@ -250,16 +276,23 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
     def _thumb_image(map_path: str):
         im = PILImage.open(map_path)
         w, h = im.size
-        if max(w, h) > INLINE_MAX_SIDE:
-            scale = INLINE_MAX_SIDE / max(w, h)
+        from .settings import get as _cfg
+
+        side = int(_cfg("server.inline_max_side"))
+        if max(w, h) > side:
+            scale = side / max(w, h)
             im = im.resize((max(1, int(w * scale)), max(1, int(h * scale))), PILImage.Resampling.LANCZOS)
         if im.mode not in ("RGB", "L"):
             im = im.convert("RGB")
         buf = BytesIO()
-        im.save(buf, format="JPEG", quality=80, optimize=True)
+        im.save(buf, format="JPEG", quality=int(_cfg("server.jpeg_quality")), optimize=True)
         return Image(data=buf.getvalue(), format="jpeg")
 
     def _with_map(payload: dict, map_path, map_inline: bool = True):
+        from .settings import finish_response
+
+        if isinstance(payload, dict):
+            finish_response(payload)
         # FastMCP turns [str, Image] into separate content blocks:
         #   TextContent(JSON) + ImageContent(type=image, data=base64, mimeType=...)
         # Do NOT concat blocks into one string and JSON.parse — that blows up at the join.
@@ -284,13 +317,16 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         return fn
 
     @_tool
-    def windows(title: str = "", exe: str = "", hwnd: int = 0, map: bool = True, map_inline: bool = True, query: str = ""):
+    def windows(title: str = "", exe: str = "", hwnd: int = 0, map: bool = True, map_inline: bool = True, query: str = "",
+                profile: str = "", show_config: bool = False):
         """Desktop window list + ruler map (0-1000, screen space). Read the image to pick hwnd.
         hwnd 0 / empty title+exe = all windows (+ optional map). map_inline=false = JSON only.
         title and/or exe set (no hwnd): returns windows[] of ALL matches (browser multi-window safe),
         plus window=picked by pick_rule (non-minimized, then EnumWindows z-top, then area — not guaranteed foreground).
         hwnd set: one row in windows[] / window. Does not click.
-        query: case-insensitive substring of title OR exe (title matches first); cannot be combined with title/exe."""
+        query: case-insensitive substring of title OR exe (title matches first); cannot be combined with title/exe.
+        profile selects a configuration profile for this call. show_config attaches the effective config."""
+        _ = (profile, show_config)  # applied by the MCP wrapper before this body, and stamped on the result
         hwnd_n = _nz_int(hwnd)
         query_n = (_nz_str(query) or "").strip()
         if query_n and (title or exe):
@@ -353,6 +389,8 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         capture: str = "",
         compact: bool = False,
         uia_include_occluded: bool = False,
+        profile: str = "",
+        show_config: bool = False,
     ):
         """perceive_window does not focus; act go needs the window in front or focus=true.
         Pin one window (or primary screen). Writes raw + 0-1000 map. Default ocr=false.
@@ -377,6 +415,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         E2 light verify: roi="L,T,W,H" or roi_norm="CX,CY[,HALF]" (mutually exclusive) crops after full grab; map 0-1000 is ROI-local.
         out_dir optional: Windows path or /mnt/c/... ; response also has map_wsl / png_wsl (lowercase drive).
         A stamp written to a custom out_dir is registered under the default dir, so act finds it by bare stamp name, by hwnd, and as the latest stamp."""
+        _ = (profile, show_config)  # applied by the MCP wrapper before this body, and stamped on the result
         hwnd_n = _nz_int(hwnd)
         title_n = _nz_str(title)
         exe_n = _nz_str(exe)
@@ -483,12 +522,12 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         key: str = "",
         drag: str | list = "",
         drag_norm: str | list = "",
-        step_px: int = 4,
+        step_px: int | None = None,
         scroll: str | int = "",
         button: str = "left",
         hover: bool = False,
         go: bool = False,
-        hold: float = 0,
+        hold: float | None = None,
         hold_key: str = "",
         method: str = "input",
         max_age_sec: float | None = None,
@@ -504,6 +543,8 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         check_change: bool = False,
         new_window_wait_ms: int | None = None,
         change_min_ratio: float | None = None,
+        profile: str = "",
+        show_config: bool = False,
     ):
         """act: go=true sends (default: dry run; dry_run=true wins); needs window in front or focus=true. scroll="down:5" notches (bare 5 = UP). key="enter"|"pagedown". norm="x,y" or [x,y]. hwnd= checks stamp.
         norm="x,y" or [x,y] (0-1000 map) | xy="x,y" or [x,y] (stamp px) | ids="3"; scroll="down:3"|"up:3" (wheel notches, not pixels; max 50; int or string; bare numbers: negative = down, positive = UP); drag_norm="x1,y1;x2,y2"; text="..." + replace=true; key="enter"|"ctrl+a"|"pagedown"; hold_key=ctrl|shift|alt (needs a click/drag/scroll); button="left"|"right"; focus=true; go=true sends (default: dry run); via=paste|keys; ime=off.
@@ -630,6 +671,13 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         cannot receive input (Windows UIPI); go refuses with reason=elevated_target before sending anything
         (dry runs warn; elevated_target / target_integrity / self_integrity are reported).
         """
+        _ = (profile, show_config)  # applied by the MCP wrapper before this body, and stamped on the result
+        from .settings import get as _cfg
+
+        if step_px is None:
+            step_px = int(_cfg("drag.step_px"))
+        if hold is None:
+            hold = float(_cfg("timing.click_hold_s"))
         if check_change:
             # locals() in a closure also holds free variables: keep only real parameters
             params = inspect.signature(act).parameters
@@ -650,7 +698,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
             notes.append("dry_run=true overrides go=true: this was a dry run, nothing was sent")
         elif dry_run is False and not go:
             notes.append("dry_run=false does not send input; pass go=true to send")
-        if step_px != 4 and not (_nz_str(drag) or _nz_str(drag_norm)):
+        if step_px != int(_cfg("drag.step_px")) and not (_nz_str(drag) or _nz_str(drag_norm)):
             notes.append(
                 f"step_px={step_px} ignored: it only sets drag smoothness (px per mouse move) for drag/drag_norm; "
                 'scroll distance is scroll="down:N" in wheel notches'
@@ -694,12 +742,15 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         return out
 
     def _flat_specs(f: dict):
+        from .settings import get as _cfg
+
         return parse_steps(
             ids=coerce_ids(f.get("ids", "")), xy=_nz_str(f.get("xy", "")), norm=_nz_str(f.get("norm", "")),
             text=_nz_str(f.get("text", "")), key=_nz_str(f.get("key", "")), drag=_nz_str(f.get("drag", "")),
             drag_norm=_nz_str(f.get("drag_norm", "")), scroll=_nz_scroll(f.get("scroll", "")),
             button=f.get("button") or "left", hover=bool(f.get("hover", False)),
-            step_px=int(f.get("step_px", 4) or 4), hold=float(f.get("hold", 0) or 0),
+            step_px=int(_cfg("drag.step_px") if f.get("step_px") in (None, "") else (f.get("step_px") or _cfg("drag.step_px"))),
+            hold=float(_cfg("timing.click_hold_s") if f.get("hold") in (None, "") else (f.get("hold") or 0)),
             uia_name=_nz_str(f.get("uia_name", "")) or None, replace=bool(f.get("replace", False)),
             input_via=_nz_str(f.get("via", "")),
         )
@@ -793,6 +844,21 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
     def apps():
         """List quick-launch names in apps.json."""
         return {"apps": list_apps()}
+
+    @_tool
+    def config(action: str = "show", profile: str = "", show_config: bool = True):
+        """Show, reload, or validate the effective configuration.
+
+        action=show returns the effective values and config_rev. action=reload re-reads the TOML
+        file after the current live act finishes; a failed reload keeps the previous file.
+        action=validate checks the file without dropping a good config. profile selects which
+        built-in or file profile to display. show_config includes the same values (default true).
+        Locked keys cannot be set in the file. Tighten-only keys can only move stricter.
+        """
+        _ = show_config  # the wrapper stamps config_rev; show already returns the values
+        from .settings import config_action
+
+        return config_action(action, profile=profile or None)
 
     register_browser_tools(_tool)
 

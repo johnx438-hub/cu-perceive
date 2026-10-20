@@ -2,13 +2,13 @@
 from __future__ import annotations
 
 import json
-import os
 import threading
 import time
 from pathlib import Path
 
 from .config import out_dir as _config_out_dir
 from .keys import split_key_list
+from .settings import get as _cfg
 
 DEFAULT_OUT = _config_out_dir()
 # go=true acts share one process-wide lock so parallel MCP calls cannot interleave SendInput.
@@ -400,9 +400,10 @@ STALE_STAMP_SEC = 120
 def scroll_spec(raw) -> dict:
     """kind=scroll spec; counts past MAX_SCROLL_NOTCHES are clamped (clamped_from keeps the ask)."""
     n = parse_scroll(raw)
+    cap = int(_cfg("limits.max_scroll_notches"))
     spec: dict = {"kind": "scroll", "notches": n}
-    if abs(n) > MAX_SCROLL_NOTCHES:
-        spec["notches"] = MAX_SCROLL_NOTCHES if n > 0 else -MAX_SCROLL_NOTCHES
+    if abs(n) > cap:
+        spec["notches"] = cap if n > 0 else -cap
         spec["clamped_from"] = n
     return spec
 
@@ -1115,9 +1116,9 @@ def check_stamp(
     frame: dict | None,
     *,
     max_age_sec: float | None = None,
-    origin_slop_px: int = 8,
+    origin_slop_px: int | None = None,
     json_path: str | Path | None = None,
-    size_slop_px: int = 24,
+    size_slop_px: int | None = None,
 ) -> dict:
     """E3 stamp usability: hwnd/origin/age/ROI/minimized. Fail closed for planning/--go.
 
@@ -1126,6 +1127,10 @@ def check_stamp(
     Never clicks; never calls refresh_geom (that path restores iconic hwnds).
     """
     frame = frame or {}
+    if origin_slop_px is None:
+        origin_slop_px = int(_cfg("stamp.origin_slop_px"))
+    if size_slop_px is None:
+        size_slop_px = int(_cfg("stamp.size_slop_px"))
     stamp = frame.get("stamp")
     hwnd = frame.get("hwnd")
     out: dict = {"ok": True, "stamp": stamp, "hwnd": hwnd}
@@ -1452,7 +1457,7 @@ def _bring_forward(frame: dict, out: dict) -> str | None:
             f"{fv.get('focus_attempts')} attempts (foreground={fv.get('foreground_hwnd')}); nothing sent"
         )
     out["focused_window"] = True
-    time.sleep(FOCUS_SETTLE_S)
+    time.sleep(float(_cfg("focus.settle_s")))
     err = stamp_identity_error(frame)
     if err:
         _set_refusal(out, "identity_changed", HINT_REPERCEIVE)
@@ -1465,14 +1470,14 @@ def _foreground_ok(target: int, *, settle: bool) -> tuple[bool, int]:
     """foreground_matches(target); with settle, give a just-sent click time to activate."""
     from .windows import foreground_matches
 
-    tries = KEYBOARD_SETTLE_TRIES if settle else 1
+    tries = int(_cfg("timing.keyboard_settle_tries")) if settle else 1
     ok, fg = False, 0
     for i in range(tries):
         ok, fg = foreground_matches(int(target))
         if ok:
             break
         if i + 1 < tries:
-            time.sleep(KEYBOARD_SETTLE_S)
+            time.sleep(float(_cfg("timing.keyboard_settle_s")))
     return ok, fg
 
 
@@ -1961,16 +1966,7 @@ def new_window_wait_s() -> float:
     The wait runs only after a step that can open a window, and it returns as soon as one
     appears. An empty wait is followed by one recheck NEW_WINDOW_RECHECK_S later.
     """
-    raw = os.environ.get("CU_PERCEIVE_NEW_WINDOW_WAIT_MS", "").strip().lower()
-    if raw in ("0", "off", "none"):
-        return 0.0
-    if not raw:
-        return NEW_WINDOW_WAIT_S
-    try:
-        ms = float(raw)
-    except ValueError:
-        return NEW_WINDOW_WAIT_S
-    return max(0.0, ms / 1000.0)
+    return float(_cfg("popup.new_window_wait_s"))
 
 
 def windows_snapshot_changed(before: list[dict] | None, after: list[dict] | None) -> bool | None:
@@ -1994,10 +1990,11 @@ def _poll_new_windows(
     latest = _snapshot_windows()
     found = diff_new_windows(before, latest) if before is not None and latest is not None else []
     waited = 0.0
+    poll = float(_cfg("popup.poll_s"))
     while not found and waited < timeout:
-        step = min(NEW_WINDOW_POLL_S, timeout - waited)
+        step = min(poll, timeout - waited)
         time.sleep(step)
-        waited += NEW_WINDOW_POLL_S
+        waited += poll
         latest = _snapshot_windows()
         if before is None or latest is None:
             break
@@ -2069,7 +2066,7 @@ def _attach_new_windows(out: dict, before: list[dict] | None, wait_s: float | No
         timeout, why = new_window_wait_s(), "action"
     else:
         timeout, why = 0.0, "action_cannot_open_window"
-    recheck = NEW_WINDOW_RECHECK_S if timeout > 0 else 0.0
+    recheck = float(_cfg("popup.recheck_s")) if timeout > 0 else 0.0
     found, latest = _poll_new_windows(before, timeout, recheck)
     out["new_windows"] = found
     out["new_window_wait_ms"] = int(round(timeout * 1000))
@@ -2215,7 +2212,7 @@ def _suspend_ime_for_act(out: dict, frame: dict, steps: list[dict], ime_mode: st
     return None
 
 
-def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: bool = False, gap: float = 0.12, hold_key: str | None = None, method: str | None = None, max_age_sec: float | None = None, strict_stamp: bool = False, stamp_json_path: str | Path | None = None, origin_slop_px: int = 8, focus: bool = False, stamp_source: str | None = None, ime: str | None = None, new_window_wait_s: float | None = None, new_window_wait_cap_s: float | None = None) -> dict:
+def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: bool = False, gap: float | None = None, hold_key: str | None = None, method: str | None = None, max_age_sec: float | None = None, strict_stamp: bool = False, stamp_json_path: str | Path | None = None, origin_slop_px: int | None = None, focus: bool = False, stamp_source: str | None = None, ime: str | None = None, new_window_wait_s: float | None = None, new_window_wait_cap_s: float | None = None) -> dict:
     """Plan specs against frame; dry_run=False sends input.
 
     stamp_source: "explicit" (--stamp/--json), "latest" (newest stamp picked implicitly)
@@ -2232,6 +2229,10 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
     """
     from .ime import normalize_ime
 
+    if gap is None:
+        gap = float(_cfg("timing.act_gap_s"))
+    if origin_slop_px is None:
+        origin_slop_px = int(_cfg("stamp.origin_slop_px"))
     try:
         ime_mode = normalize_ime(ime)
     except ValueError as e:
@@ -2409,7 +2410,7 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
             out["scroll_clamped"] = True
             out["warnings"] = (out.get("warnings") or []) + [
                 f"scroll asked for {s['clamped_from']} wheel notches; capped at {s['notches']} "
-                f"(max {MAX_SCROLL_NOTCHES}). Scroll counts are wheel notches (~3 lines each), "
+                f"(max {int(_cfg('limits.max_scroll_notches'))}). Scroll counts are wheel notches (~3 lines each), "
                 "not pixels; repeat the call to scroll further"
             ]
     if method_n == "post":
@@ -2473,10 +2474,11 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
     if stamp_bad:
         out["stamp_error"] = stamp_check.get("error") or "stamp check failed; re-perceive"
     age = stamp_check.get("age_sec")
-    if not stamp_bad and max_age_sec is None and age is not None and age > STALE_STAMP_SEC:
+    stale_sec = float(_cfg("stamp.stale_sec"))
+    if not stamp_bad and max_age_sec is None and age is not None and age > stale_sec:
         out["stamp_stale"] = True
         out["warnings"] = (out.get("warnings") or []) + [
-            f"stamp is {age:.0f}s old (over {STALE_STAMP_SEC}s); if the window changed since, "
+            f"stamp is {age:.0f}s old (over {stale_sec:g}s); if the window changed since, "
             "re-perceive before acting (max_age_sec=N turns this into a refusal)"
         ]
     # A plan for a window that is gone or now belongs to another process is wrong, so

@@ -400,7 +400,7 @@ IME_VERIFY_BUDGET_S = 0.75  # total verify budget across every layout candidate 
 
 
 def suspend_ime(hwnd: int, *, user32=None, imm32=None, layouts=None, probe=None, sleep=None,
-                verify_s: float = IME_VERIFY_BUDGET_S, mode: str = "off") -> dict:
+                verify_s: float | None = None, mode: str = "off") -> dict:
     """Make ``hwnd``'s focused input thread send ASCII for this act, then verify.
 
     1. Each installed English layout, then other Latin ones, is requested on the focused child
@@ -413,6 +413,10 @@ def suspend_ime(hwnd: int, *, user32=None, imm32=None, layouts=None, probe=None,
     """
     import time as _time
 
+    from .settings import get as _cfg
+
+    if verify_s is None:
+        verify_s = float(_cfg("ime.verify_budget_s"))
     sleep = sleep or _time.sleep
     probe = probe or (lambda h: probe_ime(h, user32=user32, imm32=imm32))
     info = probe(hwnd)
@@ -521,7 +525,11 @@ def restore_ime(state: dict | None) -> dict:
     if probe and sleep:
         want = int(state.get("hkl") or 0) & 0xFFFF
         now: dict = {}
-        for _ in range(7):
+        from .settings import get as _cfg
+
+        tries = int(_cfg("ime.restore_tries"))
+        pause = float(_cfg("ime.restore_sleep_s"))
+        for _ in range(tries):
             try:
                 now = probe(hwnd)
             except Exception:
@@ -530,7 +538,7 @@ def restore_ime(state: dict | None) -> dict:
             open_ok = not state.get("closed") or now.get("ime_open") in (None, bool(state.get("ime_open")))
             if now.get("ok") and lay_ok and open_ok:
                 return {"ok": True, "restored": True, "changed": True, "verified": True, "after": now}
-            sleep(0.05)
+            sleep(pause)
         return {"ok": False, "restored": False, "changed": True,
                 "error": f"still {now.get('hkl_hex')} / ime_open={now.get('ime_open')} after restore"}
     return {"ok": True, "restored": True, "changed": True}

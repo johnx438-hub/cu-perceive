@@ -17,9 +17,10 @@ APPS = config.apps_file()
 
 
 def list_apps() -> list[dict]:
-    if not APPS.exists():
+    path = config.apps_file()
+    if not path.exists():
         return []
-    return json.loads(APPS.read_text(encoding="utf-8"))
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _expand(p: str) -> str:
@@ -34,7 +35,7 @@ def launch(app: str | None = None, exe: str | None = None) -> dict:
                 rec = row
                 break
         if rec is None:
-            raise KeyError(f"app {app!r} not in {APPS}")
+            raise KeyError(f"app {app!r} not in {config.apps_file()}")
         exe = rec.get("exe") or rec.get("app_path")
     if not exe:
         raise ValueError("launch needs --app or --exe")
@@ -42,7 +43,9 @@ def launch(app: str | None = None, exe: str | None = None) -> dict:
     if not path.exists():
         raise FileNotFoundError(str(path))
     subprocess.Popen([str(path)], cwd=str(path.parent))
-    time.sleep(1.2)
+    from .settings import get as _cfg
+
+    time.sleep(float(_cfg("timing.launch_wait_s")))
     from .windows import find_window
     win = find_window(exe=path.stem) or find_window(title=path.stem)
     return {"ok": True, "exe": str(path), "app": (rec or {}).get("name"), "window": win}

@@ -41,7 +41,9 @@ _REQUIRE_GO_ON = frozenset({"1", "true", "yes", "on"})
 
 def bsk_require_go() -> bool:
     """True when browser acting verbs dry-run unless ``go=true``."""
-    return os.environ.get("CU_PERCEIVE_BSK_REQUIRE_GO", "").strip().lower() in _REQUIRE_GO_ON
+    from ..settings import get as _cfg
+
+    return bool(_cfg("bsk.require_go"))
 
 
 _GO_NOTE = "pass go=true to run this command"

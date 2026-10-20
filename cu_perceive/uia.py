@@ -6,7 +6,6 @@ Soft-miss (no preferred pattern on a real element): one same-point reprobe, then
 """
 from __future__ import annotations
 
-import os
 import threading
 import time
 from typing import Any
@@ -393,16 +392,10 @@ UIA_WALK_TIMEOUT_S = 20.0
 
 def uia_walk_timeout_s() -> float | None:
     """Seconds for one UIA tree walk. None waits with no limit (env 0 / off)."""
-    raw = os.environ.get("CU_PERCEIVE_UIA_WALK_TIMEOUT", "").strip().lower()
-    if raw in ("0", "off", "none", "inf"):
-        return None
-    if not raw:
-        return UIA_WALK_TIMEOUT_S
-    try:
-        val = float(raw)
-    except ValueError:
-        return UIA_WALK_TIMEOUT_S
-    return val if val > 0 else None
+    from .settings import get as _cfg
+
+    value = _cfg("uia.walk_timeout_s")
+    return None if value is None else float(value)
 UIA_VALUE_MAX = 120
 # Name/value nodes that are not already preferred (Text, DataItem, ...).
 # Kept so a text-only reader can see labels, message-box bodies, and grid cells,
@@ -514,8 +507,12 @@ def _ctype_content(ctype: str) -> bool:
     return _ctype_base(ctype) in {"Text", "DataItem", "Document", "Edit", "ListItem"}
 
 
-def truncate_uia_value(value, limit: int = UIA_VALUE_MAX) -> str | None:
+def truncate_uia_value(value, limit: int | None = None) -> str | None:
     """ValuePattern text, capped so one cell cannot dominate the payload."""
+    if limit is None:
+        from .settings import get as _cfg
+
+        limit = int(_cfg("uia.value_max"))
     if value is None:
         return None
     s = str(value).replace("\r\n", "\n").replace("\r", "\n")
@@ -823,14 +820,31 @@ def normalize_cell_value(value: str | None, control_type: str = "") -> str | Non
     return value
 
 
+def _control_is_password(control) -> bool:
+    """UIA IsPassword or an edit style with ES_PASSWORD. Never reads Value."""
+    try:
+        from .input import _edit_style, _uia_is_password, edit_is_password
+
+        return edit_is_password(
+            uia_password=_uia_is_password(control),
+            style=_edit_style(_native_hwnd(control)),
+        )
+    except Exception:
+        return False
+
+
 def read_control_value(control) -> tuple[str | None, bool | None]:
     """(ValuePattern.Value truncated, IsReadOnly or None). Never raises.
 
-    Read-only grid cells often have no ``IsReadOnly`` attribute on the pattern
-    object. This also checks the ValueIsReadOnly property and the legacy
-    accessible state bit. A DataItem/DataGrid ``False`` is not evidence, so
-    those cells report ``None``. A cell value of ``(null)`` is ``None``.
+    Password edits are not read: UIA ``IsPassword`` or ``ES_PASSWORD`` returns
+    ``(None, None)`` and does not touch ``ValuePattern.Value``. Read-only grid
+    cells often have no ``IsReadOnly`` attribute on the pattern object. This
+    also checks the ValueIsReadOnly property and the legacy accessible state
+    bit. A DataItem/DataGrid ``False`` is not evidence, so those cells report
+    ``None``. A cell value of ``(null)`` is ``None``.
     """
+    if _control_is_password(control):
+        return None, None
     auto = None
     pat = None
     try:
@@ -902,8 +916,8 @@ def collect_uia_nodes(
     height: int,
     origin_left: float,
     origin_top: float,
-    max_nodes: int = UIA_MAX_NODES,
-    max_depth: int = UIA_MAX_DEPTH,
+    max_nodes: int | None = None,
+    max_depth: int | None = None,
     skip_empty_name: bool = False,
     timeout_s: float | None = None,
     include_occluded: bool = False,
@@ -918,6 +932,12 @@ def collect_uia_nodes(
     Fail-closed: returns ``ok=False`` + ``error`` on missing package / bad hwnd.
     Does not raise for soft per-node errors.
     """
+    from .settings import get as _cfg
+
+    if max_nodes is None:
+        max_nodes = int(_cfg("uia.max_nodes"))
+    if max_depth is None:
+        max_depth = int(_cfg("uia.max_depth"))
     if not hwnd:
         return {
             "ok": False,
@@ -1023,6 +1043,7 @@ def collect_uia_nodes(
                 skip_empty_name=skip_empty_name,
                 value=value,
                 content_kept=content_kept if content_only else 0,
+                content_cap=int(_cfg("uia.content_max")),
             ):
                 # MDI children stacked under the active one still walk as on-screen.
                 # Drop a node whose center is covered by a different element.
@@ -1036,7 +1057,7 @@ def collect_uia_nodes(
                 if is_occ:
                     occluded_n += 1
                     occluded_why[why] = occluded_why.get(why, 0) + 1
-                    if len(occluded_names) < UIA_OCCLUDED_NAMES_MAX:
+                    if len(occluded_names) < int(_cfg("uia.occluded_names_max")):
                         occluded_names.append(name or f"[{ctype}]")
                 if not is_occ or include_occluded:
                     preferred = pick_preferred_action(patterns)
@@ -1126,8 +1147,8 @@ def collect_uia_nodes(
             "max_nodes": int(max_nodes),
             "max_depth": int(max_depth),
             "skip_empty_name": bool(skip_empty_name),
-            "value_max": UIA_VALUE_MAX,
-            "content_max": UIA_CONTENT_MAX,
+            "value_max": int(_cfg("uia.value_max")),
+            "content_max": int(_cfg("uia.content_max")),
         },
     }
     if timed_out:

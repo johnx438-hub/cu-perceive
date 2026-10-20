@@ -19,8 +19,10 @@ def _load():
             from ultralytics import YOLO
         except ImportError as e:
             raise extras.missing_from_import_error("yolo", e) from e
-        weight = Path(WEIGHT)
-        if not weight.exists() or weight.stat().st_size < 1_000_000:
+        from .settings import get as _cfg
+
+        weight = Path(config.yolo_weight())
+        if not weight.exists() or weight.stat().st_size < int(_cfg("ocr.yolo_min_bytes")):
             raise FileNotFoundError(
                 f"ScreenParser weight missing: {weight}. Download best.pt (see weights/README.md) "
                 f"or set {config.ENV_YOLO_WEIGHT} to its path."
@@ -29,11 +31,18 @@ def _load():
     return _model
 
 
-def detect(bgr: np.ndarray, conf: float = 0.10, iou: float = 0.10) -> list[dict]:
+def detect(bgr: np.ndarray, conf: float | None = None, iou: float | None = None) -> list[dict]:
     """Boxes in Enikk-style 0-1000 bbox + class name as text."""
+    from .settings import get as _cfg
+
+    if conf is None:
+        conf = float(_cfg("ocr.yolo_conf"))
+    if iou is None:
+        iou = float(_cfg("ocr.yolo_iou"))
     h, w = bgr.shape[:2]
     model = _load()
-    results = model.predict(source=bgr, imgsz=1280, conf=conf, iou=iou, verbose=False)
+    results = model.predict(source=bgr, imgsz=int(_cfg("ocr.yolo_imgsz")), conf=conf, iou=iou,
+                            verbose=bool(_cfg("ocr.yolo_verbose")))
     out: list[dict] = []
     for r in results:
         names = r.names or model.names

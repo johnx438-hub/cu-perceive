@@ -45,10 +45,13 @@ def validate_steps(steps: Any) -> tuple[list[dict] | None, dict | None]:
     if not isinstance(steps, list) or not steps:
         return None, _bad("steps must be a non-empty list of objects",
                           'steps=[{"norm": "500,300", "text": "abc", "replace": true}, {"ids": "4"}]')
-    if len(steps) > MAX_STEPS:
-        return None, _bad(f"steps has {len(steps)} entries; the cap is {MAX_STEPS}",
-                          f"split the work: run at most {MAX_STEPS} steps, re-perceive, then continue",
-                          max_steps=MAX_STEPS)
+    from .settings import get as _cfg
+
+    cap = int(_cfg("limits.max_steps"))
+    if len(steps) > cap:
+        return None, _bad(f"steps has {len(steps)} entries; the cap is {cap}",
+                          f"split the work: run at most {cap} steps, re-perceive, then continue",
+                          max_steps=cap)
     out: list[dict] = []
     last = len(steps) - 1
     for i, raw in enumerate(steps):

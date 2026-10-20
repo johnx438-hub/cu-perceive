@@ -5,10 +5,11 @@ Off by default. It only answers "did pixels move"; whether the *right* thing cha
 """
 from __future__ import annotations
 
-import os
 import time
 
 import numpy as np
+
+from .settings import get as _cfg
 
 CHANGE_PIXEL_THRESHOLD = 12  # per-pixel max-channel delta that counts as changed (grabs are lossless)
 CHANGE_MIN_PIXELS = 8  # real pixels; a WinForms checkbox tick is ~21 px, so the floor stays tiny
@@ -42,10 +43,7 @@ CHANGE_STEP = 1  # full resolution: sampling every 2nd pixel missed most of a ti
 
 
 def change_wait_s() -> float:
-    try:
-        return max(0.0, float(os.environ.get("CU_PERCEIVE_CHANGE_WAIT_MS", "350")) / 1000.0)
-    except ValueError:
-        return 0.35
+    return float(_cfg("change.wait_s"))
 
 
 def row_bands(mask) -> list[tuple[int, int, int, int]]:
@@ -60,7 +58,7 @@ def row_bands(mask) -> list[tuple[int, int, int, int]]:
             continue
         y0 = y
         gap = 0
-        while y < h and gap <= ROW_BAND_GAP_PX:
+        while y < h and gap <= int(_cfg("change.row_band_gap_px")):
             gap = 0 if rows[y] else gap + 1
             y += 1
         y1 = y - gap
@@ -72,21 +70,20 @@ def row_bands(mask) -> list[tuple[int, int, int, int]]:
 
 def similar_row_bands(bands, width: int) -> int:
     """How many bands have a width close to the median band width (and that median is wide)."""
-    if len(bands) < ROW_BAND_MIN:
+    minimum = int(_cfg("change.row_band_min"))
+    if len(bands) < minimum:
         return 0
     widths = sorted(b[3] - b[2] for b in bands)
     med = widths[len(widths) // 2]
-    if med < ROW_BAND_MIN_WIDTH * max(width, 1):
+    if med < float(_cfg("change.row_band_min_width")) * max(width, 1):
         return 0
-    lo, hi = ROW_BAND_SIMILAR
+    lo = float(_cfg("change.row_band_similar_lo"))
+    hi = float(_cfg("change.row_band_similar_hi"))
     return sum(1 for w in widths if lo * med <= w <= hi * med)
 
 
 def change_min_ratio() -> float:
-    try:
-        return max(0.0, float(os.environ.get("CU_PERCEIVE_CHANGE_MIN_RATIO", CHANGE_MIN_RATIO)))
-    except ValueError:
-        return CHANGE_MIN_RATIO
+    return float(_cfg("change.min_ratio"))
 
 
 def bbox_share(bbox) -> float | None:
@@ -103,19 +100,19 @@ def reflow_reason(ratio, bbox, bands: int | None = None) -> str | None:
     horizontal bands of change with >=1% of pixels: a list re-sorted), or None."""
     if ratio is None:
         return None
-    if ratio > REFLOW_RATIO:
+    if ratio > float(_cfg("change.reflow_ratio")):
         return "ratio"
     share = bbox_share(bbox)
-    if share is not None and ((share > REFLOW_BBOX_SHARE and ratio >= REFLOW_MIN_RATIO)
-                              or (share > REFLOW_BBOX_SHARE_MID and ratio >= REFLOW_MIN_RATIO_MID)):
+    if share is not None and ((share > float(_cfg("change.reflow_bbox_share")) and ratio >= float(_cfg("change.reflow_min_ratio")))
+                              or (share > float(_cfg("change.reflow_bbox_share_mid")) and ratio >= float(_cfg("change.reflow_min_ratio_mid")))):
         return "bbox_span"
-    if bands is not None and bands >= ROW_BAND_MIN and ratio >= ROW_BAND_MIN_RATIO:
+    if bands is not None and bands >= int(_cfg("change.row_band_min")) and ratio >= float(_cfg("change.row_band_min_ratio")):
         return "row_bands"
     return None
 
 
-def diff_images(before, after, *, threshold: int = CHANGE_PIXEL_THRESHOLD,
-                min_pixels: int = CHANGE_MIN_PIXELS, step: int = CHANGE_STEP,
+def diff_images(before, after, *, threshold: int | None = None,
+                min_pixels: int | None = None, step: int | None = None,
                 min_ratio: float | None = None) -> dict:
     """{screen_changed, changed_ratio, changed_pixels, changed_bbox_norm|None, size_changed?}.
 
@@ -123,6 +120,12 @@ def diff_images(before, after, *, threshold: int = CHANGE_PIXEL_THRESHOLD,
     real change at a tiny ratio. A blinking caret (~1x16 px) can also count: read
     changed_pixels / changed_bbox_norm and judge whether it is the change you wanted.
     """
+    if threshold is None:
+        threshold = int(_cfg("change.pixel_threshold"))
+    if min_pixels is None:
+        min_pixels = int(_cfg("change.min_pixels"))
+    if step is None:
+        step = int(_cfg("change.step"))
     if before is None or after is None:
         return {"screen_changed": None, "changed_ratio": None, "changed_bbox_norm": None}
     a = np.asarray(before)
@@ -154,7 +157,7 @@ def diff_images(before, after, *, threshold: int = CHANGE_PIXEL_THRESHOLD,
            "changed_pixels": px, "changed_bbox_norm": bbox, "change_min_ratio": floor}
     if mask.any():
         res["changed_row_bands"] = similar_row_bands(row_bands(mask), mask.shape[1])
-    if counted and ratio < CHANGE_MINOR_RATIO:
+    if counted and ratio < float(_cfg("change.minor_ratio")):
         res["change_minor"] = True
     elif not counted and px >= int(min_pixels):
         res["below_min_ratio"] = True
@@ -226,11 +229,10 @@ def focus_baseline_hook(hwnd: int | None, focus: bool, *, sleep=time.sleep):
         return None
 
     def pre():
-        from .act import FOCUS_SETTLE_S
         from .windows import focus_and_verify
 
         fv = focus_and_verify(int(hwnd), retries=1)
-        sleep(FOCUS_SETTLE_S + 0.15)
+        sleep(float(_cfg("focus.settle_s")) + float(_cfg("focus.baseline_extra_s")))
         return "after_focus" if fv.get("foreground_ok") else "focus_not_confirmed"
 
     return pre

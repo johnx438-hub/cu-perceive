@@ -403,5 +403,65 @@ class TestReadonlyAndTimeout(unittest.TestCase):
         self.assertEqual([n["name"] for n in res["uia_nodes"]], ["Save"])
 
 
+class TestPasswordValueIsNotRead(unittest.TestCase):
+    def test_is_password_skips_value_pattern(self):
+        class Edit:
+            IsPassword = True
+            NativeWindowHandle = 0
+
+            def GetPattern(self, pid):
+                raise AssertionError("password ValuePattern must not be requested")
+
+        value, readonly = read_control_value(Edit())
+        self.assertIsNone(value)
+        self.assertIsNone(readonly)
+
+    def test_es_password_skips_value_pattern(self):
+        class Edit:
+            NativeWindowHandle = 7
+
+            def GetPattern(self, pid):
+                raise AssertionError("password ValuePattern must not be requested")
+
+        with mock.patch("cu_perceive.input._edit_style", return_value=0x0020):
+            value, readonly = read_control_value(Edit())
+        self.assertIsNone(value)
+        self.assertIsNone(readonly)
+
+    def test_collect_does_not_store_a_password_value(self):
+        class Edit:
+            Name = "secret"
+            ControlTypeName = "EditControl"
+            IsPassword = True
+            NativeWindowHandle = 0
+            BoundingRectangle = _Rect()
+
+            def GetPattern(self, pid):
+                raise AssertionError("password ValuePattern must not be requested")
+
+            def GetChildren(self):
+                return []
+
+            def GetRuntimeId(self):
+                return (1,)
+
+        class Auto:
+            class PatternId:
+                ValuePattern = 1
+
+            class PropertyId:
+                IsOffscreenProperty = 30022
+
+            def ControlFromHandle(self, hwnd):
+                return Edit()
+
+        with mock.patch("cu_perceive.uia._auto", return_value=Auto()), \
+                mock.patch("cu_perceive.uia.list_available_patterns", return_value=["Value"]):
+            res = collect_uia_nodes(5, width=200, height=100, origin_left=0, origin_top=0, timeout_s=1)
+        self.assertTrue(res["ok"], res)
+        self.assertTrue(res["uia_nodes"])
+        self.assertNotIn("value", res["uia_nodes"][0])
+
+
 if __name__ == "__main__":
     unittest.main()

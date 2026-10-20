@@ -83,8 +83,12 @@ def allowed_hosts(extra: list[str] | tuple[str, ...] | None = None) -> list[str]
 
 
 def wsl_distro() -> str:
-    return os.environ.get(ENV_WSL_DISTRO, "").strip() or "Ubuntu"
+    from .settings import get as _cfg
+
+    return str(_cfg("paths.wsl_distro") or "Ubuntu")
 
 
 def default_capture() -> str:
-    return os.environ.get(ENV_CAPTURE, "").strip().lower() or "auto"
+    from .settings import get as _cfg
+
+    return str(_cfg("capture.backend") or "auto")

@@ -521,7 +521,9 @@ def dwm_thumbnail_capture(hwnd: int):
             u32.ShowWindow(dest, SW_SHOWNOACTIVATE)
             u32.UpdateWindow(dest)
             dwm.DwmFlush()
-            time.sleep(DWM_SETTLE_S)
+            from .settings import get as _cfg
+
+            time.sleep(float(_cfg("capture.dwm_settle_s")))
             src = u32.GetDC(dest)
             if not src:
                 raise ctypes.WinError(ctypes.get_last_error())

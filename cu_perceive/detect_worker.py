@@ -52,16 +52,10 @@ class DetectWorkerTimeout(DetectWorkerError):
 
 def detect_timeout() -> float | None:
     """Seconds per detection call; None = wait forever (CU_PERCEIVE_DETECT_TIMEOUT=0)."""
-    raw = os.environ.get(ENV_TIMEOUT, "").strip().lower()
-    if not raw:
-        return DEFAULT_TIMEOUT_S
-    if raw in ("0", "off", "none", "inf"):
-        return None
-    try:
-        val = float(raw)
-    except ValueError:
-        return DEFAULT_TIMEOUT_S
-    return val if val > 0 else None
+    from .settings import get as _cfg
+
+    value = _cfg("ocr.timeout_s")
+    return None if value is None else float(value)
 
 
 def _pack_image(image):
@@ -222,7 +216,9 @@ class _Worker:
     def _kill(proc: subprocess.Popen) -> None:
         try:
             proc.kill()
-            proc.wait(timeout=5)
+            from .settings import get as _cfg
+
+            proc.wait(timeout=float(_cfg("ocr.worker_kill_s")))
         except Exception:
             pass
 
@@ -244,7 +240,10 @@ class _Worker:
         if self.proc is None or self.proc.poll() is not None:
             self.proc = self._start()
         proc = self.proc
-        limit = timeout * FIRST_CALL_FACTOR if (timeout and self.served == 0) else timeout
+        from .settings import get as _cfg
+
+        factor = int(_cfg("ocr.first_call_factor"))
+        limit = timeout * factor if (timeout and self.served == 0) else timeout
         box: dict = {}
 
         def talk():
@@ -259,7 +258,9 @@ class _Worker:
         t.join(limit)
         if t.is_alive():
             self._kill(proc)
-            t.join(5)
+            from .settings import get as _cfg
+
+            t.join(float(_cfg("ocr.worker_kill_s")))
             self.proc = None
             try:
                 self.proc = self._start()
@@ -289,7 +290,9 @@ class _Worker:
             return
         try:
             proc.stdin.close()
-            proc.wait(timeout=2)
+            from .settings import get as _cfg
+
+            proc.wait(timeout=float(_cfg("ocr.worker_close_s")))
         except Exception:
             proc.kill()
 
@@ -300,7 +303,9 @@ atexit.register(_WORKER.close)
 
 def run(op: str, image=None, timeout: float | None = -1.0):
     """Run a detector op in the child process (or in-process with CU_PERCEIVE_DETECT_INPROC=1)."""
-    if os.environ.get(ENV_INPROC, "").strip() not in ("", "0"):
+    from .settings import get as _cfg
+
+    if _cfg("safety.detect_inproc"):
         return run_local(op, image)
     return _WORKER.call(op, image, timeout=timeout)
 
