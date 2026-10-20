@@ -58,7 +58,7 @@ class TestMinRatio(unittest.TestCase):
     def test_minor_flag(self):
         a = _img()
         b = a.copy()
-        b[0:5, 0:5] = 0  # 25 px of 400k = 0.0000625
+        b[0:20, 0:50] = 0  # 1000 px of 400k = 0.0025: counted, minor band
         res = change.diff_images(a, b)
         self.assertTrue(res["screen_changed"])
         self.assertTrue(res["change_minor"])
@@ -75,7 +75,7 @@ class TestMinRatio(unittest.TestCase):
     def test_not_minor_when_large(self):
         a = _img()
         b = a.copy()
-        b[0:40, 0:40] = 0  # 0.004
+        b[0:40, 0:100] = 0  # 0.01
         res = change.diff_images(a, b)
         self.assertTrue(res["screen_changed"])
         self.assertNotIn("change_minor", res)
@@ -94,6 +94,30 @@ class TestMinRatio(unittest.TestCase):
         out = change.run_with_change_check(5, lambda: {"ok": True}, grab=lambda h: next(imgs),
                                            sleep=lambda s: None, min_ratio=0.001)
         self.assertFalse(out["screen_changed"])
+
+
+class TestPR14Defaults(unittest.TestCase):
+    def test_default_floor(self):
+        self.assertEqual(change.CHANGE_MIN_RATIO, 0.001)
+
+    def test_hover_below_default_floor_keeps_details(self):
+        a = _img()
+        b = a.copy()
+        b[100:110, 100:120] = 0  # 200 px = 0.0005 (hover-sized)
+        res = change.diff_images(a, b)
+        self.assertFalse(res["screen_changed"])
+        self.assertTrue(res["below_min_ratio"])
+        self.assertEqual(res["changed_pixels"], 200)
+        self.assertAlmostEqual(res["changed_ratio"], 0.0005)
+        self.assertIsNotNone(res["changed_bbox_norm"])
+
+    def test_wb_data_counts(self):
+        for share in (0.019, 0.036, 0.213):
+            a = _img()
+            b = a.copy()
+            n = int(share * a.shape[0] * a.shape[1])
+            b.reshape(-1, 3)[:n] = 0
+            self.assertTrue(change.diff_images(a, b)["screen_changed"], share)
 
 
 class TestCtrlKeys(unittest.TestCase):

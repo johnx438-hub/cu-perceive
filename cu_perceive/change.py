@@ -22,10 +22,14 @@ REFLOW_MIN_RATIO = 0.02
 # Second tier: a page with margins (text column) swaps ~19% of pixels inside a ~57% box (live WinForms test).
 REFLOW_BBOX_SHARE_MID = 0.4
 REFLOW_MIN_RATIO_MID = 0.1
-# screen_changed floor as a share of the window. Kept very low: a WinForms checkbox tick is
-# ~21 px (~0.0001 of a 560x360 window), the same order as a blinking caret or a hover highlight.
-CHANGE_MIN_RATIO = 0.00005
-CHANGE_MINOR_RATIO = 0.001  # below this a counted change is flagged change_minor=true
+# screen_changed floor as a share of the window (WorkBuddy retest of c9571c4: hover 0.0005, real
+# checkbox with its redraw 0.019, list swap 0.036, page switch 0.213). Below it: screen_changed=false,
+# below_min_ratio=true, pixels/ratio/bbox still reported. A bare synthetic tick (~6e-5) falls under it:
+# pass change_min_ratio lower when such tiny changes matter.
+CHANGE_MIN_RATIO = 0.001
+# change_minor band: counted, but under 0.5% of the window. Mostly hover / caret / focus-ring noise
+# that cleared the floor; real small controls (a checkbox redraw) land here too, so read the bbox.
+CHANGE_MINOR_RATIO = 0.005
 CHANGE_STEP = 1  # full resolution: sampling every 2nd pixel missed most of a tick
 
 

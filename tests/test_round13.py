@@ -99,7 +99,14 @@ class TestChainStepWait(unittest.TestCase):
         self.assertEqual(w(3000, {}, 2, 3), 3.0)
         self.assertEqual(w(3000, {"expect_change": True}, 1, 3), 3.0)
         self.assertIsNone(w(None, {}, 2, 3))  # default wait
+        self.assertIsNone(w(None, {}, 0, 3))  # not explicit: capped via _chain_step_cap instead
         self.assertEqual(w(100, {}, 0, 3), 0.1)
+        from cu_perceive.mcp_server import _chain_step_cap as c
+
+        self.assertEqual(c(None, {}, 0, 3), 0.25)
+        self.assertIsNone(c(None, {}, 2, 3))
+        self.assertIsNone(c(None, {"expect_change": True}, 0, 3))
+        self.assertIsNone(c(3000, {}, 0, 3))
 
     def test_param_in_schema(self):
         from test_round9 import _collect_tools

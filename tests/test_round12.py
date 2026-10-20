@@ -397,7 +397,7 @@ class TestCheckChange(unittest.TestCase):
         a = np.full((600, 800, 3), 240, np.uint8)
         b = a.copy()
         b[200:212, 100:112] = 0  # 12x12 tick in a 800x600 window: ratio ~0.0003
-        r = diff_images(a, b)
+        r = diff_images(a, b, min_ratio=0)
         self.assertTrue(r["screen_changed"])
         self.assertLess(r["changed_ratio"], 0.001)
 
@@ -405,18 +405,18 @@ class TestCheckChange(unittest.TestCase):
         a = np.full((100, 100, 3), 255, np.uint8)
         b = a.copy()
         b[..., 0] = 238  # white -> #ffffee style tint (delta 17)
-        self.assertTrue(diff_images(a, b)["screen_changed"])
+        self.assertTrue(diff_images(a, b, min_ratio=0)["screen_changed"])
 
     def test_real_tick_size_counts_but_specks_do_not(self):
         a = np.full((261, 504, 3), 240, np.uint8)
         b = a.copy()
         b[110:117, 24:27] = 0  # 21 px, the measured WinForms tick
-        r = diff_images(a, b)
+        r = diff_images(a, b, min_ratio=0)
         self.assertTrue(r["screen_changed"])
         self.assertEqual(r["changed_pixels"], 21)
         c = a.copy()
         c[5, 5:10] = 0  # 5 stray pixels
-        self.assertFalse(diff_images(a, c)["screen_changed"])
+        self.assertFalse(diff_images(a, c, min_ratio=0)["screen_changed"])
 
     def test_noise_below_threshold(self):
         a = np.full((50, 50, 3), 100, np.uint8)

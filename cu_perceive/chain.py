@@ -102,7 +102,8 @@ def _guard(result: dict, stamp_hwnd: int, title_before: str | None, title_now: C
 def _brief(i: int, step: dict, result: dict) -> dict:
     keep = ("ok", "reason", "error", "hint", "dry_run", "steps", "typed_verified", "typed_note",
             "new_windows", "after", "blocking_window", "foreground_click_count",
-            "planned_foreground_click_count", "warnings", "stamp_ok", "ime_skipped")
+            "planned_foreground_click_count", "warnings", "stamp_ok", "ime_skipped",
+            "new_window_wait_ms", "new_window_wait_reason", "windows_snapshot_changed", "suggested_hwnd")
     b = {"index": i, "step": step, **{k: result[k] for k in keep if k in result}}
     age = (result.get("stamp_check") or {}).get("age_sec")
     if age is not None:
@@ -110,6 +111,26 @@ def _brief(i: int, step: dict, result: dict) -> dict:
     if result.get("stamp_stale"):
         b["stamp_stale"] = True
     return b
+
+
+def _summarize_new_windows(out: dict, done: list[dict]) -> None:
+    """Top level: the last run step's wait, plus which steps opened windows."""
+    if not done:
+        return
+    last = done[-1]
+    for k in ("new_window_wait_ms", "new_window_wait_reason"):
+        if k in last:
+            out[k] = last[k]
+    opened = [b["index"] for b in done if b.get("new_windows")]
+    out["new_windows_steps"] = opened
+    if opened:
+        out["new_windows"] = [w for b in done for w in (b.get("new_windows") or [])]
+    if any(b.get("windows_snapshot_changed") for b in done):
+        out["windows_snapshot_changed"] = True
+    elif any("windows_snapshot_changed" in b for b in done):
+        out["windows_snapshot_changed"] = False
+    if last.get("suggested_hwnd") and "suggested_hwnd" not in out:
+        out["suggested_hwnd"] = last["suggested_hwnd"]
 
 
 def run_steps(
@@ -156,6 +177,7 @@ def run_steps(
         if changes and last:
             out["change_after_last_step"] = changes
     out["completed_steps"] = done
+    _summarize_new_windows(out, done)
     stopped = out.get("stopped_at")
     if stopped is not None:
         # A failed step did not complete; a guard stop happens after its step completed.
