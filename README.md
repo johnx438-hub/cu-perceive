@@ -194,16 +194,40 @@ every json in a large output directory.
   `keys` (CLI `--slow-type` is the same) sends each character with SendInput
   unicode — use it when a DataGridView cell ignores Ctrl+V because it is not
   in edit mode. A paste whose read-back does not change is `typed_mismatch`.
-- `--ime off` (MCP `ime="off"`) closes the target window's IME and switches
-  that window to an **already installed** English or other Latin layout
-  (`GetKeyboardLayoutList`). It never loads a layout the user has not
-  installed. With no Latin layout, it only closes the IME. It then checks the
-  layout actually changed; if it did not, the act stops with `reason:
-  "ime_failed"`. The previous layout and IME state are restored afterwards.
-  It does not change the system default. When `ime=off` handled the layout,
-  the result does not also warn `ime_active`. Without `ime=off`, an active IME
-  on a chain that types or taps keys adds that warning: the IME can swallow
-  keys while each step still says `tapped: true`.
+- `--ime off` (MCP `ime="off"`) makes the target send ASCII for one act. It
+  works on the thread that owns the **focused child** window
+  (`GetGUIThreadInfo` hwndFocus → `GetWindowThreadProcessId`; WPS's document
+  view is on another thread than its top-level window), falling back to the
+  stamp window's own thread. It tries each **already installed** English
+  layout (en-US, en-GB-US `0xf0010809`, en-GB `0x08090809`), then other Latin
+  ones (`GetKeyboardLayoutList`; it never loads a layout), and verifies each on
+  that thread by language id. All candidates share one **0.75 s** budget
+  (`ime.verify_budget_ms`; the time used is `ime.verify_ms`). If no layout
+  sticks but the IME is open, it closes the IME (`IMC_SETOPENSTATUS 0`) and
+  counts that as suspended (`ime_closed=true`).
+  - Still not verified: a warning plus `ime_unverified=true`, and the act runs
+    anyway (keys and text). `ime="strict"` (`--ime strict`) aborts instead with
+    `reason: "ime_failed"`, and the error names the mode that was passed.
+  - `ime` reports `thread_id` (focus thread), `top_thread_id`, `focus_hwnd`,
+    `hkl_hex` / `hkl_before_hex`, `requested_hex`, `tried`, and
+    `ime_open_before/after` plus `ime_conversion_before/after`. Conversion bit
+    0x1 means native (Chinese) input; Pinyin in English mode has it clear.
+    These are read with `ImmGetOpenStatus` / `ImmGetConversionStatus`, or via
+    `ImmGetDefaultIMEWnd` + `WM_IME_CONTROL` when the focus window is on
+    another thread.
+  - `ime_layout_switched=true` only for a verified, real layout change.
+    `ime_restored` appears only when a layout switch or an IME close actually
+    happened. It is true once that was undone and read back, and false if
+    undoing it failed. `ime_suspended` alone never sets it, and nothing is
+    restored when nothing changed.
+  - Without `ime=off`, an active IME on a chain that types or taps keys adds
+    an `ime_active` warning: the IME can swallow keys while each step still
+    says `tapped: true`.
+- `after` (go) carries `unlisted_foreground=true` when the foreground window is
+  not in `windows()`. It also carries `popup_hwnd` and `popup {hwnd, title,
+  class, why}` when such an unlisted window is in front, covers the stamp
+  window's centre, or is the blocking window. That makes Qt/CEF popups that
+  `new_windows` cannot see visible when they appear or disappear.
 - Mouse input goes to the window on top at that point, and keys go to the
   window in front, even when the stamped window is behind another one. So with
   `--go` on a window stamp, each step is checked right before it is sent:

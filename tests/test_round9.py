@@ -264,7 +264,7 @@ class TestReadbackUnavailable(unittest.TestCase):
 
 # Tokens like "reason=..." in docstrings that are result fields / values, not arguments.
 _DOC_NON_ARGS = {
-    "below_min_ratio", "change_minor", "screen_changed", "change_baseline", "ime_unverified", "foreground_elevated", "new_window_wait_reason", "reflow_reason",
+    "below_min_ratio", "change_minor", "screen_changed", "change_baseline", "ime_unverified", "ime_closed", "unlisted_foreground", "foreground_elevated", "new_window_wait_reason", "reflow_reason",
     "reason", "ok", "stamp_stale", "scroll_clamped", "id_source", "chosen_method", "typed_verified",
     "minimized", "uia_timeout", "uia_nodes_omitted", "hold_key_needs_pointer_step", "readback",
     "pointer_refused_step", "keyboard_refused_step", "hold_key_refused_step", "dry_run_only",

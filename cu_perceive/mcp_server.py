@@ -533,7 +533,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         text=paste+restore by default (via="paste"|"keys"; keys = SendInput unicode, for a grid cell that ignores Ctrl+V). key like ctrl+c (comma-separated ok). Unknown key -> ok=false, reason=unknown_key, valid_keys.
         Clipboard errors return ok=false reason=clipboard_failed (the server stays up). Previous clipboard text is restored; an empty clipboard is emptied again. Paste is staged before replace clears the field.
         After typing, typed_verified is true/false/null from a read-back of the target window's focused element. A mismatch is reason=typed_mismatch (never ok=true). A non-native control (Monaco/CodeMirror) that reads back empty is not a mismatch: typed_verified=null with warning readback_unavailable; a different non-empty value still is typed_mismatch. A provider value of "(null)" reads back as empty. Password edits (UIA IsPassword or ES_PASSWORD) skip that read-back: typed_verified is null and typed_note says so. A mask template with no letters or digits (____-__-__) counts as empty.
-        ime="off" closes the target IME and switches that window to an already-installed Latin layout (never loads a new one), then verifies and restores. A handled ime=off does not also warn ime_active.
+        ime="off" switches the focused input thread to an already-installed Latin layout (never loads a new one), else closes its IME, then verifies and restores what it changed. A handled ime=off does not also warn ime_active.
         Before any clear or type, the top-level window that owns keyboard focus (GA_ROOT of hwndFocus) must be the stamp hwnd. An owned modal dialog is reason=focus_outside and nothing is cleared. blocking_window then names that top-level dialog {hwnd, title, class, focus_hwnd} and the hint says to close or dismiss it first.
         When the clipboard holds non-text data (image, files, rich text) that cannot be restored, paste is skipped and the text is typed with keys; the step reports clipboard_preserved=true and a warning.
         Concurrent go=true acts run one at a time. A dry run reports foreground_click_count=0; the plan is planned_foreground_click_count.
@@ -609,11 +609,19 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         Covered points (point_covered / point_covered_after_focus, dry-run occluded_points) give suggested_hwnd
         = the covering window: perceive_window(hwnd=suggested_hwnd) even when it is untitled and missing from
         windows(). Popups and dialogs may belong to a different process (pid) than the app window.
-        ime="off" also applies to key-only acts (Ctrl chords can be eaten by an IME). Any installed English
-        layout counts (en-GB 0809 as well as en-US), else another Latin one; the switch is polled up to 0.5 s and
-        verified by language id. If it cannot be verified the act warns (ime_unverified=true) and still runs, for
-        keys and text alike; ime="strict" aborts instead (reason=ime_failed). ime_layout_switched is true only
-        for a verified change; ime_restored appears only when something was switched or closed.
+        ime="off" also applies to key-only acts (Ctrl chords can be eaten by an IME). It acts on the thread of the
+        focused child window (GetGUIThreadInfo; else the stamp window's thread). Each installed English layout
+        (en-US, en-GB-US, en-GB), then other Latin ones, is tried and verified there by language id, all within one
+        0.75 s budget (ime.verify_budget_ms; ime.verify_ms = time used). If no layout sticks but the IME is open,
+        it is closed instead (ime_closed=true counts as suspended). ime reports thread_id, top_thread_id,
+        focus_hwnd, hkl_hex, hkl_before_hex, requested_hex, tried, ime_open_before/after and
+        ime_conversion_before/after (bit 0x1 = native input). Unverified: warning + ime_unverified=true and the act
+        still runs; ime="strict" aborts (reason=ime_failed). ime_layout_switched only for a verified change.
+        ime_restored only appears when a layout switch or IME close actually happened: true once undone, false if
+        undoing failed. ime_suspended alone never sets it.
+        after.unlisted_foreground=true when the foreground window is not in windows(); after.popup_hwnd /
+        after.popup {hwnd, title, class, why} name an unlisted window in front, over the stamp window's centre,
+        or blocking, so Qt/CEF popups that new_windows cannot see are visible.
         new_windows: clicks, Enter/Esc, F-keys, Alt combos and Ctrl(+Shift)+letter poll by default; an explicit
         new_window_wait_ms always polls, whatever the action (new_window_wait_reason=explicit|action|
         chain_step|action_cannot_open_window; chain_step = non-final chain step, default wait capped at 250 ms). If focus fails because the foreground window is elevated,

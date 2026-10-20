@@ -71,7 +71,7 @@ class TestImeKeyOnly(unittest.TestCase):
         with mock.patch("cu_perceive.ime.suspend_ime", return_value=st) as s:
             err = act_mod._suspend_ime_for_act(out, {"hwnd": 123}, parse_steps(key="ctrl+w"), "off")
         self.assertIsNone(err)
-        s.assert_called_once_with(123)
+        s.assert_called_once_with(123, mode="off")
         self.assertTrue(out["ime_suspended"] and out["ime_layout_switched"] and out["ime_verified"])
         self.assertNotIn("ime_skipped", out)
 

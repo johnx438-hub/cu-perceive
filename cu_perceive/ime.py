@@ -61,20 +61,119 @@ def _bind(dll, name: str, args, restype) -> None:
     fn.restype = restype
 
 
-def probe_ime(hwnd: int, *, user32=None, imm32=None) -> dict:
-    """Layout and IME-open state for ``hwnd``'s thread. Never raises.
+WM_IME_CONTROL = 0x0283
+IMC_GETCONVERSIONMODE = 0x0001
+IMC_GETOPENSTATUS = 0x0005
+IMC_SETOPENSTATUS = 0x0006
+IME_CMODE_NATIVE = 0x0001  # set = native (e.g. Chinese) input; clear = alphanumeric
+GA_ROOT = 2
 
-    Returns hwnd, thread_id, hkl, hkl_hex, lang_id, ime_open, ime_active, ok.
+
+def focus_target(hwnd: int, user32) -> tuple[int, int, int]:
+    """(focus_hwnd, focus_thread, top_thread) for top-level ``hwnd``.
+
+    The focused child can live on another thread than the top-level window (WPS: the
+    document view). GetGUIThreadInfo on the top-level thread, else on the foreground
+    thread when its focus is inside ``hwnd``. Falls back to (hwnd, top_thread, top_thread).
+    """
+    import ctypes
+
+    _bind(user32, "GetWindowThreadProcessId", [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)], wintypes.DWORD)
+    top = int(user32.GetWindowThreadProcessId(hwnd, None) or 0)
+    focus = 0
+    for tid in (top, 0):
+        f = _gui_focus_hwnd(user32, tid) if (tid or top) else 0
+        if not f:
+            continue
+        if tid == 0:
+            try:
+                _bind(user32, "GetAncestor", [wintypes.HWND, wintypes.UINT], wintypes.HWND)
+                if int(user32.GetAncestor(f, GA_ROOT) or 0) != int(hwnd):
+                    continue
+            except Exception:
+                continue
+        focus = f
+        break
+    if not focus:
+        return int(hwnd), top, top
+    try:
+        ftid = int(user32.GetWindowThreadProcessId(focus, None) or 0) or top
+    except Exception:
+        ftid = top
+    return int(focus), ftid, top
+
+
+def _ime_window_state(user32, imm32, focus: int) -> tuple[bool | None, int | None]:
+    """(open, conversion) via ImmGetDefaultIMEWnd + WM_IME_CONTROL. Works across threads,
+    where ImmGetContext on another thread's window returns NULL."""
+    if imm32 is None:
+        return None, None
+    import ctypes
+
+    try:
+        _bind(imm32, "ImmGetDefaultIMEWnd", [wintypes.HWND], wintypes.HWND)
+        ime_wnd = int(imm32.ImmGetDefaultIMEWnd(focus) or 0)
+        if not ime_wnd:
+            return None, None
+        _bind(user32, "SendMessageTimeoutW", [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM,
+                                              wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t)],
+              wintypes.LPARAM)
+        vals = []
+        for cmd in (IMC_GETOPENSTATUS, IMC_GETCONVERSIONMODE):
+            res = ctypes.c_size_t(0)
+            ok = user32.SendMessageTimeoutW(ime_wnd, WM_IME_CONTROL, cmd, 0, 0x0002, 200, ctypes.byref(res))
+            vals.append(int(res.value) if ok else None)
+        return (None if vals[0] is None else bool(vals[0])), vals[1]
+    except Exception:
+        return None, None
+
+
+def set_ime_open(hwnd_or_focus: int, open_: bool, *, user32=None, imm32=None) -> bool:
+    """IMC_SETOPENSTATUS via the focus window's default IME window; ImmSetOpenStatus as fallback."""
+    import ctypes
+
+    user32 = user32 or _load_user32()
+    imm32 = imm32 or _load_imm32()
+    if imm32 is None or user32 is None:
+        return False
+    try:
+        _bind(imm32, "ImmGetDefaultIMEWnd", [wintypes.HWND], wintypes.HWND)
+        ime_wnd = int(imm32.ImmGetDefaultIMEWnd(int(hwnd_or_focus)) or 0)
+        if ime_wnd:
+            _bind(user32, "SendMessageTimeoutW", [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM,
+                                                  wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t)],
+                  wintypes.LPARAM)
+            res = ctypes.c_size_t(0)
+            if user32.SendMessageTimeoutW(ime_wnd, WM_IME_CONTROL, IMC_SETOPENSTATUS, 1 if open_ else 0,
+                                          0x0002, 200, ctypes.byref(res)):
+                return True
+    except Exception:
+        pass
+    try:
+        _bind(imm32, "ImmGetContext", [wintypes.HWND], wintypes.HANDLE)
+        _bind(imm32, "ImmSetOpenStatus", [wintypes.HANDLE, wintypes.BOOL], wintypes.BOOL)
+        _bind(imm32, "ImmReleaseContext", [wintypes.HWND, wintypes.HANDLE], wintypes.BOOL)
+        himc = imm32.ImmGetContext(int(hwnd_or_focus))
+        if himc:
+            try:
+                return bool(imm32.ImmSetOpenStatus(himc, bool(open_)))
+            finally:
+                imm32.ImmReleaseContext(int(hwnd_or_focus), himc)
+    except Exception:
+        pass
+    return False
+
+
+def probe_ime(hwnd: int, *, user32=None, imm32=None) -> dict:
+    """Layout and IME state of the thread that owns ``hwnd``'s focused child. Never raises.
+
+    Returns hwnd, focus_hwnd, thread_id (the focus thread), top_thread_id, hkl, hkl_hex,
+    lang_id, ime_open, ime_conversion (IME_CMODE_* bits; 0x1 = native input), ime_active, ok.
     """
     hwnd = int(hwnd or 0)
     out = {
-        "ok": False,
-        "hwnd": hwnd,
-        "thread_id": None,
-        "hkl": None,
-        "hkl_hex": None,
-        "lang_id": None,
-        "ime_open": None,
+        "ok": False, "hwnd": hwnd, "focus_hwnd": None, "thread_id": None, "top_thread_id": None,
+        "hkl": None, "hkl_hex": None, "lang_id": None, "ime_open": None, "ime_conversion": None,
         "ime_active": False,
     }
     if not hwnd:
@@ -89,34 +188,49 @@ def probe_ime(hwnd: int, *, user32=None, imm32=None) -> dict:
     import ctypes
 
     try:
-        _bind(user32, "GetWindowThreadProcessId", [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)], wintypes.DWORD)
+        try:
+            focus, tid, top = focus_target(hwnd, user32)
+        except Exception:
+            _bind(user32, "GetWindowThreadProcessId", [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)], wintypes.DWORD)
+            top = int(user32.GetWindowThreadProcessId(hwnd, None) or 0)
+            focus, tid = hwnd, top
         _bind(user32, "GetKeyboardLayout", [wintypes.DWORD], wintypes.HANDLE)
-        tid = int(user32.GetWindowThreadProcessId(hwnd, None) or 0)
         hkl = int(user32.GetKeyboardLayout(tid) or 0)
     except Exception as e:
         out["error"] = f"GetKeyboardLayout failed: {e}"
         return out
     ime_open = None
+    conv = None
     if imm32 is not None:
         try:
             _bind(imm32, "ImmGetContext", [wintypes.HWND], wintypes.HANDLE)
             _bind(imm32, "ImmGetOpenStatus", [wintypes.HANDLE], wintypes.BOOL)
             _bind(imm32, "ImmReleaseContext", [wintypes.HWND, wintypes.HANDLE], wintypes.BOOL)
-            himc = imm32.ImmGetContext(hwnd)
+            himc = imm32.ImmGetContext(focus)
             if himc:
                 try:
                     ime_open = bool(imm32.ImmGetOpenStatus(himc))
+                    try:
+                        _bind(imm32, "ImmGetConversionStatus",
+                              [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD)],
+                              wintypes.BOOL)
+                        c, sm = wintypes.DWORD(0), wintypes.DWORD(0)
+                        if imm32.ImmGetConversionStatus(himc, ctypes.byref(c), ctypes.byref(sm)):
+                            conv = int(c.value)
+                    except Exception:
+                        pass
                 finally:
-                    imm32.ImmReleaseContext(hwnd, himc)
+                    imm32.ImmReleaseContext(focus, himc)
         except Exception:
             ime_open = None
+        if ime_open is None:
+            # other-thread focus window: ImmGetContext is NULL there; ask its IME window instead
+            ime_open, conv2 = _ime_window_state(user32, imm32, focus)
+            conv = conv if conv is not None else conv2
     out.update({
-        "ok": True,
-        "thread_id": tid,
-        "hkl": hkl,
-        "hkl_hex": hkl_hex(hkl),
-        "lang_id": f"0x{hkl & 0xFFFF:04x}",
-        "ime_open": ime_open,
+        "ok": True, "focus_hwnd": int(focus), "thread_id": tid, "top_thread_id": top,
+        "hkl": hkl, "hkl_hex": hkl_hex(hkl), "lang_id": f"0x{hkl & 0xFFFF:04x}",
+        "ime_open": ime_open, "ime_conversion": conv,
         "ime_active": layout_ime_active(hkl, ime_open),
     })
     return out
@@ -282,15 +396,20 @@ def _request_layout(user32, targets, hkl: int) -> list[str]:
     return errs
 
 
-def suspend_ime(hwnd: int, *, user32=None, imm32=None, layouts=None, probe=None, sleep=None,
-                verify_s: float = 0.5) -> dict:
-    """Close the target window's IME and request an installed Latin layout, then verify.
+IME_VERIFY_BUDGET_S = 0.75  # total verify budget across every layout candidate (and the IME-close fallback)
 
-    Never calls LoadKeyboardLayout. The request goes to the focused child and the
-    top-level window of the target thread; the result is polled for up to ``verify_s``
-    (the switch is asynchronous). Never raises for an unverified switch: the result has
-    layout_switched (verified), switch_requested, verified and, when not verified, error.
-    Raises ImeError only when Windows APIs are unavailable.
+
+def suspend_ime(hwnd: int, *, user32=None, imm32=None, layouts=None, probe=None, sleep=None,
+                verify_s: float = IME_VERIFY_BUDGET_S, mode: str = "off") -> dict:
+    """Make ``hwnd``'s focused input thread send ASCII for this act, then verify.
+
+    1. Each installed English layout, then other Latin ones, is requested on the focused child
+       and the top-level window (WM_INPUTLANGCHANGEREQUEST) and verified on the focus thread.
+       ``verify_s`` is the TOTAL budget, split evenly over the candidates.
+    2. If no layout sticks but the IME is open, it is closed (IMC_SETOPENSTATUS 0); a confirmed
+       close counts as suspended and verified (ime_closed=True).
+    Never calls LoadKeyboardLayout. Never raises for an unverified result (see ``error``);
+    raises ImeError only when Windows APIs are unavailable.
     """
     import time as _time
 
@@ -301,125 +420,120 @@ def suspend_ime(hwnd: int, *, user32=None, imm32=None, layouts=None, probe=None,
         user32 = _load_user32()
         imm32 = _load_imm32()
     if user32 is None:
-        raise ImeError("ime=off needs Windows to switch the target window's layout")
+        raise ImeError(f"ime={mode} needs Windows to switch the target window's layout")
     hwnd = int(hwnd)
     before_hkl = info.get("hkl")
     if layouts is None:
         layouts = installed_layouts(user32)
     candidates = latin_candidates(layouts)
     latin = candidates[0] if candidates else None
+    focus = int(info.get("focus_hwnd") or 0) or hwnd
     state = {
-        "hwnd": hwnd, "hkl": before_hkl, "ime_open": info.get("ime_open"),
+        "hwnd": hwnd, "focus_hwnd": focus, "thread_id": info.get("thread_id"),
+        "hkl": before_hkl, "ime_open": info.get("ime_open"), "ime_conversion": info.get("ime_conversion"),
         "english_hkl": int(latin) if latin else None, "installed": [hkl_hex(h) for h in layouts or []],
         "switch_requested": False, "layout_switched": False, "closed": False, "verified": False,
         "already_latin": bool(info.get("ok") and layout_ok(before_hkl, latin, info.get("ime_open"))),
-        "tried": [], "_user32": user32, "_imm32": imm32, "_probe": probe, "_sleep": sleep,
+        "tried": [], "verify_budget_ms": int(round(verify_s * 1000)), "mode": mode,
+        "_user32": user32, "_imm32": imm32, "_probe": probe, "_sleep": sleep,
     }
+    after = info
     if state["already_latin"]:
         state["verified"] = True
+        state["after"] = info
         return state
     errs: list[str] = []
-    if imm32 is not None and info.get("ime_open"):
-        try:
-            _bind(imm32, "ImmGetContext", [wintypes.HWND], wintypes.HANDLE)
-            _bind(imm32, "ImmSetOpenStatus", [wintypes.HANDLE, wintypes.BOOL], wintypes.BOOL)
-            _bind(imm32, "ImmReleaseContext", [wintypes.HWND, wintypes.HANDLE], wintypes.BOOL)
-            himc = imm32.ImmGetContext(hwnd)
-            if himc:
-                try:
-                    state["closed"] = bool(imm32.ImmSetOpenStatus(himc, False))
-                finally:
-                    imm32.ImmReleaseContext(hwnd, himc)
-        except Exception as e:
-            errs.append(f"ImmSetOpenStatus: {e}")
-    focus = _gui_focus_hwnd(user32, info.get("thread_id") or 0) if (candidates and info.get("thread_id")) else 0
     targets = [h for h in dict.fromkeys([focus, hwnd]) if h]
-    after = info
-    waited = 0.0
+    state["targets"] = targets
     step = 0.05
-    per = verify_s if len(candidates) <= 1 else max(0.2, verify_s / 2)
-    for cand in candidates or [None]:
-        if cand is not None:
-            errs += _request_layout(user32, targets, cand)
-            state["switch_requested"] = True
-            state["targets"] = targets
-            state["tried"].append(hkl_hex(cand))
+    per = verify_s / max(1, len(candidates))
+    waited = 0.0
+    for cand in candidates:
+        errs += _request_layout(user32, targets, cand)
+        state["switch_requested"] = True
+        state["tried"].append(hkl_hex(cand))
         spent = 0.0
         while True:
             after = probe(hwnd)
             if after.get("ok") and layout_ok(after.get("hkl"), cand, after.get("ime_open")):
                 state["verified"] = True
+                state["english_hkl"] = int(cand)
                 break
-            if cand is None and state["closed"] and after.get("ok") and after.get("ime_open") is False:
-                state["verified"] = True  # no Latin layout: a closed IME passes ASCII through
-                state["closed_only"] = True
-                break
-            if spent >= per:
+            if spent + 1e-9 >= per:
                 break
             sleep(step)
             spent += step
         waited += spent
         if state["verified"]:
-            if cand is not None:
-                state["english_hkl"] = int(cand)
             break
+    if not state["verified"]:
+        if state["switch_requested"]:
+            # undo the unverified request right away so the window is left as it was
+            _request_layout(user32, targets, int(before_hkl)) if before_hkl else None
+        now = probe(hwnd) if candidates else after
+        if now.get("ime_open") and imm32 is not None:
+            if set_ime_open(focus, False, user32=user32, imm32=imm32):
+                after = probe(hwnd)
+                if after.get("ime_open") is False:
+                    state["closed"] = True
+                    state["verified"] = True
+                    state["closed_only"] = True
+        else:
+            after = now
+    state["after"] = after
     state["after_hkl_hex"] = after.get("hkl_hex")
     state["verify_ms"] = int(round(waited * 1000))
     changed = bool(after.get("hkl") and before_hkl and int(after["hkl"]) != int(before_hkl))
-    state["layout_switched"] = bool(state["verified"] and changed)
+    state["layout_switched"] = bool(state["verified"] and changed and not state.get("closed_only"))
     if not state["verified"]:
         why = "no English or Latin keyboard layout is installed" if not latin else (
-            f"requested {', '.join(state['tried'])} but the window still reports {after.get('hkl_hex')}")
-        state["error"] = (f"ime=off did not switch hwnd {hwnd} ({why}, ime_open={after.get('ime_open')})"
+            f"requested {', '.join(state['tried'])} on focus hwnd {focus} (thread {after.get('thread_id')}) "
+            f"but it still reports {after.get('hkl_hex')}")
+        state["error"] = (f'ime="{mode}" could not switch hwnd {hwnd} ({why}, ime_open={after.get("ime_open")}, '
+                          f'ime_conversion={after.get("ime_conversion")})'
                           + (f"; {'; '.join(errs)}" if errs else ""))
     return state
 
 
 def restore_ime(state: dict | None) -> dict:
-    """Put back the layout / IME open-state that ``suspend_ime`` changed. Best effort.
+    """Undo what ``suspend_ime`` actually changed. Best effort.
 
-    restored=True only when something had been switched or closed and was put back.
+    restored=True only when a verified layout switch or an IME close happened and was undone
+    (read back when a probe is available). Nothing changed -> {"restored": False, "changed": False}.
     """
-    if not state or not (state.get("switch_requested") or state.get("closed")):
-        return {"ok": True, "restored": False}
+    if not state or not (state.get("layout_switched") or state.get("closed")):
+        return {"ok": True, "restored": False, "changed": False}
     user32 = state.get("_user32") or _load_user32()
     imm32 = state.get("_imm32")
     if imm32 is None and state.get("closed"):
         imm32 = _load_imm32()
     hwnd = int(state.get("hwnd") or 0)
+    focus = int(state.get("focus_hwnd") or 0) or hwnd
     errors: list[str] = []
-    if user32 is not None and hwnd and state.get("hkl") and state.get("switch_requested"):
+    if user32 is not None and hwnd and state.get("hkl") and state.get("layout_switched"):
         errors += _request_layout(user32, state.get("targets") or [hwnd], int(state["hkl"]))
-    if imm32 is not None and hwnd and state.get("closed"):
-        try:
-            _bind(imm32, "ImmGetContext", [wintypes.HWND], wintypes.HANDLE)
-            _bind(imm32, "ImmSetOpenStatus", [wintypes.HANDLE, wintypes.BOOL], wintypes.BOOL)
-            _bind(imm32, "ImmReleaseContext", [wintypes.HWND, wintypes.HANDLE], wintypes.BOOL)
-            himc = imm32.ImmGetContext(hwnd)
-            if himc:
-                try:
-                    imm32.ImmSetOpenStatus(himc, bool(state.get("ime_open")))
-                finally:
-                    imm32.ImmReleaseContext(hwnd, himc)
-        except Exception as e:
-            errors.append(f"ime: {e}")
+    if hwnd and state.get("closed"):
+        if not set_ime_open(focus, bool(state.get("ime_open")), user32=user32, imm32=imm32):
+            errors.append("ime: could not reopen the IME")
     if errors:
-        return {"ok": False, "restored": False, "error": "; ".join(errors)}
+        return {"ok": False, "restored": False, "changed": True, "error": "; ".join(errors)}
     probe, sleep = state.get("_probe"), state.get("_sleep")
-    if probe and sleep and state.get("layout_switched") and state.get("hkl"):
-        # the request is posted: confirm the original language is back (usually < 50 ms)
-        want = int(state["hkl"]) & 0xFFFF
+    if probe and sleep:
+        want = int(state.get("hkl") or 0) & 0xFFFF
         now: dict = {}
         for _ in range(7):
             try:
                 now = probe(hwnd)
             except Exception:
-                return {"ok": True, "restored": True, "verified": None}  # cannot read back
-            if now.get("ok") and (int(now.get("hkl") or 0) & 0xFFFF) == want:
-                return {"ok": True, "restored": True, "verified": True}
+                return {"ok": True, "restored": True, "changed": True, "verified": None}
+            lay_ok = not state.get("layout_switched") or (int(now.get("hkl") or 0) & 0xFFFF) == want
+            open_ok = not state.get("closed") or now.get("ime_open") in (None, bool(state.get("ime_open")))
+            if now.get("ok") and lay_ok and open_ok:
+                return {"ok": True, "restored": True, "changed": True, "verified": True, "after": now}
             sleep(0.05)
-        return {"ok": False, "restored": False, "error": f"layout still {now.get('hkl_hex')} after restore"}
-    return {"ok": True, "restored": True}
+        return {"ok": False, "restored": False, "changed": True,
+                "error": f"still {now.get('hkl_hex')} / ime_open={now.get('ime_open')} after restore"}
+    return {"ok": True, "restored": True, "changed": True}
 
 
 def normalize_ime(raw) -> str | None:
