@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from .settings import get as _cfg
+
 BACKEND_ORDER: tuple[str, ...] = ("wgc", "printwindow")
 EXPERIMENTAL_BACKENDS: tuple[str, ...] = ("dwm",)
 CAPTURE_CHOICES: tuple[str, ...] = ("auto", "wgc", "dwm", "printwindow", "screen")
@@ -75,8 +77,12 @@ def parse_capture_choice(value: str | None) -> tuple[str, ...]:
     return BACKEND_ORDER if v == "auto" else (v,)
 
 
-def frame_has_content(img: np.ndarray | None, threshold: int = CONTENT_THRESHOLD, step: int = CONTENT_STEP) -> bool:
+def frame_has_content(img: np.ndarray | None, threshold: int | None = None, step: int | None = None) -> bool:
     """True if any sampled pixel channel exceeds ``threshold`` (all-black == failed grab)."""
+    if threshold is None:
+        threshold = int(_cfg("capture.content_threshold"))
+    if step is None:
+        step = int(_cfg("capture.content_step"))
     if img is None or getattr(img, "size", 0) == 0:
         return False
     chans = img.shape[2] if img.ndim == 3 else 1
@@ -101,12 +107,14 @@ def _size(rect) -> tuple[int, int]:
     return int(rect[2]) - int(rect[0]), int(rect[3]) - int(rect[1])
 
 
-def resolve_frame_rect(frame_w: int, frame_h: int, candidates, slop: int = FRAME_SLOP_PX):
+def resolve_frame_rect(frame_w: int, frame_h: int, candidates, slop: int | None = None):
     """Pick which screen rect a captured frame covers.
 
     Returns (rect, sx, sy): the first candidate whose size matches the frame within
     ``slop`` px (scale 1), else the first candidate scaled to the frame size.
     """
+    if slop is None:
+        slop = int(_cfg("capture.frame_slop_px"))
     cands = [tuple(int(v) for v in c) for c in candidates if c]
     if not cands:
         raise CaptureError("no window rect to place the captured frame")
@@ -203,12 +211,14 @@ def _wgc_once(WindowsCapture, hwnd: int, draw_border, timeout: float):
     return box["img"]
 
 
-def wgc_capture(hwnd: int, timeout: float = WGC_TIMEOUT_S):
+def wgc_capture(hwnd: int, timeout: float | None = None):
     """One full-resolution frame via Windows.Graphics.Capture (windows-capture wheel).
 
     Borderless is requested (Win11 / build 20348+); older builds may still show the
     yellow capture border for the ~frame it takes.
     """
+    if timeout is None:
+        timeout = float(_cfg("capture.wgc_timeout_s"))
     try:
         from windows_capture import WindowsCapture
     except ImportError as e:

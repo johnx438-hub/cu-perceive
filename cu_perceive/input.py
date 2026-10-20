@@ -11,6 +11,7 @@ import time
 from ctypes import wintypes
 
 from .keys import VK, UnknownKeyError, check_key_spec, key_names, key_names_summary, normalize_key  # noqa: F401
+from .settings import get as _cfg
 
 # None off Windows so the pure helpers (lParam packing, densify) stay importable for tests.
 user32 = ctypes.WinDLL("user32", use_last_error=True) if sys.platform == "win32" else None
@@ -211,9 +212,9 @@ def post_click_xy(
     for _ in range(count):
         _post_msg(hwnd, WM_MOUSEMOVE, 0, lp)
         _post_msg(hwnd, down_msg, down_flag, lp)
-        time.sleep(0.035)
+        time.sleep(float(_cfg("timing.post_down_s")))
         _post_msg(hwnd, up_msg, 0, lp)
-        time.sleep(0.050)
+        time.sleep(float(_cfg("timing.post_up_s")))
     out = {
         "ok": True,
         "method": "post",
@@ -228,7 +229,9 @@ def post_click_xy(
     return out
 
 
-def type_text(text: str, gap: float = 0.012) -> dict:
+def type_text(text: str, gap: float | None = None) -> dict:
+    if gap is None:
+        gap = float(_cfg("timing.type_gap_s"))
     for ch in text:
         code = ord(ch)
         if ch == "\n":
@@ -283,26 +286,32 @@ def _densify(points: list[tuple[int, int]], step_px: int = 4) -> list[tuple[int,
 
 def drag_path(
     points,
-    step_px: int = 4,
-    hold: float = 0.06,
-    gap: float = 0.004,
+    step_px: int | None = None,
+    hold: float | None = None,
+    gap: float | None = None,
 ) -> dict:
     """Left-down at first point, walk a densified polyline, left-up. Screen pixels."""
+    if step_px is None:
+        step_px = int(_cfg("drag.step_px"))
+    if hold is None:
+        hold = float(_cfg("drag.hold_s"))
+    if gap is None:
+        gap = float(_cfg("drag.gap_s"))
     pts = [(int(p[0]), int(p[1])) for p in points]
     if len(pts) < 2:
         raise ValueError("drag needs at least two points")
     dense = _densify(pts, step_px=step_px)
     x0, y0 = dense[0]
     move(x0, y0)
-    time.sleep(0.06)
+    time.sleep(float(_cfg("drag.pre_down_s")))
     flags_abs = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
     _mouse(MOUSEEVENTF_LEFTDOWN | flags_abs, x0, y0)
-    time.sleep(max(0.08, hold))
+    time.sleep(max(float(_cfg("drag.hold_floor_s")), hold))
     for x, y in dense[1:]:
         _mouse(flags_abs, x, y)
         if gap:
             time.sleep(gap)
-    time.sleep(0.04)
+    time.sleep(float(_cfg("drag.pre_up_s")))
     x1, y1 = dense[-1]
     _mouse(MOUSEEVENTF_LEFTUP | flags_abs, x1, y1)
     return {
@@ -315,7 +324,9 @@ def drag_path(
     }
 
 
-def drag_xy(x1: int, y1: int, x2: int, y2: int, steps: int = 12, hold: float = 0.08) -> dict:
+def drag_xy(x1: int, y1: int, x2: int, y2: int, steps: int | None = None, hold: float | None = None) -> dict:
+    if steps is None:
+        steps = int(_cfg("drag.xy_steps"))
     dist = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
     step_px = max(1, int(dist / max(2, int(steps))))
     return drag_path([(x1, y1), (x2, y2)], step_px=step_px, hold=hold)
@@ -324,7 +335,7 @@ def drag_xy(x1: int, y1: int, x2: int, y2: int, steps: int = 12, hold: float = 0
 def scroll_xy(notches: int, x: int | None = None, y: int | None = None) -> dict:
     if x is not None and y is not None:
         move(x, y)
-        time.sleep(0.04)
+        time.sleep(float(_cfg("timing.scroll_pre_s")))
     data = int(notches) * WHEEL_DELTA
     # mouseData is unsigned DWORD; negative notches need wrap
     data_u = ctypes.c_uint32(data).value
@@ -362,7 +373,7 @@ def unicode_clipboard_bytes(text: str) -> bytes:
 
 
 def _clipboard_backoff(attempt: int) -> None:
-    time.sleep(min(CLIPBOARD_OPEN_MAX_S, CLIPBOARD_OPEN_BASE_S * (2 ** max(0, int(attempt)))))
+    time.sleep(min(float(_cfg("clipboard.open_max_s")), float(_cfg("clipboard.open_base_s")) * (2 ** max(0, int(attempt)))))
 
 
 def _close_clipboard(win32clipboard) -> None:
@@ -384,10 +395,12 @@ def _set_unicode_clipboard(win32clipboard, win32con, text: str) -> None:
         setter(str(text), win32con.CF_UNICODETEXT)
 
 
-def _with_open_clipboard(fn, *, tries: int = CLIPBOARD_OPEN_TRIES):
+def _with_open_clipboard(fn, *, tries: int | None = None):
     """OpenClipboard with backoff. Retries access-denied races. Raises ClipboardError."""
     import win32clipboard
 
+    if tries is None:
+        tries = int(_cfg("clipboard.open_tries"))
     last: Exception | None = None
     attempts = max(1, int(tries))
     for i in range(attempts):
@@ -570,7 +583,9 @@ def _start_clipboard_worker():
     )
 
 
-def _clipboard_worker_call(op: str, text: str | None, *, timeout: float = 8.0) -> dict:
+def _clipboard_worker_call(op: str, text: str | None, *, timeout: float | None = None) -> dict:
+    if timeout is None:
+        timeout = float(_cfg("clipboard.worker_timeout_s"))
     """One JSON line in, one JSON line out. A dead helper is restarted on the next call."""
     payload = (json.dumps({"op": op, "text": text}, ensure_ascii=False) + "\n").encode("utf-8")
     with _CLIPBOARD_WORKER_LOCK:
@@ -627,9 +642,7 @@ def _clipboard_worker_call(op: str, text: str | None, *, timeout: float = 8.0) -
 
 def clipboard_rpc(op: str, text: str | None = None) -> dict:
     """Clipboard get/set/empty that always returns {ok: bool}. A native crash stays in the helper."""
-    child = os.environ.get("CU_PERCEIVE_CLIPBOARD_CHILD") == "1"
-    inproc = child or os.environ.get("CU_PERCEIVE_CLIPBOARD_INPROCESS") == "1"
-    if inproc:
+    if _cfg("safety.clipboard_inprocess"):
         return _clipboard_inprocess(op, text)
     return _clipboard_worker_call(op, text)
 
@@ -651,12 +664,12 @@ def clipboard_set(text: str) -> None:
 
 def _ctrl_v() -> None:
     _vk_down(VK["ctrl"])
-    time.sleep(0.02)
+    time.sleep(float(_cfg("timing.paste_chord_s")))
     _send(INPUT(type=INPUT_KEYBOARD, union=INPUT_UNION(ki=KEYBDINPUT(0x56, 0, 0, 0, 0))))
     _send(INPUT(type=INPUT_KEYBOARD, union=INPUT_UNION(ki=KEYBDINPUT(0x56, 0, KEYEVENTF_KEYUP, 0, 0))))
-    time.sleep(0.02)
+    time.sleep(float(_cfg("timing.paste_chord_s")))
     _vk_up(VK["ctrl"])
-    time.sleep(0.08)
+    time.sleep(float(_cfg("timing.paste_after_s")))
 
 
 def _restore_staged(staged: dict) -> tuple[bool, str | None]:
@@ -741,7 +754,7 @@ def finish_paste(staged: dict) -> dict:
         return failed
     send_error = None
     try:
-        time.sleep(0.05)
+        time.sleep(float(_cfg("timing.paste_before_s")))
         _ctrl_v()
     except Exception as e:
         send_error = e
@@ -783,7 +796,7 @@ def paste_text(text: str, restore: bool = True) -> dict:
             }
         send_error = None
         try:
-            time.sleep(0.05)
+            time.sleep(float(_cfg("timing.paste_before_s")))
             _ctrl_v()
         except Exception as e:
             send_error = e
@@ -1326,9 +1339,11 @@ MODS = frozenset({"ctrl", "alt", "shift", "win"})
 
 
 
-def click_xy(x, y, double=False, button: str = "left", hold: float = 0):
+def click_xy(x, y, double=False, button: str = "left", hold: float | None = None):
+    if hold is None:
+        hold = float(_cfg("timing.click_hold_s"))
     move(x, y)
-    time.sleep(0.05)
+    time.sleep(float(_cfg("timing.click_pre_s")))
     btn = (button or "left").lower()
     if btn == "right":
         down_f, up_f = MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP
@@ -1344,13 +1359,15 @@ def click_xy(x, y, double=False, button: str = "left", hold: float = 0):
         time.sleep(held)
     _send(up)
     if double and btn == "left" and held <= 0:
-        time.sleep(0.08)
+        time.sleep(float(_cfg("timing.click_double_gap_s")))
         _send(down)
         _send(up)
     return {"ok": True, "x": int(x), "y": int(y), "double": bool(double), "button": btn, "hold": held}
 
 
-def hover_xy(x, y, linger: float = 0.15) -> dict:
+def hover_xy(x, y, linger: float | None = None) -> dict:
+    if linger is None:
+        linger = float(_cfg("timing.hover_linger_s"))
     move(x, y)
     time.sleep(linger)
     return {"ok": True, "x": int(x), "y": int(y), "via": "hover"}
@@ -1365,10 +1382,10 @@ def tap_combo(spec: str) -> dict:
         mods = mods[:-1]
     for m in mods:
         _vk_down(VK[m])
-        time.sleep(0.015)
+        time.sleep(float(_cfg("timing.tap_combo_s")))
     for k in keys:
         tap_key(k)
-        time.sleep(0.015)
+        time.sleep(float(_cfg("timing.tap_combo_s")))
     for m in reversed(mods):
         _vk_up(VK[m])
     return {"ok": True, "key": spec.lower()}

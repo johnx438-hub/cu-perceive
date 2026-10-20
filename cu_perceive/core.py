@@ -173,7 +173,7 @@ def clamp_roi(roi, img_w: int, img_h: int) -> list[int]:
     return [L, T, W, H]
 
 
-def roi_norm_to_pixel(roi_norm, full_w: int, full_h: int, default_half: int = 150):
+def roi_norm_to_pixel(roi_norm, full_w: int, full_h: int, default_half: int | None = None):
     """Convert [cx,cy] or [cx,cy,half] in full-window 0-1000 -> clamped pixel ROI + normalized triple.
 
     half is in 0-1000 units on both axes (square in norm space). Default half=150.
@@ -193,6 +193,10 @@ def roi_norm_to_pixel(roi_norm, full_w: int, full_h: int, default_half: int = 15
         raise ValueError(f"roi_norm must be CX,CY[,HALF], got {roi_norm!r}")
     if len(nums) not in (2, 3):
         raise ValueError(f"roi_norm must be CX,CY[,HALF] (2 or 3 ints), got {roi_norm!r}")
+    if default_half is None:
+        from .settings import get as _cfg
+
+        default_half = int(_cfg("perception.roi_half"))
     cx, cy = nums[0], nums[1]
     half = int(nums[2]) if len(nums) == 3 else int(default_half)
     if half <= 0:
@@ -271,7 +275,9 @@ def _capture_pinned(hwnd: int, *, focus: bool, capture: str) -> dict:
         from .windows import focus_and_verify
 
         focus_info = focus_and_verify(hwnd, retries=1)
-        time.sleep(RESTORE_SETTLE_S)
+        from .settings import get as _cfg
+
+        time.sleep(float(_cfg("focus.restore_settle_s")))
         origin, win = refresh_geom(hwnd)
     else:
         origin, win = live_geom(hwnd)
@@ -307,7 +313,9 @@ def _capture_pinned(hwnd: int, *, focus: bool, capture: str) -> dict:
     if result.blank:
         warnings.append("capture is all black on every backend; the window may really be black, or hidden")
     if focus and capture_looks_implausible(result.image, origin):
-        time.sleep(RESTORE_SETTLE_S)
+        from .settings import get as _cfg
+
+        time.sleep(float(_cfg("focus.restore_settle_s")))
         origin, win2 = refresh_geom(hwnd)
         win = win2 or win
         if origin and not is_sentinel_origin(origin):

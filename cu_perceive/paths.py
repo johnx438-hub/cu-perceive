@@ -27,11 +27,12 @@ def coerce_out_dir(raw: str | None) -> str | None:
         return f"{drive}:\\{rest}"
     if s.startswith("/home/") or s.startswith("/root/"):
         posix = s.replace("/", "\\")
-        return f"\\\\wsl.localhost\\{WSL_DISTRO}{posix}"
+        distro = wsl_distro()
+        return f"\\\\wsl.localhost\\{distro}{posix}"
     if s.startswith("/") and not s.startswith("//"):
         raise ValueError(
             "out_dir looks like a Linux path. Use UNC "
-            rf"\\\\wsl.localhost\\{WSL_DISTRO}\\home\\<user>\\... "
+            rf"\\\\wsl.localhost\\{wsl_distro()}\\home\\<user>\\... "
             "or /mnt/c/.... A bare /home/<user> would write to C:\\home\\<user>."
         )
     return s

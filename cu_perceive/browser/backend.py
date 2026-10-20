@@ -94,17 +94,12 @@ def _spawn_argv(argv: list[str]) -> list[str]:
 
 def timeout_sec(command_timeout_ms: int = 0) -> float:
     """Subprocess ceiling. A per-command ``--timeout`` extends it, never shortens it."""
-    base = DEFAULT_TIMEOUT_SEC
-    raw = os.environ.get(ENV_TIMEOUT, "").strip()
-    if raw:
-        try:
-            parsed = float(raw)
-        except ValueError:
-            parsed = 0
-        if parsed > 0:
-            base = parsed
+    from ..settings import get as _cfg
+
+    base = float(_cfg("bsk.timeout_s"))
+    slack = float(_cfg("bsk.command_slack_s"))
     if command_timeout_ms and command_timeout_ms > 0:
-        return max(base, command_timeout_ms / 1000.0 + 15.0)
+        return max(base, command_timeout_ms / 1000.0 + slack)
     return base
 
 

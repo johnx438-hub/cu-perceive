@@ -488,7 +488,7 @@ class TestToolsRunOffTheEventLoop(unittest.TestCase):
                 mock.patch.object(mcp_server, "build_server", return_value=(app, lambda: None)):
             mcp_server.serve()
         self.assertEqual(set(app.registered), {
-            "windows", "perceive_window", "act", "launch_app", "apps",
+            "windows", "perceive_window", "act", "launch_app", "apps", "config",
             "browser_status", "browser_session", "browser_observe", "browser_tabs", "browser_act",
         })
         for name, fn in app.registered.items():

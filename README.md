@@ -271,8 +271,8 @@ every json in a large output directory.
   pass `--stamp` explicitly. With several windows open, pass `--hwnd` / MCP
   `hwnd` too: without a stamp it uses that window's newest stamp, and with a
   stamp it refuses one taken of another window (`reason: "hwnd_mismatch"`). MCP
-  drops parameters it doesn't know, so `hwnd` is the safe way to name the
-  window.
+  refuses arguments it does not declare (`reason: "unknown_args"`), so name the
+  window with the declared `hwnd` parameter.
 - A dry run fails (`ok: false`) when the stamped window is gone or its HWND, PID
   or process creation time no longer match. Other stamp problems (moved,
   resized, too old) only fail a dry run with `--strict-stamp`, but every result
@@ -281,11 +281,11 @@ every json in a large output directory.
   (0 when the run is refused). A dry run also leaves it at 0; the plan is
   `planned_foreground_click_count`. Concurrent `--go` / `go=true` acts in one
   process run one at a time. A live act takes its window snapshot inside that
-  lock. After a click, Enter, F-key, Alt combo, or Esc it polls for about
-  250ms (`CU_PERCEIVE_NEW_WINDOW_WAIT_MS`) and stops as soon as a new top-level
-  window appears, listed in `new_windows` (`hwnd`, `title`, `class`). Typing,
-  scrolling, and dragging do not wait. `after` is the foreground window when
-  the act returns.
+  lock. After a click, Enter, F-key, Alt combo, or Esc it polls for 1200 ms
+  (`CU_PERCEIVE_NEW_WINDOW_WAIT_MS`) and stops as soon as a new top-level
+  window appears, listed in `new_windows` (`hwnd`, `title`, `class`). A non-final
+  step in a chain polls for 250 ms instead. Typing, scrolling, and dragging do
+  not wait. `after` is the foreground window when the act returns.
 - `--method uia` without the `uia` extra exits with code 3 and prints the same
   `missing_extra` / `install` fields as `perceive --uia`. `--method auto`
   without it falls back to input and says so in `warnings`.
@@ -342,7 +342,19 @@ use a fake executable.
 
 ## Configuration
 
-Nothing machine-specific is hard-coded. Defaults and overrides:
+Nothing machine-specific is hard-coded. Timings and thresholds have built-in
+defaults (the values this build used when they were literals). An optional TOML
+file overrides them: `%LOCALAPPDATA%\cu-perceive\config.toml` on Windows, or
+`$XDG_DATA_HOME/cu-perceive/config.toml` elsewhere. `CU_PERCEIVE_CONFIG` points
+at a different file; if that variable is set and the file is missing, the load
+fails and the built-in defaults stay in effect. Precedence is built-in
+defaults, then the built-in profile, then the file (its base tables, then that
+profile's tables), then these environment variables, then per-call arguments. `cu-perceive config show` and the MCP
+`config` tool print the effective values (`validate` checks the file,
+`reload` re-reads it). A bad reload keeps the previous file. JSON results
+include `config_rev` (`<12 hex>@<profile>`). `--show-config` / `show_config=true`
+also attaches the values. Profiles are `default`, `demo-slow-human`, and
+`fast`, selected with `CU_PERCEIVE_PROFILE`, `--profile`, or `profile=`.
 
 | Setting | Default | Env var |
 |---|---|---|
@@ -357,6 +369,18 @@ Nothing machine-specific is hard-coded. Defaults and overrides:
 | `bsk` executable (browser tools) | `bsk` on `PATH` (`bsk.exe` only on Windows) | `CU_PERCEIVE_BSK` |
 | `bsk` subprocess timeout | 120 seconds | `CU_PERCEIVE_BSK_TIMEOUT` |
 | Browser acting verbs | run unless `dry_run=true` (`go` is ignored) | `CU_PERCEIVE_BSK_REQUIRE_GO=1` dry-runs unless `go=true` |
+| Config file | `<data dir>\config.toml` (optional) | `CU_PERCEIVE_CONFIG` |
+| Config profile | `default` | `CU_PERCEIVE_PROFILE` (`demo-slow-human`, `fast`) |
+| New-window poll | 1200 ms | `CU_PERCEIVE_NEW_WINDOW_WAIT_MS` (`0` / `off` / `none` disables; invalid falls back to 1200) |
+| Change-detect wait | 350 ms | `CU_PERCEIVE_CHANGE_WAIT_MS` (invalid, including `off`, falls back to 350) |
+| Change-detect floor | 0.001 of the window | `CU_PERCEIVE_CHANGE_MIN_RATIO` (invalid falls back to 0.001) |
+| OCR / YOLO timeout | 30 seconds | `CU_PERCEIVE_DETECT_TIMEOUT` (`0` / `off` / `none` / `inf` waits with no limit) |
+| OCR / YOLO in-process | off | `CU_PERCEIVE_DETECT_INPROC` (any value other than empty or `0` turns it on) |
+| UIA walk timeout | 20 seconds | `CU_PERCEIVE_UIA_WALK_TIMEOUT` (same `0` / `off` / `none` / `inf` as the detect timeout) |
+| Clipboard in this process | off | `CU_PERCEIVE_CLIPBOARD_INPROCESS=1` |
+| Clipboard worker child | off | `CU_PERCEIVE_CLIPBOARD_CHILD=1` (also forces the in-process clipboard path) |
+| WSL Windows Python | unset | `CU_PERCEIVE_PYTHON` (path to `python.exe` for `bin/cu-perceive.sh`) |
+| Win32 test simulation | off | `CU_PERCEIVE_TEST_SIMULATE_WIN32=1` (tests only) |
 
 The CLI and the MCP server each resolve the output dir on their own. The CLI
 defaults to `%LOCALAPPDATA%\cu-perceive\shots\perceive` for the user running

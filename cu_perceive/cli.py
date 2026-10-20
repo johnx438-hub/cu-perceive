@@ -53,12 +53,27 @@ def utf8_stdio() -> None:
                 pass
 
 
+def _emit(obj, args, *, indent: int | None = None) -> None:
+    """Print JSON. Dict responses gain config_rev; lists stay lists."""
+    from .settings import finish_response
+
+    if isinstance(obj, dict):
+        finish_response(obj, show_config=bool(getattr(args, "show_config", False)))
+    if indent is None:
+        print(json.dumps(obj, ensure_ascii=False))
+    else:
+        print(json.dumps(obj, ensure_ascii=False, indent=indent))
+
+
 def main(argv: list[str] | None = None) -> int:
     utf8_stdio()
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--profile", default=None, help="configuration profile: default, demo-slow-human, or fast")
+    common.add_argument("--show-config", action="store_true", help="include the effective config in the JSON result")
     parser = argparse.ArgumentParser(prog="cu-perceive")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("perceive", help="window/screen -> 0-1000 grid map; OCR optional")
+    p = sub.add_parser("perceive", parents=[common], help="window/screen -> 0-1000 grid map; OCR optional")
     p.add_argument("--image", help="existing png; default grab primary screen")
     p.add_argument("--out", help="output directory")
     p.add_argument("--hwnd", type=int, help="capture this window client area")
@@ -91,7 +106,7 @@ def main(argv: list[str] | None = None) -> int:
         help="E2 light verify: CX,CY[,HALF] in full-window 0-1000 (HALF default 150); crop around center",
     )
 
-    w = sub.add_parser("windows", help="list windows and write a desktop ruler map")
+    w = sub.add_parser("windows", parents=[common], help="list windows and write a desktop ruler map")
     w.add_argument("--title", help="filter by title substring")
     w.add_argument("--exe", help="filter by exe substring")
     w.add_argument("--hwnd", type=int, help="look up one hwnd")
@@ -99,6 +114,7 @@ def main(argv: list[str] | None = None) -> int:
 
     a = sub.add_parser(
         "act",
+        parents=[common],
         help="click ids from a perceive frame (chain, one shot)",
         epilog=(
             "perceive does not focus; act --go needs the window in front or --focus. "
@@ -184,7 +200,7 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--hold", type=float, default=0, help="seconds to hold click before release; with xy/norm/ids = long-press")
     a.add_argument("--hold-key", dest="hold_key", choices=["ctrl", "control", "shift", "alt"], default=None, help="hold modifier across the chain's clicks/drags/scrolls (ctrl/control/shift/alt); needs one of those in the same call; not --hold mouse long-press")
     a.add_argument("--wait", help="seconds to wait at end of chain")
-    a.add_argument("--gap", type=float, default=0.12)
+    a.add_argument("--gap", type=float, default=None, help="seconds between chain steps (default 0.12)")
     a.add_argument(
         "--max-age",
         dest="max_age",
@@ -199,12 +215,13 @@ def main(argv: list[str] | None = None) -> int:
         help="E3: dry-run also fails closed when stamp_check is bad (moved/ROI/age/hwnd)",
     )
 
-    L = sub.add_parser("launch", help="start an app from apps.json or an exe path")
+    L = sub.add_parser("launch", parents=[common], help="start an app from apps.json or an exe path")
     L.add_argument("--app", help="name in apps.json")
     L.add_argument("--exe", help="full exe path")
 
     pe = sub.add_parser(
         "path-extract",
+        parents=[common],
         help="experimental: image silhouette -> 0-1000 path.json (OpenCV contour)",
     )
     pe.add_argument("--image", required=True, help="input image (png/jpg)")
@@ -246,9 +263,12 @@ def main(argv: list[str] | None = None) -> int:
         help="optional canvas ROI L,T,W,H in image pixels (top-left=0,0); norm relative to ROI",
     )
 
-    m = sub.add_parser("mcp", help="serve streamable-http MCP on this machine")
-    m.add_argument("--host", default="127.0.0.1")
-    m.add_argument("--port", type=int, default=8771)
+    cfg = sub.add_parser("config", parents=[common], help="show, validate, or reload the effective configuration")
+    cfg.add_argument("action", nargs="?", choices=("show", "validate", "reload"), default="show")
+
+    m = sub.add_parser("mcp", parents=[common], help="serve streamable-http MCP on this machine")
+    m.add_argument("--host", default=None, help="bind address (default 127.0.0.1; config may set another loopback name)")
+    m.add_argument("--port", type=int, default=None, help="port (default 8771)")
     m.add_argument(
         "--allow-host",
         dest="allow_host",
@@ -258,6 +278,21 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
+    if getattr(args, "profile", None):
+        from .settings import ConfigError, set_process_profile
+
+        try:
+            set_process_profile(args.profile)
+        except ConfigError as exc:
+            _emit({"ok": False, "reason": "bad_args", "error": str(exc)}, args)
+            print(str(exc), file=sys.stderr)
+            return 2
+    if args.cmd == "config":
+        from .settings import config_action
+
+        out = config_action(args.action, profile=args.profile)
+        _emit(out, args, indent=2)
+        return 0 if out.get("ok", True) else 1
     if args.cmd == "perceive":
         from .core import perceive
         from .extras import MissingExtraError
@@ -277,11 +312,11 @@ def main(argv: list[str] | None = None) -> int:
                 capture=getattr(args, "capture", None),
             )
         except MissingExtraError as e:
-            print(json.dumps(e.to_dict(), ensure_ascii=False))
+            _emit(e.to_dict(), args)
             print(str(e), file=sys.stderr)
             return 3
         if out.get("ok") is False and not out.get("stamp"):
-            print(json.dumps(out, ensure_ascii=False))
+            _emit(out, args)
             print(out.get("error") or "perceive failed", file=sys.stderr)
             return 1
         slim = {
@@ -325,7 +360,7 @@ def main(argv: list[str] | None = None) -> int:
             slim["ok"] = out.get("ok", True)
             if out.get("error"):
                 slim["error"] = out["error"]
-        print(json.dumps(slim, ensure_ascii=False))
+        _emit(slim, args)
         if out.get("uia") and out.get("ok") is False:
             return 1
         return 0
@@ -340,21 +375,21 @@ def main(argv: list[str] | None = None) -> int:
                 "count": len(slim),
                 "pick_rule": PICK_RULE,
             }
-            print(json.dumps(out, ensure_ascii=False))
+            _emit(out, args)
             return 0 if slim else 1
         if args.no_map:
             rows = [_slim_win(x) for x in list_windows()]
-            print(json.dumps(rows, ensure_ascii=False, indent=2))
+            _emit(rows, args, indent=2)
             return 0
         out = windows_map()
-        print(json.dumps({
+        _emit({
             "stamp": out["stamp"],
             "count": len(out["windows"]),
             "origin": out["origin"],
             "map": out["map"],
             "json": out["json"],
             "windows": [_slim_win(x) for x in out["windows"]],
-        }, ensure_ascii=False))
+        }, args)
         return 0
     if args.cmd == "act":
         from .act import (
@@ -368,6 +403,8 @@ def main(argv: list[str] | None = None) -> int:
             run_chain,
             subsample_points,
         )
+        from .settings import get as _cfg
+
         extras = _act_type_key_order(argv)
         warnings: list[str] = []
         path_specs: list[dict] = []
@@ -375,7 +412,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.path:
             # Experimental draw: denser default step-px unless overridden.
             if step_px is None:
-                step_px = 2
+                step_px = int(_cfg("drag.path_step_px"))
             try:
                 pdata = load_path_json(args.path)
                 path_specs = path_to_drag_specs(
@@ -393,7 +430,7 @@ def main(argv: list[str] | None = None) -> int:
                     "path_file": args.path,
                     "path_id": int(args.path_id),
                 }
-                print(json.dumps(err, ensure_ascii=False))
+                _emit(err, args)
                 print(str(e), file=sys.stderr)
                 return 1
             if not args.stamp and not args.json:
@@ -403,7 +440,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
         else:
             if step_px is None:
-                step_px = 4
+                step_px = int(_cfg("drag.step_px"))
         uia_names = getattr(args, "uia_name", None)
         if uia_names:
             flat = []
@@ -486,12 +523,12 @@ def main(argv: list[str] | None = None) -> int:
                 err["experimental"] = True
                 err["path_file"] = args.path
                 err["path_id"] = int(args.path_id)
-            print(json.dumps(err, ensure_ascii=False))
+            _emit(err, args)
             print(str(e), file=sys.stderr)
             return 1
         out["json"] = str(path) if path else None
         if out.get("missing_extra"):
-            print(json.dumps(out, ensure_ascii=False))
+            _emit(out, args)
             print(out.get("error") or "missing extra", file=sys.stderr)
             return 3
         if warnings:
@@ -514,11 +551,11 @@ def main(argv: list[str] | None = None) -> int:
                     if s.get("roi") is not None:
                         out["path_roi"] = s["roi"]
                     break
-        print(json.dumps(out, ensure_ascii=False))
+        _emit(out, args)
         return 0 if out.get("ok", True) else 1
     if args.cmd == "launch":
         from .launch import launch
-        print(json.dumps(launch(app=args.app, exe=args.exe), ensure_ascii=False))
+        _emit(launch(app=args.app, exe=args.exe), args)
         return 0
     if args.cmd == "path-extract":
         from .path_extract import path_extract_cli_result
@@ -536,13 +573,17 @@ def main(argv: list[str] | None = None) -> int:
             overlay=args.overlay,
             roi=args.roi,
         )
-        print(json.dumps(out, ensure_ascii=False))
+        _emit(out, args)
         if not out.get("ok"):
             print(out.get("error") or "path-extract failed", file=sys.stderr)
         return code
     if args.cmd == "mcp":
         from .mcp_server import serve
-        serve(host=args.host, port=args.port, allowed_hosts=args.allow_host)
+        from .settings import get as _cfg
+
+        host = args.host if args.host is not None else str(_cfg("server.host"))
+        port = args.port if args.port is not None else int(_cfg("server.port"))
+        serve(host=host, port=port, allowed_hosts=args.allow_host)
         return 0
     return 2
 
