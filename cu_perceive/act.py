@@ -1739,7 +1739,8 @@ def step_points(step: dict) -> list[tuple[str, list]]:
     """Screen points where a pointer step's mouse events land: (label, [x, y]).
 
     Clicks: the click point. Drags: start and end. Scroll: the hover point, or [] when
-    the wheel goes to the current cursor (resolved live). Hover/type/key/wait: none.
+    the wheel goes to the current cursor (resolved live). Hover: the hover point.
+    Type/key/wait: none.
     """
     via = step.get("via")
     if via in ("id", "xy", "norm") and step.get("screen"):
@@ -1749,10 +1750,13 @@ def step_points(step: dict) -> list[tuple[str, list]]:
         return [("drag start", list(pts[0])), ("drag end", list(pts[-1]))]
     if via == "scroll" and step.get("screen"):
         return [("scroll", list(step["screen"]))]
+    if via == "hover" and step.get("screen"):
+        # PR16: a hover over a covered point hovers the covering window; check it like a click.
+        return [("hover", list(step["screen"]))]
     return []
 
 
-POINTER_VIAS = ("id", "xy", "norm", "drag", "scroll")
+POINTER_VIAS = ("id", "xy", "norm", "drag", "scroll", "hover")
 
 
 def _point_target_error(frame: dict, step: dict, *, focus: bool, out: dict) -> tuple[str | None, dict | None]:
@@ -2068,7 +2072,7 @@ def _note_ime(out: dict, frame: dict, steps: list[dict], ime_mode: str | None) -
     """Record the target thread's layout. Warn when an IME would swallow keys."""
     hwnd = (frame or {}).get("hwnd")
     if not hwnd:
-        if ime_mode == "off":
+        if ime_mode in ("off", "strict"):
             out["warnings"] = (out.get("warnings") or []) + [
                 'ime=off needs a window stamp; this stamp has no hwnd, so the layout was not changed'
             ]
@@ -2081,14 +2085,14 @@ def _note_ime(out: dict, frame: dict, steps: list[dict], ime_mode: str | None) -
     out["ime"] = {k: info.get(k) for k in ("hkl_hex", "lang_id", "ime_open", "ime_active", "thread_id")}
     keyboard = any(s.get("via") in ("type", "key") for s in steps)
     # ime=off handles the layout itself. Warning ime_active after that is a false alarm.
-    if info.get("ime_active") and keyboard and ime_mode != "off":
+    if info.get("ime_active") and keyboard and ime_mode not in ("off", "strict"):
         out["warnings"] = (out.get("warnings") or []) + [
             f"ime_active: target thread layout {info.get('hkl_hex')} (lang {info.get('lang_id')}, "
             f"ime_open={info.get('ime_open')}). An IME can swallow keys while each step still reports "
             'tapped=true. Pass ime="off" to switch that window to an installed Latin layout for this act '
             "and restore it after."
         ]
-    if ime_mode == "off" and out.get("dry_run") and ime_matters(steps):
+    if ime_mode in ("off", "strict") and out.get("dry_run") and ime_matters(steps):
         out["warnings"] = (out.get("warnings") or []) + [
             "ime=off will switch this window to an English layout and close its IME for the act, then restore both"
         ]
@@ -2096,7 +2100,7 @@ def _note_ime(out: dict, frame: dict, steps: list[dict], ime_mode: str | None) -
 
 def _suspend_ime_for_act(out: dict, frame: dict, steps: list[dict], ime_mode: str | None) -> dict | None:
     """Switch the stamp window to English. Returns an error dict to return, or None to continue."""
-    if ime_mode != "off" or out.get("dry_run"):
+    if ime_mode not in ("off", "strict") or out.get("dry_run"):
         return None
     keys_only = not ime_matters(steps)
     if keys_only and not any((s.get("via") or s.get("kind")) in KEYBOARD_VIAS for s in steps):
@@ -2114,47 +2118,33 @@ def _suspend_ime_for_act(out: dict, frame: dict, steps: list[dict], ime_mode: st
     from .ime import ImeError, suspend_ime
 
     try:
-        _ime_restore.state = suspend_ime(int(hwnd))
-        out["ime_suspended"] = True
+        state = suspend_ime(int(hwnd))
     except ImeError as e:
-        if keys_only:
-            # Chords mostly pass an IME; some windows (MessageBox) cannot switch layout. Warn, go on.
-            out["warnings"] = (out.get("warnings") or []) + [f"ime=off could not switch this window ({e}); keys sent as-is"]
-            return None
+        state = {"verified": False, "error": str(e), "switch_requested": False, "closed": False}
+    _ime_restore.state = state if (state.get("switch_requested") or state.get("closed")) else None
+    out["ime_suspended"] = bool(state.get("switch_requested") or state.get("closed") or state.get("already_latin"))
+    out["ime_layout_switched"] = bool(state.get("layout_switched"))
+    out["ime_verified"] = bool(state.get("verified"))
+    if state.get("already_latin"):
+        out["notes"] = (out.get("notes") or []) + ["ime=off: the window already uses a non-IME layout; nothing switched"]
+    if state.get("after_hkl_hex"):
+        out["ime"] = {"hkl_hex": state.get("after_hkl_hex"), "requested_hex": (
+            f"0x{int(state['english_hkl']) & 0xFFFFFFFF:08x}" if state.get("english_hkl") else None),
+            "verify_ms": state.get("verify_ms")}
+    if state.get("verified"):
+        if state.get("closed_only"):
+            out["warnings"] = (out.get("warnings") or []) + [
+                "ime=off closed the IME only; no English or Latin keyboard layout is installed, so none was loaded"]
+        return None
+    err = state.get("error") or "ime=off could not verify the layout switch"
+    if ime_mode == "strict":
         out["ok"] = False
         out["reason"] = "ime_failed"
-        out["error"] = str(e)
+        out["error"] = err
         return out
-    state = _ime_restore.state or {}
-    switched = bool(state.get("layout_switched"))
-    out["ime_layout_switched"] = switched
-    if state.get("closed_only"):
-        out["warnings"] = (out.get("warnings") or []) + [
-            "ime=off closed the IME only; no English or Latin keyboard layout is installed, "
-            "so none was loaded"
-        ]
-    if switched:
-        from .ime import probe_ime
-
-        after = probe_ime(int(hwnd))
-        want = int(state.get("english_hkl") or 0)
-        got = int(after.get("hkl") or 0) if after.get("ok") else 0
-        if after.get("ok") and (after.get("ime_active") or (want and got != want)):
-            out["ok"] = False
-            out["ime_verified"] = False
-            out["reason"] = "ime_failed"
-            out["error"] = (
-                f"ime=off did not switch hwnd {hwnd} "
-                f"(still {after.get('hkl_hex')}, ime_open={after.get('ime_open')})"
-            )
-            return out
-        out["ime_verified"] = True if after.get("ok") else None
-        if after.get("ok"):
-            out["ime"] = {
-                k: after.get(k) for k in ("hkl_hex", "lang_id", "ime_open", "ime_active", "thread_id")
-            }
-    else:
-        out["ime_verified"] = False if state.get("closed_only") else None
+    what = "keys sent as-is" if keys_only else "text is sent anyway and may be composed by the IME; check typed_verified, or pass ime=\"strict\" to abort instead"
+    out["ime_unverified"] = True
+    out["warnings"] = (out.get("warnings") or []) + [f"{err}; {what}"]
     return None
 
 
@@ -2211,8 +2201,8 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                         rest = restore_ime(state)
                     except Exception as e:
                         rest = {"ok": False, "error": f"{type(e).__name__}: {e}"}
-                if rest is not None and isinstance(out, dict):
-                    out["ime_restored"] = bool(rest.get("ok"))
+                if rest is not None and isinstance(out, dict) and (rest.get("restored") or not rest.get("ok")):
+                    out["ime_restored"] = bool(rest.get("restored"))
                     if not rest.get("ok"):
                         out["warnings"] = (out.get("warnings") or []) + [
                             f"ime restore failed: {rest.get('error') or 'unknown'}"

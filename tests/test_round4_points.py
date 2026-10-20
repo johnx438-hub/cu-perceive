@@ -177,8 +177,9 @@ class TestDragAndScroll(_Desk):
         self.covered = {(700, 450)}
         out = self.go(norm="500,500", scroll="down:3", hold_key="ctrl")
         self.assertFalse(out["ok"])
-        self.assertIn("scroll point (700,450)", out["error"])
-        self.assertEqual(self.calls, ["hover:700,450"])
+        # PR16: the hover before the wheel is checked too, so nothing at all is sent
+        self.assertIn("hover point (700,450)", out["error"])
+        self.assertEqual(self.calls, [])
 
     def test_scroll_at_cursor_checks_cursor(self):
         self.covered = {(5, 5)}
