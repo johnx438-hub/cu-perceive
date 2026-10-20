@@ -176,6 +176,11 @@ def run_steps(
             break
         if changes and last:
             out["change_after_last_step"] = changes
+        if not changes and last and step.get("expect_change"):
+            out["expect_change_unmet"] = True
+            out["warnings"] = (out.get("warnings") or []) + [
+                "expect_change_unmet: the last step expected a change but no new window, foreground or "
+                "title change was seen (pixel changes are only measured with check_change=true)"]
     out["completed_steps"] = done
     _summarize_new_windows(out, done)
     stopped = out.get("stopped_at")

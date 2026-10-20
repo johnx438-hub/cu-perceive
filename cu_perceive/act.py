@@ -1792,7 +1792,10 @@ def _point_target_error(frame: dict, step: dict, *, focus: bool, out: dict) -> t
     if not covered:
         return None, None
     if not focus:
-        _set_refusal(out, "point_covered", HINT_FOCUS + ", or pick a point that is not covered", info)
+        _set_refusal(out, "point_covered", HINT_FOCUS + ", or pick a point that is not covered"
+                     + _blocking_hint((info or {}).get("hwnd"), (info or {}).get("title")), info)
+        if (info or {}).get("hwnd"):
+            out["suggested_hwnd"] = int(info["hwnd"])
         return err + "; bring that window to the front (--focus / MCP focus=true) or re-perceive", info
     ferr = _bring_forward(frame, out)
     if ferr:
@@ -1806,9 +1809,11 @@ def _point_target_error(frame: dict, step: dict, *, focus: bool, out: dict) -> t
         _set_refusal(
             out, "point_covered_after_focus",
             f"{(info2 or {}).get('title') or 'the covering window'} stays on top (always-on-top?); "
-            "move or close it, then retry",
+            "move or close it, then retry" + _blocking_hint((info2 or {}).get("hwnd"), (info2 or {}).get("title")),
             info2,
         )
+        if (info2 or {}).get("hwnd"):
+            out["suggested_hwnd"] = int(info2["hwnd"])
         return err2 + " even after --focus", info2
     return None, None
 
@@ -2093,11 +2098,10 @@ def _suspend_ime_for_act(out: dict, frame: dict, steps: list[dict], ime_mode: st
     """Switch the stamp window to English. Returns an error dict to return, or None to continue."""
     if ime_mode != "off" or out.get("dry_run"):
         return None
-    if not ime_matters(steps):
-        # Hotkeys (enter, f9, ctrl+s) are virtual keys; an IME does not swallow them, and some
-        # windows (MessageBox, dialogs) cannot switch layout at all. Nothing to protect: skip.
-        out["ime_skipped"] = "no_text_step"
-        out["notes"] = (out.get("notes") or []) + ["ime=off skipped: this act types no text (keys only)"]
+    keys_only = not ime_matters(steps)
+    if keys_only and not any((s.get("via") or s.get("kind")) in KEYBOARD_VIAS for s in steps):
+        out["ime_skipped"] = "no_keyboard_step"
+        out["notes"] = (out.get("notes") or []) + ["ime=off skipped: this act sends no keys"]
         return None
     hwnd = (frame or {}).get("hwnd")
     if not hwnd:
@@ -2113,6 +2117,10 @@ def _suspend_ime_for_act(out: dict, frame: dict, steps: list[dict], ime_mode: st
         _ime_restore.state = suspend_ime(int(hwnd))
         out["ime_suspended"] = True
     except ImeError as e:
+        if keys_only:
+            # Chords mostly pass an IME; some windows (MessageBox) cannot switch layout. Warn, go on.
+            out["warnings"] = (out.get("warnings") or []) + [f"ime=off could not switch this window ({e}); keys sent as-is"]
+            return None
         out["ok"] = False
         out["reason"] = "ime_failed"
         out["error"] = str(e)
@@ -2464,9 +2472,12 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                 f"step {o['step']} {o['what']} ({o['point'][0]},{o['point'][1]}) under hwnd {o['hwnd']} {o['title']!r}"
                 for o in occluded
             )
+            first = occluded[0]
+            if first.get("hwnd"):
+                out["suggested_hwnd"] = int(first["hwnd"])
             warns.append(
                 f"planned point(s) currently covered by another window: {where}; --go will refuse "
-                "unless --focus brings the stamp window forward"
+                "unless --focus brings the stamp window forward" + _blocking_hint(first.get("hwnd"), first.get("title"))
             )
         if warns:
             out["warnings"] = (out.get("warnings") or []) + warns

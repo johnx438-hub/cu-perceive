@@ -64,13 +64,31 @@ class TestImeKeyOnly(unittest.TestCase):
         for k in ("enter", "f9", "ctrl+s", "esc", "tab,enter", "alt+f4", "down"):
             self.assertFalse(ime_matters(parse_steps(key=k)), k)
 
-    def test_key_only_act_skips_the_switch(self):
+    def test_key_only_act_switches_now(self):
+        # PR15: an IME can eat Ctrl chords, so ime=off applies to key-only acts too
         out = {"ok": True, "dry_run": False}
-        with mock.patch("cu_perceive.ime.suspend_ime", side_effect=AssertionError("must not switch")):
+        with mock.patch("cu_perceive.ime.suspend_ime", return_value={"layout_switched": False}) as s:
+            err = act_mod._suspend_ime_for_act(out, {"hwnd": 123}, parse_steps(key="ctrl+w"), "off")
+        self.assertIsNone(err)
+        s.assert_called_once_with(123)
+        self.assertTrue(out["ime_suspended"])
+        self.assertNotIn("ime_skipped", out)
+
+    def test_key_only_switch_failure_only_warns(self):
+        from cu_perceive.ime import ImeError
+
+        out = {"ok": True, "dry_run": False}
+        with mock.patch("cu_perceive.ime.suspend_ime", side_effect=ImeError("MessageBox")):
             err = act_mod._suspend_ime_for_act(out, {"hwnd": 123}, parse_steps(key="enter"), "off")
         self.assertIsNone(err)
-        self.assertEqual(out["ime_skipped"], "no_text_step")
         self.assertTrue(out["ok"])
+        self.assertTrue(any("could not switch" in w for w in out["warnings"]))
+
+    def test_pointer_only_act_skips(self):
+        out = {"ok": True, "dry_run": False}
+        with mock.patch("cu_perceive.ime.suspend_ime", side_effect=AssertionError("must not switch")):
+            act_mod._suspend_ime_for_act(out, {"hwnd": 123}, parse_steps(norm="1,1"), "off")
+        self.assertEqual(out["ime_skipped"], "no_keyboard_step")
 
     def test_text_act_still_switches(self):
         out = {"ok": True, "dry_run": False}
