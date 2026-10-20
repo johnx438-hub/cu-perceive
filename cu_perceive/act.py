@@ -1395,6 +1395,15 @@ KEYBOARD_SETTLE_TRIES = 10
 KEYBOARD_SETTLE_S = 0.05
 
 
+def _blocking_hint(fg, title) -> str:
+    """Point the agent at the window in front: it may be an untitled popup missing from windows()."""
+    if not fg:
+        return ""
+    name = f"'{title}'" if title else "an untitled window (it may not appear in windows())"
+    return (f". The window in front is {name}, hwnd {int(fg)}: perceive_window(hwnd={int(fg)}) to see it "
+            f"and act on that stamp to dismiss it (suggested_hwnd)")
+
+
 def _foreground_elevated(hwnd) -> bool:
     """True when the foreground window runs above our integrity level (UIPI drops all our input)."""
     if not hwnd:
@@ -1434,6 +1443,9 @@ def _bring_forward(frame: dict, out: dict) -> str | None:
                     + "runs elevated (as administrator): while it is in front Windows drops ALL synthetic "
                     "input from cu-perceive, whatever the target. Ask the user to close or minimize it "
                     "(cu-perceive cannot), or use method=uia on this window meanwhile")
+        if not fg_elev and fv.get("foreground_hwnd"):
+            hint += _blocking_hint(fv.get("foreground_hwnd"), ftitle)
+            out["suggested_hwnd"] = int(fv.get("foreground_hwnd"))
         _set_refusal(out, "focus_failed", hint)
         return (
             f"focus=true but stamp window {hwnd} is not foreground after "
@@ -1539,9 +1551,11 @@ def _keyboard_target_error(
         _set_refusal(
             out, "not_foreground_after_focus",
             "Windows kept another window in front; click the stamp window once by hand (or close "
-            f"{fg_title or 'the window in front'!s}), then retry",
+            f"{fg_title or 'the window in front'!s}), then retry" + _blocking_hint(fg, fg_title),
             {"hwnd": fg, "title": fg_title} if fg else None,
         )
+        if fg:
+            out["suggested_hwnd"] = int(fg)
         return (
             f"{label} is still not in the foreground after --focus (foreground hwnd {fg} "
             f"{fg_title!r}); keyboard step refused"
@@ -1988,11 +2002,14 @@ def _poll_new_windows(
     return found, latest
 
 
-def _attach_new_windows(out: dict, before: list[dict] | None, wait_s: float | None = None) -> None:
+def _attach_new_windows(out: dict, before: list[dict] | None, wait_s: float | None = None,
+                        cap_s: float | None = None) -> None:
     # An explicit wait always polls, whatever the action; the default only follows actions that can open one.
     may_open = chain_may_open_window(out.get("steps"))
     if wait_s is not None:
         timeout, why = max(0.0, float(wait_s)), "explicit"
+    elif may_open and cap_s is not None:
+        timeout, why = min(new_window_wait_s(), max(0.0, float(cap_s))), "chain_step"
     elif may_open:
         timeout, why = new_window_wait_s(), "action"
     else:
@@ -2133,7 +2150,7 @@ def _suspend_ime_for_act(out: dict, frame: dict, steps: list[dict], ime_mode: st
     return None
 
 
-def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: bool = False, gap: float = 0.12, hold_key: str | None = None, method: str | None = None, max_age_sec: float | None = None, strict_stamp: bool = False, stamp_json_path: str | Path | None = None, origin_slop_px: int = 8, focus: bool = False, stamp_source: str | None = None, ime: str | None = None, new_window_wait_s: float | None = None) -> dict:
+def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: bool = False, gap: float = 0.12, hold_key: str | None = None, method: str | None = None, max_age_sec: float | None = None, strict_stamp: bool = False, stamp_json_path: str | Path | None = None, origin_slop_px: int = 8, focus: bool = False, stamp_source: str | None = None, ime: str | None = None, new_window_wait_s: float | None = None, new_window_wait_cap_s: float | None = None) -> dict:
     """Plan specs against frame; dry_run=False sends input.
 
     stamp_source: "explicit" (--stamp/--json), "latest" (newest stamp picked implicitly)
@@ -2193,7 +2210,7 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                             f"ime restore failed: {rest.get('error') or 'unknown'}"
                         ]
                 if isinstance(out, dict):
-                    _attach_new_windows(out, before, new_window_wait_s)
+                    _attach_new_windows(out, before, new_window_wait_s, new_window_wait_cap_s)
             return out if isinstance(out, dict) else {
                 "ok": False, "dry_run": False, "error": "act returned nothing", "steps": [],
             }

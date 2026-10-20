@@ -181,13 +181,25 @@ def _wait_s(ms):
 
 
 def _chain_step_wait(ms, step: dict, i: int, n: int):
-    """Chains wait long only on the last / expect_change step; field clicks keep 250 ms."""
-    from .act import NEW_WINDOW_CHAIN_STEP_S, new_window_wait_s
+    """Chains wait long only on the last / expect_change step; field clicks keep 250 ms.
+
+    Returns the explicit wait (seconds) when the caller passed new_window_wait_ms, else None.
+    """
+    from .act import NEW_WINDOW_CHAIN_STEP_S
 
     full = _wait_s(ms)
-    if i == n - 1 or step.get("expect_change"):
+    if full is None or i == n - 1 or step.get("expect_change"):
         return full
-    return min(NEW_WINDOW_CHAIN_STEP_S, new_window_wait_s() if full is None else full)
+    return min(NEW_WINDOW_CHAIN_STEP_S, full)
+
+
+def _chain_step_cap(ms, step: dict, i: int, n: int):
+    """Without an explicit wait, non-final steps cap the default wait at 250 ms (reason chain_step)."""
+    from .act import NEW_WINDOW_CHAIN_STEP_S
+
+    if _wait_s(ms) is not None or i == n - 1 or step.get("expect_change"):
+        return None
+    return NEW_WINDOW_CHAIN_STEP_S
 
 
 def _compact_rows(payload: dict) -> None:
@@ -577,12 +589,16 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         means much of the window moved: re-perceive before reusing old coordinates. reflow_reason="bbox_span"
         (changed_bbox_share over 0.7 with changed_ratio >= 0.02, or over 0.4 with >= 0.1: white page swap, list
         re-sort, Xmind re-layout after a node drop) or "ratio" (changed_ratio over 0.3). screen_changed counts a change of >= 8 px and
-        >= change_min_ratio of the window (default 0.00005, env CU_PERCEIVE_CHANGE_MIN_RATIO); below 0.001 it
-        adds change_minor=true. A real small change (checkbox tick) and a hover highlight or caret blink look the
-        same at that size: read changed_bbox_norm and decide. below_min_ratio=true = pixels moved but under the floor.
+        >= change_min_ratio of the window (default 0.001, env CU_PERCEIVE_CHANGE_MIN_RATIO). Under the floor:
+        screen_changed=false, below_min_ratio=true, changed_pixels/changed_ratio/changed_bbox_norm still given
+        (hover ~0.0005 lands there; pass a lower change_min_ratio for tiny real changes). Counted but under 0.005
+        adds change_minor=true: mostly hover / caret / focus-ring noise, though a checkbox redraw can be there too;
+        read changed_bbox_norm and decide. change_min_ratio without check_change=true is ignored (warned).
+        steps: each completed step carries new_window_wait_ms / new_window_wait_reason; the top level has the last
+        step's values plus new_windows_steps (indexes of steps that opened windows).
         new_windows: clicks, Enter/Esc, F-keys, Alt combos and Ctrl(+Shift)+letter poll by default; an explicit
         new_window_wait_ms always polls, whatever the action (new_window_wait_reason=explicit|action|
-        action_cannot_open_window). If focus fails because the foreground window is elevated,
+        chain_step|action_cannot_open_window; chain_step = non-final chain step, default wait capped at 250 ms). If focus fails because the foreground window is elevated,
         foreground_elevated=true: Windows then drops all synthetic input until the user closes it.
         Capability boundary: a target running elevated (as administrator) above cu-perceive's integrity level
         cannot receive input (Windows UIPI); go refuses with reason=elevated_target before sending anything
@@ -594,12 +610,16 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
             kw = {k: v for k, v in locals().items() if k in params}
             kw["check_change"] = False
             return _act_with_change(kw)
+        ignored_min_ratio = (["change_min_ratio only applies with check_change=true; ignored"]
+                             if change_min_ratio is not None else [])
         if steps is not None and steps != []:
-            return _act_chain(steps, locals())
+            out = _act_chain(steps, locals())
+            if ignored_min_ratio and isinstance(out, dict):
+                out["warnings"] = ignored_min_ratio + (out.get("warnings") or [])
+            return out
         send = bool(go) and not dry_run
         notes = []
-        if change_min_ratio is not None:
-            notes.append("change_min_ratio only applies with check_change=true; ignored")
+        notes.extend(ignored_min_ratio)
         if go and dry_run:
             notes.append("dry_run=true overrides go=true: this was a dry run, nothing was sent")
         elif dry_run is False and not go:
@@ -671,7 +691,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
             target = int(frame.get("hwnd") or 0) or None
         except Exception:
             target = None  # act() itself reports the stamp problem
-        mr = kw.get("change_min_ratio")
+        mr = kw.pop("change_min_ratio", None)  # consumed here; act() would warn it was ignored
         return run_with_change_check(target, lambda: act(**kw), min_ratio=None if mr in (None, "") else float(mr))
 
     def _act_chain(steps, call: dict):
@@ -710,6 +730,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
                 focus=bool(call.get("focus")) and i == 0,
                 stamp_source=stamp_source, ime=_nz_str(call.get("ime", "")),
                 new_window_wait_s=_chain_step_wait(call.get("new_window_wait_ms"), step, i, len(norm_steps)),
+                new_window_wait_cap_s=_chain_step_cap(call.get("new_window_wait_ms"), step, i, len(norm_steps)),
             )
 
         stamp_hwnd = int((frame or {}).get("hwnd") or 0)

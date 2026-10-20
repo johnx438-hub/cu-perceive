@@ -138,7 +138,7 @@ def main(argv: list[str] | None = None) -> int:
                    "changed_ratio, changed_bbox_norm, layout_reflow_suspected (pixels only)")
     a.add_argument("--change-min-ratio", dest="change_min_ratio", type=float, default=None,
                    help="with --check-change: smallest changed share of the window that counts as screen_changed "
-                   "(default 0.00005, env CU_PERCEIVE_CHANGE_MIN_RATIO)")
+                   "(default 0.001, env CU_PERCEIVE_CHANGE_MIN_RATIO); below it: screen_changed=false, below_min_ratio=true")
     a.add_argument(
         "--focus",
         action="store_true",
