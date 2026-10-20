@@ -349,7 +349,9 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         Window parked off-screen (-32000) or under 8 px -> ok=false, reason=offscreen|tiny_client, hint; move it back on-screen (focus=true does not help).
         Use the returned json/map paths; the server's output dir may differ from the CLI's.
         capture: auto (WGC -> PrintWindow) | wgc | printwindow | screen (needs focus=true) | dwm (experimental, black on Win11).
-        map_inline=false = JSON/path only. ocr=true only for text ids. yolo=true runs ScreenParser (class names as item text).
+        map_inline=false = JSON/path only. ocr=true only for text ids. OCR confidence (0-1) is a ranking signal
+        from the recognizer, not a correctness verdict: it depends on the crop, and a confident item can still be
+        misread. Compare items with it; verify text that matters. yolo=true runs ScreenParser (class names as item text).
         uia=true (S4) walks UIA under pinned hwnd; additive uia_nodes with 0-1000 norm (same as grid). Default all off. No click.
         ocr/uia/yolo are optional extras; if missing the reply has ok=false and the exact pip command in "install".
         ocr/yolo run in a worker process with a timeout (CU_PERCEIVE_DETECT_TIMEOUT, default 30 s): a hung worker is
@@ -488,6 +490,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         steps: list | None = None,
         check_change: bool = False,
         new_window_wait_ms: int | None = None,
+        change_min_ratio: float | None = None,
     ):
         """act: go=true sends (default: dry run; dry_run=true wins); needs window in front or focus=true. scroll="down:5" notches (bare 5 = UP). key="enter"|"pagedown". norm="x,y" or [x,y]. hwnd= checks stamp.
         norm="x,y" or [x,y] (0-1000 map) | xy="x,y" or [x,y] (stamp px) | ids="3"; scroll="down:3"|"up:3" (wheel notches, not pixels; max 50; int or string; bare numbers: negative = down, positive = UP); drag_norm="x1,y1;x2,y2"; text="..." + replace=true; key="enter"|"ctrl+a"|"pagedown"; hold_key=ctrl|shift|alt (needs a click/drag/scroll); button="left"|"right"; focus=true; go=true sends (default: dry run); via=paste|keys; ime=off.
@@ -571,7 +574,16 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         foreground after a retry, nothing is sent (reason=focus_failed, foreground_ok=false). A rebuilt window
         (hwnd gone, class changed, or hidden while a same-process window replaced it) is reason=hwnd_replaced
         with hwnd_replaced=true and suggested_hwnd. check_change also covers drags; layout_reflow_suspected=true
-        (changed_ratio over 0.3) means much of the window moved: re-perceive before reusing old coordinates.
+        means much of the window moved: re-perceive before reusing old coordinates. reflow_reason="bbox_span"
+        (changed_bbox_share over 0.7 with changed_ratio >= 0.02, or over 0.4 with >= 0.1: white page swap, list
+        re-sort, Xmind re-layout after a node drop) or "ratio" (changed_ratio over 0.3). screen_changed counts a change of >= 8 px and
+        >= change_min_ratio of the window (default 0.00005, env CU_PERCEIVE_CHANGE_MIN_RATIO); below 0.001 it
+        adds change_minor=true. A real small change (checkbox tick) and a hover highlight or caret blink look the
+        same at that size: read changed_bbox_norm and decide. below_min_ratio=true = pixels moved but under the floor.
+        new_windows: clicks, Enter/Esc, F-keys, Alt combos and Ctrl(+Shift)+letter poll by default; an explicit
+        new_window_wait_ms always polls, whatever the action (new_window_wait_reason=explicit|action|
+        action_cannot_open_window). If focus fails because the foreground window is elevated,
+        foreground_elevated=true: Windows then drops all synthetic input until the user closes it.
         Capability boundary: a target running elevated (as administrator) above cu-perceive's integrity level
         cannot receive input (Windows UIPI); go refuses with reason=elevated_target before sending anything
         (dry runs warn; elevated_target / target_integrity / self_integrity are reported).
@@ -586,6 +598,8 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
             return _act_chain(steps, locals())
         send = bool(go) and not dry_run
         notes = []
+        if change_min_ratio is not None:
+            notes.append("change_min_ratio only applies with check_change=true; ignored")
         if go and dry_run:
             notes.append("dry_run=true overrides go=true: this was a dry run, nothing was sent")
         elif dry_run is False and not go:
@@ -657,7 +671,8 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
             target = int(frame.get("hwnd") or 0) or None
         except Exception:
             target = None  # act() itself reports the stamp problem
-        return run_with_change_check(target, lambda: act(**kw))
+        mr = kw.get("change_min_ratio")
+        return run_with_change_check(target, lambda: act(**kw), min_ratio=None if mr in (None, "") else float(mr))
 
     def _act_chain(steps, call: dict):
         from .chain import ACTION_FIELDS, run_steps, validate_steps

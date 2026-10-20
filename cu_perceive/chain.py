@@ -27,7 +27,7 @@ STEP_FIELDS = frozenset({
     "expect_change",
 })
 CHAIN_ONLY_FIELDS = frozenset({"stamp", "hwnd", "go", "dry_run", "focus", "ime", "max_age_sec", "strict_stamp", "steps",
-                               "check_change", "new_window_wait_ms"})
+                               "check_change", "new_window_wait_ms", "change_min_ratio"})
 ACTION_FIELDS = ("ids", "xy", "norm", "text", "key", "drag", "drag_norm", "scroll", "uia_name")
 
 RE_PERCEIVE_HINT = (

@@ -1395,6 +1395,18 @@ KEYBOARD_SETTLE_TRIES = 10
 KEYBOARD_SETTLE_S = 0.05
 
 
+def _foreground_elevated(hwnd) -> bool:
+    """True when the foreground window runs above our integrity level (UIPI drops all our input)."""
+    if not hwnd:
+        return False
+    try:
+        from .windows import target_integrity_check
+
+        return target_integrity_check(int(hwnd)).get("elevated_target") is True
+    except Exception:
+        return False
+
+
 def _bring_forward(frame: dict, out: dict) -> str | None:
     """--focus: raise the stamp window, then re-check its identity. None = done."""
     hwnd = int(frame["hwnd"])
@@ -1413,11 +1425,16 @@ def _bring_forward(frame: dict, out: dict) -> str | None:
             out["foreground_title"] = ftitle
         if fv.get("foreground_hwnd"):
             out["blocking_window"] = {"hwnd": fv.get("foreground_hwnd"), "title": ftitle}
-        _set_refusal(
-            out, "focus_failed",
-            (f"'{ftitle}' kept the foreground; " if ftitle else "")
-            + "click the stamp window once by hand (or close what is in front), then retry",
-        )
+        hint = ((f"'{ftitle}' kept the foreground; " if ftitle else "")
+                + "click the stamp window once by hand (or close what is in front), then retry")
+        fg_elev = _foreground_elevated(fv.get("foreground_hwnd"))
+        if fg_elev:
+            out["foreground_elevated"] = True
+            hint = ((f"'{ftitle}' " if ftitle else "the foreground window ")
+                    + "runs elevated (as administrator): while it is in front Windows drops ALL synthetic "
+                    "input from cu-perceive, whatever the target. Ask the user to close or minimize it "
+                    "(cu-perceive cannot), or use method=uia on this window meanwhile")
+        _set_refusal(out, "focus_failed", hint)
         return (
             f"focus=true but stamp window {hwnd} is not foreground after "
             f"{fv.get('focus_attempts')} attempts (foreground={fv.get('foreground_hwnd')}); nothing sent"
@@ -1878,23 +1895,33 @@ NEW_WINDOW_RECHECK_S = 0.3  # one more look after the wait ran out empty
 NEW_WINDOW_CHAIN_STEP_S = 0.25  # non-final chain steps (field clicks) keep the short wait
 NEW_WINDOW_POLL_S = 0.05
 _WINDOW_OPEN_KEYS = frozenset({"enter", "return", "esc", "escape"})
+_CTRL_EDIT_KEYS = frozenset("acxzy")
 
 
 def _key_may_open(spec: str) -> bool:
-    """Enter, Esc, an F-key, or an Alt combo can open or close a top-level window."""
+    """Enter, Esc, an F-key, an Alt combo, or Ctrl(+Shift)+letter/digit (ctrl+p print, ctrl+o open,
+    ctrl+shift+s save-as) can open or close a top-level window."""
     parts = [p for p in str(spec).lower().split("+") if p]
     if any(p in _WINDOW_OPEN_KEYS for p in parts):
         return True
     if any(len(p) > 1 and p[0] == "f" and p[1:].isdigit() for p in parts):
         return True
-    return "alt" in parts and len(parts) >= 2
+    if "alt" in parts and len(parts) >= 2:
+        return True
+    if "ctrl" in parts or "control" in parts:
+        last = parts[-1]
+        if len(parts) < 2 or len(last) != 1 or not last.isalnum():
+            return False
+        # plain editing chords (select all, copy, cut, undo, redo) never open a window
+        return "shift" in parts or last not in _CTRL_EDIT_KEYS
+    return False
 
 
 def chain_may_open_window(steps) -> bool:
     """True when a planned step can create a top-level window.
 
-    Clicks, Enter, Esc, F-keys, and Alt combos wait for ``new_windows``.
-    Typing, scrolling, and dragging do not.
+    Clicks, Enter, Esc, F-keys, Alt combos, and Ctrl(+Shift)+letter wait for ``new_windows``.
+    Typing, scrolling, and dragging do not, unless new_window_wait_ms is passed explicitly.
     """
     for step in steps or []:
         if step.get("via") in ("id", "xy", "norm"):
@@ -1962,12 +1989,19 @@ def _poll_new_windows(
 
 
 def _attach_new_windows(out: dict, before: list[dict] | None, wait_s: float | None = None) -> None:
+    # An explicit wait always polls, whatever the action; the default only follows actions that can open one.
     may_open = chain_may_open_window(out.get("steps"))
-    timeout = (new_window_wait_s() if wait_s is None else max(0.0, float(wait_s))) if may_open else 0.0
+    if wait_s is not None:
+        timeout, why = max(0.0, float(wait_s)), "explicit"
+    elif may_open:
+        timeout, why = new_window_wait_s(), "action"
+    else:
+        timeout, why = 0.0, "action_cannot_open_window"
     recheck = NEW_WINDOW_RECHECK_S if timeout > 0 else 0.0
     found, latest = _poll_new_windows(before, timeout, recheck)
     out["new_windows"] = found
     out["new_window_wait_ms"] = int(round(timeout * 1000))
+    out["new_window_wait_reason"] = why
     changed = windows_snapshot_changed(before, latest)
     if changed is not None:
         out["windows_snapshot_changed"] = changed

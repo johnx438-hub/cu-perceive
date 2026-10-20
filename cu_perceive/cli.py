@@ -131,11 +131,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     a.add_argument("--go", action="store_true", help="actually click; default is dry-run")
     a.add_argument("--new-window-wait-ms", dest="new_window_wait_ms", type=float, default=None,
-                   help="after a click/Enter/Esc/F-key/Alt combo, wait up to this long for a new top-level window "
+                   help="after a click/Enter/Esc/F-key/Alt or Ctrl+letter combo (or any action when set), wait up to this long for a new top-level window "
                    "(default 1200, env CU_PERCEIVE_NEW_WINDOW_WAIT_MS; 0 = do not wait), then recheck once")
     a.add_argument("--check-change", dest="check_change", action="store_true",
                    help="with --go: grab the stamp window before and after and report screen_changed, "
                    "changed_ratio, changed_bbox_norm, layout_reflow_suspected (pixels only)")
+    a.add_argument("--change-min-ratio", dest="change_min_ratio", type=float, default=None,
+                   help="with --check-change: smallest changed share of the window that counts as screen_changed "
+                   "(default 0.00005, env CU_PERCEIVE_CHANGE_MIN_RATIO)")
     a.add_argument(
         "--focus",
         action="store_true",
@@ -466,7 +469,8 @@ def main(argv: list[str] | None = None) -> int:
             if getattr(args, "check_change", False) and args.go:
                 from .change import run_with_change_check
 
-                out = run_with_change_check(int(frame.get("hwnd") or 0) or None, _run)
+                out = run_with_change_check(int(frame.get("hwnd") or 0) or None, _run,
+                                            min_ratio=getattr(args, "change_min_ratio", None))
             else:
                 out = _run()
         except (MethodError, RuntimeError, FileNotFoundError, OSError, KeyError, ValueError) as e:
