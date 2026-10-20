@@ -238,13 +238,12 @@ class TestIme(unittest.TestCase):
         self.assertEqual((hwnd, msg, hkl), (77, 0x0050, 0x08090809))
         self.assertTrue(state["verified"])  # substitute high word (0809:00020409) still counts
         self.assertTrue(state["layout_switched"])
-        imm.ImmSetOpenStatus.assert_called_with(5, False)
+        imm.ImmSetOpenStatus.assert_not_called()  # PR17: the IME is only closed when no layout sticks
         user32.PostMessageW.reset_mock()
-        imm.ImmSetOpenStatus.reset_mock()
+        state["_probe"] = lambda h: {"ok": True, "hkl": 0x08040804, "ime_open": True}
         rest = restore_ime(state)
         self.assertTrue(rest["restored"], rest)
         self.assertEqual(user32.PostMessageW.call_args[0][3], 0x08040804)
-        imm.ImmSetOpenStatus.assert_called_with(5, True)
 
     def test_off_closes_ime_when_no_latin_layout_is_installed(self):
         user32 = mock.Mock()
@@ -270,7 +269,7 @@ class TestIme(unittest.TestCase):
         self.assertFalse(state["verified"])
         self.assertFalse(state["layout_switched"])
         self.assertIn("still reports 0x08040804", state["error"])
-        self.assertTrue(restore_ime(state)["restored"])  # the request is undone
+        self.assertFalse(restore_ime(state)["restored"])  # PR17: nothing changed -> not "restored"
         self.assertFalse(restore_ime({"switch_requested": False, "closed": False})["restored"])
 
     def test_already_latin_does_nothing(self):

@@ -2011,8 +2011,54 @@ def _poll_new_windows(
     return found, latest
 
 
+def _unlisted_popup(out: dict, latest: list[dict] | None, stamp_hwnd: int | None) -> None:
+    """after.unlisted_foreground / popup_hwnd: a foreground or covering window that windows() does not
+    list (Qt / CEF popups, untitled layers), so popups that appear or vanish are visible to the caller."""
+    if latest is None:
+        return
+    listed = {int(w.get("hwnd") or 0) for w in latest}
+    after = out.get("after") or {}
+    try:
+        from . import _win32
+        from .windows import window_at_point
+    except Exception:
+        return
+    fg = int(after.get("foreground_hwnd") or 0)
+    cands: list[tuple[str, int]] = []
+    if fg and fg not in listed:
+        after["unlisted_foreground"] = True
+        cands.append(("foreground", fg))
+    elif fg:
+        after["unlisted_foreground"] = False
+    if stamp_hwnd:
+        try:
+            l, t_, r, b = _win32.window_rect(int(stamp_hwnd))
+            at = window_at_point((l + r) // 2, (t_ + b) // 2)
+            if at and at != int(stamp_hwnd):
+                cands.append(("covers_stamp_center", int(at)))
+        except Exception:
+            pass
+    for key in ("suggested_hwnd",):
+        h = int(out.get(key) or 0)
+        if h:
+            cands.append(("blocking", h))
+    for why, h in cands:
+        if h in listed or h == int(stamp_hwnd or 0):
+            continue
+        try:
+            title = _win32.window_title(h) or ""
+            cls = _win32.class_name(h) or ""
+        except Exception:
+            title, cls = "", ""
+        after["popup_hwnd"] = h
+        after["popup"] = {"hwnd": h, "title": title, "class": cls, "why": why}
+        break
+    if after:
+        out["after"] = after
+
+
 def _attach_new_windows(out: dict, before: list[dict] | None, wait_s: float | None = None,
-                        cap_s: float | None = None) -> None:
+                        cap_s: float | None = None, stamp_hwnd: int | None = None) -> None:
     # An explicit wait always polls, whatever the action; the default only follows actions that can open one.
     may_open = chain_may_open_window(out.get("steps"))
     if wait_s is not None:
@@ -2039,6 +2085,10 @@ def _attach_new_windows(out: dict, before: list[dict] | None, wait_s: float | No
         fore = None
     if fore:
         out["after"] = fore
+    try:
+        _unlisted_popup(out, latest, stamp_hwnd)
+    except Exception:
+        pass
 
 
 _IME_CHAR_KEYS = {
@@ -2082,7 +2132,8 @@ def _note_ime(out: dict, frame: dict, steps: list[dict], ime_mode: str | None) -
     info = probe_ime(int(hwnd))
     if not info.get("ok"):
         return
-    out["ime"] = {k: info.get(k) for k in ("hkl_hex", "lang_id", "ime_open", "ime_active", "thread_id")}
+    out["ime"] = {k: info.get(k) for k in ("hkl_hex", "lang_id", "ime_open", "ime_conversion", "ime_active",
+                                           "thread_id", "top_thread_id", "focus_hwnd")}
     keyboard = any(s.get("via") in ("type", "key") for s in steps)
     # ime=off handles the layout itself. Warning ime_active after that is a false alarm.
     if info.get("ime_active") and keyboard and ime_mode not in ("off", "strict"):
@@ -2118,25 +2169,41 @@ def _suspend_ime_for_act(out: dict, frame: dict, steps: list[dict], ime_mode: st
     from .ime import ImeError, suspend_ime
 
     try:
-        state = suspend_ime(int(hwnd))
+        state = suspend_ime(int(hwnd), mode=ime_mode)
     except ImeError as e:
         state = {"verified": False, "error": str(e), "switch_requested": False, "closed": False}
-    _ime_restore.state = state if (state.get("switch_requested") or state.get("closed")) else None
-    out["ime_suspended"] = bool(state.get("switch_requested") or state.get("closed") or state.get("already_latin"))
+    # restore runs only for something that actually changed (a verified switch or an IME close)
+    _ime_restore.state = state if (state.get("layout_switched") or state.get("closed")) else None
+    out["ime_suspended"] = bool(state.get("layout_switched") or state.get("closed") or state.get("already_latin"))
     out["ime_layout_switched"] = bool(state.get("layout_switched"))
+    out["ime_closed"] = bool(state.get("closed"))
     out["ime_verified"] = bool(state.get("verified"))
     if state.get("already_latin"):
-        out["notes"] = (out.get("notes") or []) + ["ime=off: the window already uses a non-IME layout; nothing switched"]
-    if state.get("after_hkl_hex"):
-        out["ime"] = {"hkl_hex": state.get("after_hkl_hex"), "requested_hex": (
-            f"0x{int(state['english_hkl']) & 0xFFFFFFFF:08x}" if state.get("english_hkl") else None),
-            "verify_ms": state.get("verify_ms")}
+        out["notes"] = (out.get("notes") or []) + [f"ime={ime_mode}: the window already uses a non-IME layout; nothing switched"]
+    after = state.get("after") or {}
+    if state.get("hkl") is not None or after:
+        def _h(v):
+            return f"0x{int(v) & 0xFFFFFFFF:08x}" if v else None
+
+        out["ime"] = {
+            "thread_id": after.get("thread_id") or state.get("thread_id"),
+            "top_thread_id": after.get("top_thread_id"),
+            "focus_hwnd": state.get("focus_hwnd"),
+            "hkl_hex": state.get("after_hkl_hex") or after.get("hkl_hex"),
+            "hkl_before_hex": _h(state.get("hkl")),
+            "requested_hex": _h(state.get("english_hkl")) if state.get("switch_requested") else None,
+            "tried": state.get("tried") or [],
+            "ime_open_before": state.get("ime_open"), "ime_open_after": after.get("ime_open"),
+            "ime_conversion_before": state.get("ime_conversion"), "ime_conversion_after": after.get("ime_conversion"),
+            "verify_ms": state.get("verify_ms"), "verify_budget_ms": state.get("verify_budget_ms"),
+        }
     if state.get("verified"):
         if state.get("closed_only"):
             out["warnings"] = (out.get("warnings") or []) + [
-                "ime=off closed the IME only; no English or Latin keyboard layout is installed, so none was loaded"]
+                f"ime={ime_mode}: no layout switch stuck; the IME was closed instead (ime_closed=true), "
+                "so keys go through as ASCII"]
         return None
-    err = state.get("error") or "ime=off could not verify the layout switch"
+    err = state.get("error") or f'ime="{ime_mode}" could not verify the layout switch'
     if ime_mode == "strict":
         out["ok"] = False
         out["reason"] = "ime_failed"
@@ -2201,14 +2268,15 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                         rest = restore_ime(state)
                     except Exception as e:
                         rest = {"ok": False, "error": f"{type(e).__name__}: {e}"}
-                if rest is not None and isinstance(out, dict) and (rest.get("restored") or not rest.get("ok")):
+                if rest is not None and isinstance(out, dict) and rest.get("changed", True):
                     out["ime_restored"] = bool(rest.get("restored"))
                     if not rest.get("ok"):
                         out["warnings"] = (out.get("warnings") or []) + [
                             f"ime restore failed: {rest.get('error') or 'unknown'}"
                         ]
                 if isinstance(out, dict):
-                    _attach_new_windows(out, before, new_window_wait_s, new_window_wait_cap_s)
+                    _attach_new_windows(out, before, new_window_wait_s, new_window_wait_cap_s,
+                                        stamp_hwnd=(frame or {}).get("hwnd"))
             return out if isinstance(out, dict) else {
                 "ok": False, "dry_run": False, "error": "act returned nothing", "steps": [],
             }
