@@ -3,6 +3,7 @@ specific host, never 0.0.0.0. Extra Host names (e.g. a tailnet name behind a rev
 proxy) are opt-in via --allow-host or CU_PERCEIVE_ALLOWED_HOSTS."""
 
 import inspect
+import time
 from io import BytesIO
 from pathlib import Path
 
@@ -595,7 +596,20 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         adds change_minor=true: mostly hover / caret / focus-ring noise, though a checkbox redraw can be there too;
         read changed_bbox_norm and decide. change_min_ratio without check_change=true is ignored (warned).
         steps: each completed step carries new_window_wait_ms / new_window_wait_reason; the top level has the last
-        step's values plus new_windows_steps (indexes of steps that opened windows).
+        step's values plus new_windows_steps (indexes of steps that opened windows). With an explicit
+        new_window_wait_ms every non-final step (text too) reports min(250, it) / explicit.
+        below_min_ratio appears only when 0 < changed_pixels and the ratio is under the floor; no change at all
+        is screen_changed=false without it. reflow_reason="row_bands": >= 3 horizontal bands of change of
+        similar width with changed_ratio >= 0.01 (a list re-sorted inside a small panel); changed_row_bands
+        is the band count. With focus=true the baseline is grabbed after the window is raised
+        (change_baseline=after_focus), so activation alone is not a change.
+        expect_change only checks window-level changes (new_windows, foreground, title); with nothing seen the
+        reply warns expect_change_unmet. Pixel changes need check_change=true.
+        Covered points (point_covered / point_covered_after_focus, dry-run occluded_points) give suggested_hwnd
+        = the covering window: perceive_window(hwnd=suggested_hwnd) even when it is untitled and missing from
+        windows(). Popups and dialogs may belong to a different process (pid) than the app window.
+        ime="off" also applies to key-only acts (Ctrl chords can be eaten by an IME); a window that cannot
+        switch layout then only warns.
         new_windows: clicks, Enter/Esc, F-keys, Alt combos and Ctrl(+Shift)+letter poll by default; an explicit
         new_window_wait_ms always polls, whatever the action (new_window_wait_reason=explicit|action|
         chain_step|action_cannot_open_window; chain_step = non-final chain step, default wait capped at 250 ms). If focus fails because the foreground window is elevated,
@@ -682,9 +696,13 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         from .change import run_with_change_check
 
         if not (bool(kw.get("go")) and not kw.get("dry_run")):
+            mr = kw.pop("change_min_ratio", None)  # skipped with check_change, not "ignored"
             out = act(**kw)
             if isinstance(out, dict):
                 out["check_change"] = "skipped (dry run)"
+                if mr is not None:
+                    out["notes"] = (out.get("notes") or []) + [
+                        "check_change is skipped in a dry run, so change_min_ratio is skipped too"]
             return out
         try:
             frame, _ = load_frame(stamp=_nz_str(kw.get("stamp", "")), hwnd=_nz_int(kw.get("hwnd", 0)))
@@ -692,7 +710,17 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         except Exception:
             target = None  # act() itself reports the stamp problem
         mr = kw.pop("change_min_ratio", None)  # consumed here; act() would warn it was ignored
-        return run_with_change_check(target, lambda: act(**kw), min_ratio=None if mr in (None, "") else float(mr))
+        pre = None
+        if target and kw.get("focus"):
+            def pre():
+                from .act import FOCUS_SETTLE_S
+                from .windows import focus_and_verify
+
+                fv = focus_and_verify(int(target), retries=1)
+                time.sleep(FOCUS_SETTLE_S + 0.15)  # let activation repaint settle
+                return "after_focus" if fv.get("foreground_ok") else "focus_not_confirmed"
+        return run_with_change_check(target, lambda: act(**kw), min_ratio=None if mr in (None, "") else float(mr),
+                                     before_baseline=pre)
 
     def _act_chain(steps, call: dict):
         from .chain import ACTION_FIELDS, run_steps, validate_steps
