@@ -64,13 +64,23 @@ class TestNewWindowsWait(unittest.TestCase):
         self.assertEqual(out["new_window_wait_ms"], 2500)
         self.assertTrue(out["windows_snapshot_changed"])
 
-    def test_typing_does_not_wait(self):
+    def test_typing_does_not_wait_by_default(self):
+        out = {"steps": [{"via": "type"}]}
+        with mock.patch.object(act_mod, "_poll_new_windows", return_value=([], [A])) as p, \
+                mock.patch("cu_perceive.windows.foreground_brief", return_value=None):
+            act_mod._attach_new_windows(out, [A], None)
+        p.assert_called_once_with([A], 0.0, 0.0)
+        self.assertFalse(out["windows_snapshot_changed"])
+        self.assertEqual(out["new_window_wait_reason"], "action_cannot_open_window")
+
+    def test_explicit_wait_always_polls(self):
         out = {"steps": [{"via": "type"}]}
         with mock.patch.object(act_mod, "_poll_new_windows", return_value=([], [A])) as p, \
                 mock.patch("cu_perceive.windows.foreground_brief", return_value=None):
             act_mod._attach_new_windows(out, [A], 2.5)
-        p.assert_called_once_with([A], 0.0, 0.0)
-        self.assertFalse(out["windows_snapshot_changed"])
+        p.assert_called_once_with([A], 2.5, act_mod.NEW_WINDOW_RECHECK_S)
+        self.assertEqual(out["new_window_wait_ms"], 2500)
+        self.assertEqual(out["new_window_wait_reason"], "explicit")
 
     def test_snapshot_changed(self):
         f = act_mod.windows_snapshot_changed
