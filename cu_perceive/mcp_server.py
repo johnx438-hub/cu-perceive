@@ -605,11 +605,15 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         (change_baseline=after_focus), so activation alone is not a change.
         expect_change only checks window-level changes (new_windows, foreground, title); with nothing seen the
         reply warns expect_change_unmet. Pixel changes need check_change=true.
+        Hover steps are checked like clicks (a dry-run occluded_points entry says "hover"; go refuses with point_covered).
         Covered points (point_covered / point_covered_after_focus, dry-run occluded_points) give suggested_hwnd
         = the covering window: perceive_window(hwnd=suggested_hwnd) even when it is untitled and missing from
         windows(). Popups and dialogs may belong to a different process (pid) than the app window.
-        ime="off" also applies to key-only acts (Ctrl chords can be eaten by an IME); a window that cannot
-        switch layout then only warns.
+        ime="off" also applies to key-only acts (Ctrl chords can be eaten by an IME). Any installed English
+        layout counts (en-GB 0809 as well as en-US), else another Latin one; the switch is polled up to 0.5 s and
+        verified by language id. If it cannot be verified the act warns (ime_unverified=true) and still runs, for
+        keys and text alike; ime="strict" aborts instead (reason=ime_failed). ime_layout_switched is true only
+        for a verified change; ime_restored appears only when something was switched or closed.
         new_windows: clicks, Enter/Esc, F-keys, Alt combos and Ctrl(+Shift)+letter poll by default; an explicit
         new_window_wait_ms always polls, whatever the action (new_window_wait_reason=explicit|action|
         chain_step|action_cannot_open_window; chain_step = non-final chain step, default wait capped at 250 ms). If focus fails because the foreground window is elevated,
@@ -710,15 +714,9 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         except Exception:
             target = None  # act() itself reports the stamp problem
         mr = kw.pop("change_min_ratio", None)  # consumed here; act() would warn it was ignored
-        pre = None
-        if target and kw.get("focus"):
-            def pre():
-                from .act import FOCUS_SETTLE_S
-                from .windows import focus_and_verify
+        from .change import focus_baseline_hook
 
-                fv = focus_and_verify(int(target), retries=1)
-                time.sleep(FOCUS_SETTLE_S + 0.15)  # let activation repaint settle
-                return "after_focus" if fv.get("foreground_ok") else "focus_not_confirmed"
+        pre = focus_baseline_hook(target, bool(kw.get("focus")))
         return run_with_change_check(target, lambda: act(**kw), min_ratio=None if mr in (None, "") else float(mr),
                                      before_baseline=pre)
 

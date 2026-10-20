@@ -167,7 +167,7 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--slow-type", action="store_true", help="per-char SendInput instead of paste (same as --via keys)")
     a.add_argument(
         "--ime",
-        choices=["off"],
+        choices=["off", "strict"],
         default=None,
         help='off: for --go, close the target window IME and switch it to an already-installed English/Latin layout (never loads a new one), then restore both',
     )
@@ -467,10 +467,11 @@ def main(argv: list[str] | None = None) -> int:
                 )
 
             if getattr(args, "check_change", False) and args.go:
-                from .change import run_with_change_check
+                from .change import focus_baseline_hook, run_with_change_check
 
-                out = run_with_change_check(int(frame.get("hwnd") or 0) or None, _run,
-                                            min_ratio=getattr(args, "change_min_ratio", None))
+                target = int(frame.get("hwnd") or 0) or None
+                out = run_with_change_check(target, _run, min_ratio=getattr(args, "change_min_ratio", None),
+                                            before_baseline=focus_baseline_hook(target, bool(args.focus)))
             else:
                 out = _run()
         except (MethodError, RuntimeError, FileNotFoundError, OSError, KeyError, ValueError) as e:

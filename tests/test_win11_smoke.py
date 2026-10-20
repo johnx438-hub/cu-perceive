@@ -197,6 +197,7 @@ class TestIme(unittest.TestCase):
         self.assertFalse(layout_ime_active(0x04090409, False))
         self.assertFalse(layout_ime_active(0x08090809, None))
         self.assertEqual(normalize_ime("off"), "off")
+        self.assertEqual(normalize_ime("STRICT"), "strict")
         self.assertIsNone(normalize_ime(""))
         with self.assertRaises(ValueError):
             normalize_ime("zh")
@@ -222,37 +223,63 @@ class TestIme(unittest.TestCase):
         self.assertIsNone(pick_installed_latin([0x08040804]))
         user32 = mock.Mock()
         user32.GetWindowThreadProcessId.return_value = 9
-        user32.GetKeyboardLayout.return_value = 0x08040804
+        user32.GetGUIThreadInfo.return_value = 0
+        user32.PostMessageW.return_value = 1
         imm = mock.Mock()
         imm.ImmGetContext.return_value = 5
-        imm.ImmGetOpenStatus.return_value = 1
-        state = suspend_ime(77, user32=user32, imm32=imm, layouts=[0x08040804, 0x08090809])
+        imm.ImmSetOpenStatus.return_value = 1
+        probes = iter([{"ok": True, "hkl": 0x08040804, "ime_open": True, "thread_id": 9, "hkl_hex": "0x08040804"},
+                       {"ok": True, "hkl": 0x08040804, "ime_open": True, "thread_id": 9, "hkl_hex": "0x08040804"},
+                       {"ok": True, "hkl": 0xF0020809, "ime_open": False, "thread_id": 9, "hkl_hex": "0xf0020809"}])
+        state = suspend_ime(77, user32=user32, imm32=imm, layouts=[0x08040804, 0x08090809],
+                            probe=lambda h: next(probes), sleep=lambda s: None)
         user32.LoadKeyboardLayoutW.assert_not_called()
-        hwnd, msg, _w, hkl = user32.SendMessageW.call_args[0]
+        hwnd, msg, _w, hkl = user32.PostMessageW.call_args[0]
         self.assertEqual((hwnd, msg, hkl), (77, 0x0050, 0x08090809))
+        self.assertTrue(state["verified"])  # substitute high word (0809:00020409) still counts
         self.assertTrue(state["layout_switched"])
         imm.ImmSetOpenStatus.assert_called_with(5, False)
-        user32.SendMessageW.reset_mock()
+        user32.PostMessageW.reset_mock()
         imm.ImmSetOpenStatus.reset_mock()
-        imm.ImmGetContext.return_value = 5
         rest = restore_ime(state)
-        self.assertTrue(rest["ok"], rest)
-        self.assertEqual(user32.SendMessageW.call_args[0][3], 0x08040804)
+        self.assertTrue(rest["restored"], rest)
+        self.assertEqual(user32.PostMessageW.call_args[0][3], 0x08040804)
         imm.ImmSetOpenStatus.assert_called_with(5, True)
 
     def test_off_closes_ime_when_no_latin_layout_is_installed(self):
         user32 = mock.Mock()
-        user32.GetWindowThreadProcessId.return_value = 9
-        user32.GetKeyboardLayout.return_value = 0x08040804
         imm = mock.Mock()
         imm.ImmGetContext.return_value = 5
-        imm.ImmGetOpenStatus.return_value = 1
-        state = suspend_ime(77, user32=user32, imm32=imm, layouts=[0x08040804])
-        user32.SendMessageW.assert_not_called()
+        imm.ImmSetOpenStatus.return_value = 1
+        info = {"ok": True, "hkl": 0x08040804, "ime_open": True, "thread_id": 9, "hkl_hex": "0x08040804"}
+        state = suspend_ime(77, user32=user32, imm32=imm, layouts=[0x08040804], probe=lambda h: info,
+                            sleep=lambda s: None)
+        user32.PostMessageW.assert_not_called()
         user32.LoadKeyboardLayoutW.assert_not_called()
-        self.assertTrue(state["closed_only"])
         self.assertFalse(state["layout_switched"])
+        self.assertFalse(state["verified"])
+        self.assertIn("no English or Latin", state["error"])
         imm.ImmSetOpenStatus.assert_called_with(5, False)
+
+    def test_unverified_switch_reports_and_restore_is_noop_when_nothing_changed(self):
+        user32 = mock.Mock()
+        user32.PostMessageW.return_value = 1
+        info = {"ok": True, "hkl": 0x08040804, "ime_open": None, "thread_id": 9, "hkl_hex": "0x08040804"}
+        state = suspend_ime(77, user32=user32, imm32=None, layouts=[0x08040804, 0x08090809],
+                            probe=lambda h: info, sleep=lambda s: None)
+        self.assertFalse(state["verified"])
+        self.assertFalse(state["layout_switched"])
+        self.assertIn("still reports 0x08040804", state["error"])
+        self.assertTrue(restore_ime(state)["restored"])  # the request is undone
+        self.assertFalse(restore_ime({"switch_requested": False, "closed": False})["restored"])
+
+    def test_already_latin_does_nothing(self):
+        user32 = mock.Mock()
+        info = {"ok": True, "hkl": 0x08090809, "ime_open": False, "thread_id": 9, "hkl_hex": "0x08090809"}
+        state = suspend_ime(77, user32=user32, layouts=[0x08090809], probe=lambda h: info, sleep=lambda s: None)
+        self.assertTrue(state["already_latin"] and state["verified"])
+        user32.PostMessageW.assert_not_called()
+        self.assertFalse(restore_ime(state)["restored"])
 
 
 class TestActImeAndVia(unittest.TestCase):
@@ -691,8 +718,8 @@ class TestNewWindowsAndLock(unittest.TestCase):
 
         def suspend(hwnd, **k):
             return {
-                "hwnd": int(hwnd), "hkl": 0x08040804, "ime_open": True, "closed": True,
-                "layout_switched": True, "english_hkl": 0x08090809, "closed_only": False,
+                "hwnd": int(hwnd), "hkl": 0x08040804, "ime_open": True, "closed": True, "switch_requested": True,
+                "layout_switched": True, "verified": True, "english_hkl": 0x08090809, "after_hkl_hex": "0x08090809",
             }
 
         with mock.patch("cu_perceive.act.check_stamp", return_value={"ok": True}), \
@@ -711,28 +738,51 @@ class TestNewWindowsAndLock(unittest.TestCase):
         self.assertTrue(out["ime_verified"])
         self.assertFalse(any(str(w).startswith("ime_active:") for w in out.get("warnings") or []))
 
-    def test_ime_off_fails_when_the_layout_stays(self):
+    def _unverified(self, ime, steps):
         active = {
             "ok": True, "hkl": 0x08040804, "hkl_hex": "0x08040804", "lang_id": "0x0804",
-            "ime_open": True, "ime_active": True, "thread_id": 9,
+            "ime_open": None, "ime_active": True, "thread_id": 9,
         }
 
         def suspend(hwnd, **k):
             return {
-                "hwnd": int(hwnd), "hkl": 0x08040804, "ime_open": True, "closed": True,
-                "layout_switched": True, "english_hkl": 0x04090409, "closed_only": False,
+                "hwnd": int(hwnd), "hkl": 0x08040804, "ime_open": None, "closed": False, "switch_requested": True,
+                "layout_switched": False, "verified": False, "english_hkl": 0x08090809, "after_hkl_hex": "0x08040804",
+                "error": f"ime=off did not switch hwnd {hwnd} (requested 0x08090809 but the window still reports 0x08040804, ime_open=None)",
             }
 
         with mock.patch("cu_perceive.act.check_stamp", return_value={"ok": True}), \
                 mock.patch("cu_perceive.act.stamp_identity_error", return_value=None), \
+                mock.patch("cu_perceive.windows.foreground_matches", return_value=(True, 42)), \
+                mock.patch("cu_perceive.windows.focus_matches", return_value=(None, 0)), \
                 mock.patch("cu_perceive.ime.probe_ime", return_value=active), \
                 mock.patch("cu_perceive.ime.suspend_ime", side_effect=suspend), \
                 mock.patch("cu_perceive.ime.restore_ime", return_value={"ok": True, "restored": True}), \
-                mock.patch("cu_perceive.input.tap_key") as tap, \
+                mock.patch("cu_perceive.input.tap_key", return_value={"ok": True}) as tap, \
+                mock.patch("cu_perceive.input.enter_text", return_value={"ok": True, "via": "keys"}), \
+                mock.patch("cu_perceive.input.focused_readback", return_value={"value": "y", "password": False, "in_target": True}), \
                 mock.patch("cu_perceive.act._snapshot_windows", return_value=[]), \
                 mock.patch("cu_perceive.windows.foreground_brief", return_value=None), \
                 mock.patch("time.sleep"):
-            out = run_chain(_window(), parse_steps(key="a"), dry_run=False, ime="off")
+            out = run_chain(_window(), steps, dry_run=False, ime=ime)
+        return out, tap
+
+    def test_ime_off_unverified_warns_and_sends_keys(self):
+        out, tap = self._unverified("off", parse_steps(key="ctrl+w"))
+        self.assertTrue(out["ok"], out)
+        tap.assert_called()
+        self.assertTrue(out["ime_unverified"])
+        self.assertFalse(out["ime_layout_switched"])
+        self.assertFalse(out["ime_verified"])
+        self.assertTrue(any("did not switch" in w for w in out["warnings"]))
+
+    def test_ime_off_unverified_text_still_types(self):
+        out, _tap = self._unverified("off", parse_steps(text="y", input_via="keys"))
+        self.assertTrue(out["ok"], out)
+        self.assertTrue(any("ime=\"strict\"" in w for w in out["warnings"]))
+
+    def test_ime_strict_aborts(self):
+        out, tap = self._unverified("strict", parse_steps(key="a"))
         self.assertFalse(out["ok"])
         self.assertEqual(out["reason"], "ime_failed")
         tap.assert_not_called()

@@ -216,3 +216,21 @@ def run_with_change_check(hwnd: int | None, run, *, grab=None, sleep=time.sleep,
         res["check_change_note"] = "window grab failed before or after; screen_changed unknown"
     out.update(res)
     return out
+
+
+def focus_baseline_hook(hwnd: int | None, focus: bool, *, sleep=time.sleep):
+    """before_baseline for run_with_change_check: with focus, bring ``hwnd`` forward and let the
+    activation repaint settle before the baseline is grabbed (else the repaint looks like a reflow).
+    None when there is nothing to focus. Shared by the MCP act and CLI act --check-change."""
+    if not (hwnd and focus):
+        return None
+
+    def pre():
+        from .act import FOCUS_SETTLE_S
+        from .windows import focus_and_verify
+
+        fv = focus_and_verify(int(hwnd), retries=1)
+        sleep(FOCUS_SETTLE_S + 0.15)
+        return "after_focus" if fv.get("foreground_ok") else "focus_not_confirmed"
+
+    return pre

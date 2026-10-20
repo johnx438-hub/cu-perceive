@@ -178,6 +178,35 @@ def pick_installed_latin(layouts) -> int | None:
     return None
 
 
+def latin_candidates(layouts) -> list[int]:
+    """Every installed English layout (en-US first, then en-GB 0809, ...), then other Latin ones.
+
+    GetKeyboardLayoutList can include an HKL that is loaded but not in the user's language list
+    (a stray 0x04090409 on an en-GB + zh-Hans machine); some apps (WPS / Qt) refuse that one, so
+    suspend_ime tries each candidate in turn and keeps the first one that verifies.
+    """
+    out: list[int] = []
+    first = pick_installed_latin(layouts)
+    if first:
+        out.append(first)
+    seen = set(out)
+    ints = []
+    for raw in layouts or []:
+        try:
+            ints.append(int(raw))
+        except (TypeError, ValueError):
+            continue
+    for want_english in (True, False):
+        for h in ints:
+            if not h or h in seen:
+                continue
+            pl = primary_lang(h)
+            if (pl == 0x09) if want_english else (pl in _LATIN_PRIMARY and pl != 0x09):
+                out.append(h)
+                seen.add(h)
+    return out
+
+
 def installed_layouts(user32) -> list[int]:
     """HKLs from GetKeyboardLayoutList. Empty when the list cannot be read."""
     import ctypes
@@ -205,36 +234,91 @@ def installed_layouts(user32) -> list[int]:
     return out
 
 
-def suspend_ime(hwnd: int, *, user32=None, imm32=None, layouts=None) -> dict:
-    """Close the target window's IME and, when one is installed, request a Latin layout.
+def _gui_focus_hwnd(user32, tid: int) -> int:
+    """The focused child on ``tid`` (GetGUIThreadInfo). 0 when unknown."""
+    import ctypes
 
-    Uses GetKeyboardLayoutList. Never calls LoadKeyboardLayout, so a missing
-    en-US layout is not added to the user's language list. With no Latin layout
-    installed, only the IME is closed.
+    class GUITHREADINFO(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("flags", wintypes.DWORD), ("hwndActive", wintypes.HWND),
+                    ("hwndFocus", wintypes.HWND), ("hwndCapture", wintypes.HWND), ("hwndMenuOwner", wintypes.HWND),
+                    ("hwndMoveSize", wintypes.HWND), ("hwndCaret", wintypes.HWND), ("rcCaret", wintypes.RECT)]
 
-    Raises ImeError when the requested switch itself fails. Does not change the
-    server process layout.
+    try:
+        gi = GUITHREADINFO()
+        gi.cbSize = ctypes.sizeof(GUITHREADINFO)
+        _bind(user32, "GetGUIThreadInfo", [wintypes.DWORD, ctypes.c_void_p], wintypes.BOOL)
+        if user32.GetGUIThreadInfo(int(tid), ctypes.byref(gi)):
+            return int(gi.hwndFocus or 0)
+    except Exception:
+        pass
+    return 0
+
+
+def layout_ok(hkl: int | None, want: int | None, ime_open: bool | None) -> bool:
+    """Switch verified: IME not open and the thread layout is not a CJK IME.
+
+    Compares language ids (low word), not full HKLs: 0809:00020409 (en-GB with a US
+    keyboard) reports a substitute high word, so a full-HKL compare failed on such machines.
+    Any non-IME layout is fine for sending ASCII, even if it is not exactly ``want``.
     """
-    info = probe_ime(hwnd, user32=user32, imm32=imm32)
+    if not hkl or ime_open:
+        return False
+    return not layout_ime_active(int(hkl), ime_open)
+
+
+def _request_layout(user32, targets, hkl: int) -> list[str]:
+    """WM_INPUTLANGCHANGEREQUEST to each target. Posted (handled on the target's own thread,
+    which is what DefWindowProc needs to call ActivateKeyboardLayout there), sent as fallback."""
+    errs: list[str] = []
+    _bind(user32, "PostMessageW", [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM], wintypes.BOOL)
+    _bind(user32, "SendMessageTimeoutW", [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM,
+                                          wintypes.UINT, wintypes.UINT, wintypes.LPVOID], wintypes.LPARAM)
+    for h in targets:
+        try:
+            if not user32.PostMessageW(int(h), WM_INPUTLANGCHANGEREQUEST, 0, int(hkl)):
+                user32.SendMessageTimeoutW(int(h), WM_INPUTLANGCHANGEREQUEST, 0, int(hkl), 0x0002, 200, None)
+        except Exception as e:
+            errs.append(f"{h}: {e}")
+    return errs
+
+
+def suspend_ime(hwnd: int, *, user32=None, imm32=None, layouts=None, probe=None, sleep=None,
+                verify_s: float = 0.5) -> dict:
+    """Close the target window's IME and request an installed Latin layout, then verify.
+
+    Never calls LoadKeyboardLayout. The request goes to the focused child and the
+    top-level window of the target thread; the result is polled for up to ``verify_s``
+    (the switch is asynchronous). Never raises for an unverified switch: the result has
+    layout_switched (verified), switch_requested, verified and, when not verified, error.
+    Raises ImeError only when Windows APIs are unavailable.
+    """
+    import time as _time
+
+    sleep = sleep or _time.sleep
+    probe = probe or (lambda h: probe_ime(h, user32=user32, imm32=imm32))
+    info = probe(hwnd)
     if user32 is None and imm32 is None:
         user32 = _load_user32()
         imm32 = _load_imm32()
     if user32 is None:
         raise ImeError("ime=off needs Windows to switch the target window's layout")
     hwnd = int(hwnd)
+    before_hkl = info.get("hkl")
     if layouts is None:
         layouts = installed_layouts(user32)
-    latin = pick_installed_latin(layouts)
-    layout_switched = False
-    if latin:
-        try:
-            _bind(user32, "SendMessageW", [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM], wintypes.LPARAM)
-            user32.SendMessageW(hwnd, WM_INPUTLANGCHANGEREQUEST, 0, int(latin))
-            layout_switched = True
-        except Exception as e:
-            raise ImeError(f"could not switch hwnd {hwnd} to an installed Latin layout: {e}") from e
-
-    closed = False
+    candidates = latin_candidates(layouts)
+    latin = candidates[0] if candidates else None
+    state = {
+        "hwnd": hwnd, "hkl": before_hkl, "ime_open": info.get("ime_open"),
+        "english_hkl": int(latin) if latin else None, "installed": [hkl_hex(h) for h in layouts or []],
+        "switch_requested": False, "layout_switched": False, "closed": False, "verified": False,
+        "already_latin": bool(info.get("ok") and layout_ok(before_hkl, latin, info.get("ime_open"))),
+        "tried": [], "_user32": user32, "_imm32": imm32, "_probe": probe, "_sleep": sleep,
+    }
+    if state["already_latin"]:
+        state["verified"] = True
+        return state
+    errs: list[str] = []
     if imm32 is not None and info.get("ime_open"):
         try:
             _bind(imm32, "ImmGetContext", [wintypes.HWND], wintypes.HANDLE)
@@ -243,51 +327,70 @@ def suspend_ime(hwnd: int, *, user32=None, imm32=None, layouts=None) -> dict:
             himc = imm32.ImmGetContext(hwnd)
             if himc:
                 try:
-                    imm32.ImmSetOpenStatus(himc, False)
-                    closed = True
+                    state["closed"] = bool(imm32.ImmSetOpenStatus(himc, False))
                 finally:
                     imm32.ImmReleaseContext(hwnd, himc)
         except Exception as e:
-            raise ImeError(f"could not close the IME on hwnd {hwnd}: {e}") from e
-    if not layout_switched and not closed and not info.get("ime_open"):
-        # Nothing to close and no Latin layout. Still a successful no-op switch
-        # only when the IME was already closed; the caller warns about the layout.
-        pass
-
-    return {
-        "hwnd": hwnd,
-        "hkl": info.get("hkl"),
-        "ime_open": info.get("ime_open"),
-        "english_hkl": int(latin) if latin else None,
-        "layout_switched": layout_switched,
-        "closed_only": not layout_switched,
-        "closed": closed,
-        "_user32": user32,
-        "_imm32": imm32,
-    }
+            errs.append(f"ImmSetOpenStatus: {e}")
+    focus = _gui_focus_hwnd(user32, info.get("thread_id") or 0) if (candidates and info.get("thread_id")) else 0
+    targets = [h for h in dict.fromkeys([focus, hwnd]) if h]
+    after = info
+    waited = 0.0
+    step = 0.05
+    per = verify_s if len(candidates) <= 1 else max(0.2, verify_s / 2)
+    for cand in candidates or [None]:
+        if cand is not None:
+            errs += _request_layout(user32, targets, cand)
+            state["switch_requested"] = True
+            state["targets"] = targets
+            state["tried"].append(hkl_hex(cand))
+        spent = 0.0
+        while True:
+            after = probe(hwnd)
+            if after.get("ok") and layout_ok(after.get("hkl"), cand, after.get("ime_open")):
+                state["verified"] = True
+                break
+            if cand is None and state["closed"] and after.get("ok") and after.get("ime_open") is False:
+                state["verified"] = True  # no Latin layout: a closed IME passes ASCII through
+                state["closed_only"] = True
+                break
+            if spent >= per:
+                break
+            sleep(step)
+            spent += step
+        waited += spent
+        if state["verified"]:
+            if cand is not None:
+                state["english_hkl"] = int(cand)
+            break
+    state["after_hkl_hex"] = after.get("hkl_hex")
+    state["verify_ms"] = int(round(waited * 1000))
+    changed = bool(after.get("hkl") and before_hkl and int(after["hkl"]) != int(before_hkl))
+    state["layout_switched"] = bool(state["verified"] and changed)
+    if not state["verified"]:
+        why = "no English or Latin keyboard layout is installed" if not latin else (
+            f"requested {', '.join(state['tried'])} but the window still reports {after.get('hkl_hex')}")
+        state["error"] = (f"ime=off did not switch hwnd {hwnd} ({why}, ime_open={after.get('ime_open')})"
+                          + (f"; {'; '.join(errs)}" if errs else ""))
+    return state
 
 
 def restore_ime(state: dict | None) -> dict:
-    """Put the layout and IME open-state from ``suspend_ime`` back. Best effort."""
-    if not state:
+    """Put back the layout / IME open-state that ``suspend_ime`` changed. Best effort.
+
+    restored=True only when something had been switched or closed and was put back.
+    """
+    if not state or not (state.get("switch_requested") or state.get("closed")):
         return {"ok": True, "restored": False}
     user32 = state.get("_user32") or _load_user32()
     imm32 = state.get("_imm32")
-    if imm32 is None and state.get("ime_open"):
+    if imm32 is None and state.get("closed"):
         imm32 = _load_imm32()
     hwnd = int(state.get("hwnd") or 0)
     errors: list[str] = []
-    if user32 is not None and hwnd and state.get("hkl"):
-        try:
-            _bind(
-                user32, "SendMessageW",
-                [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM],
-                wintypes.LPARAM,
-            )
-            user32.SendMessageW(hwnd, WM_INPUTLANGCHANGEREQUEST, 0, int(state["hkl"]))
-        except Exception as e:
-            errors.append(f"layout: {e}")
-    if imm32 is not None and hwnd and state.get("ime_open") is not None and state.get("closed"):
+    if user32 is not None and hwnd and state.get("hkl") and state.get("switch_requested"):
+        errors += _request_layout(user32, state.get("targets") or [hwnd], int(state["hkl"]))
+    if imm32 is not None and hwnd and state.get("closed"):
         try:
             _bind(imm32, "ImmGetContext", [wintypes.HWND], wintypes.HANDLE)
             _bind(imm32, "ImmSetOpenStatus", [wintypes.HANDLE, wintypes.BOOL], wintypes.BOOL)
@@ -302,14 +405,29 @@ def restore_ime(state: dict | None) -> dict:
             errors.append(f"ime: {e}")
     if errors:
         return {"ok": False, "restored": False, "error": "; ".join(errors)}
+    probe, sleep = state.get("_probe"), state.get("_sleep")
+    if probe and sleep and state.get("layout_switched") and state.get("hkl"):
+        # the request is posted: confirm the original language is back (usually < 50 ms)
+        want = int(state["hkl"]) & 0xFFFF
+        now: dict = {}
+        for _ in range(7):
+            try:
+                now = probe(hwnd)
+            except Exception:
+                return {"ok": True, "restored": True, "verified": None}  # cannot read back
+            if now.get("ok") and (int(now.get("hkl") or 0) & 0xFFFF) == want:
+                return {"ok": True, "restored": True, "verified": True}
+            sleep(0.05)
+        return {"ok": False, "restored": False, "error": f"layout still {now.get('hkl_hex')} after restore"}
     return {"ok": True, "restored": True}
 
 
 def normalize_ime(raw) -> str | None:
-    """None = detect and warn. 'off' = switch the target window to English for this act."""
+    """None = detect and warn. 'off' = switch the target window to English for this act, and
+    warn + continue if the switch cannot be verified. 'strict' = same, but abort (ime_failed)."""
     if raw in (None, ""):
         return None
     s = str(raw).strip().lower()
-    if s == "off":
-        return "off"
-    raise ValueError('ime must be "off" or omitted (got %r)' % (raw,))
+    if s in ("off", "strict"):
+        return s
+    raise ValueError('ime must be "off", "strict" or omitted (got %r)' % (raw,))
