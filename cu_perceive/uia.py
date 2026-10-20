@@ -820,14 +820,31 @@ def normalize_cell_value(value: str | None, control_type: str = "") -> str | Non
     return value
 
 
+def _control_is_password(control) -> bool:
+    """UIA IsPassword or an edit style with ES_PASSWORD. Never reads Value."""
+    try:
+        from .input import _edit_style, _uia_is_password, edit_is_password
+
+        return edit_is_password(
+            uia_password=_uia_is_password(control),
+            style=_edit_style(_native_hwnd(control)),
+        )
+    except Exception:
+        return False
+
+
 def read_control_value(control) -> tuple[str | None, bool | None]:
     """(ValuePattern.Value truncated, IsReadOnly or None). Never raises.
 
-    Read-only grid cells often have no ``IsReadOnly`` attribute on the pattern
-    object. This also checks the ValueIsReadOnly property and the legacy
-    accessible state bit. A DataItem/DataGrid ``False`` is not evidence, so
-    those cells report ``None``. A cell value of ``(null)`` is ``None``.
+    Password edits are not read: UIA ``IsPassword`` or ``ES_PASSWORD`` returns
+    ``(None, None)`` and does not touch ``ValuePattern.Value``. Read-only grid
+    cells often have no ``IsReadOnly`` attribute on the pattern object. This
+    also checks the ValueIsReadOnly property and the legacy accessible state
+    bit. A DataItem/DataGrid ``False`` is not evidence, so those cells report
+    ``None``. A cell value of ``(null)`` is ``None``.
     """
+    if _control_is_password(control):
+        return None, None
     auto = None
     pat = None
     try:
