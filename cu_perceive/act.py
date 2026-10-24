@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import math
+import os
 import threading
 import time
 from pathlib import Path
@@ -16,74 +18,163 @@ LIVE_ACT_LOCK = threading.Lock()
 _live_lock_state = threading.local()
 _ime_restore = threading.local()
 
-# Operator stop switch (P0-1). Set from another thread/MCP call; every step boundary checks it
-# before dispatching input, so an in-flight act stops between steps instead of running to the end.
+# Operator stop switch (P0-1). Process-wide on purpose: an operator stop must stop every client of
+# this server (box connector and local agents alike). Every live step boundary checks it before
+# dispatching input, so an in-flight act stops between steps instead of running to the end.
+# The flag auto-clears after a TTL (CU_PERCEIVE_ABORT_TTL_S, default 120 s, 0 = never) so a
+# forgotten stop cannot wedge every later act; abort(clear=true) lowers it at once.
+ABORT_TTL_ENV = "CU_PERCEIVE_ABORT_TTL_S"
+ABORT_TTL_DEFAULT_S = 120.0
 ABORT = threading.Event()
 ABORT_META: dict = {}
+_ABORT_LOCK = threading.Lock()
+_abort_clock = time.monotonic  # tests patch this to move time
 
 
-def request_abort(reason: str = "operator") -> dict:
-    """Raise the stop flag. Returns the current state so callers can echo it back."""
-    ABORT_META["reason"] = reason
-    ABORT_META["requested_at"] = time.time()
-    ABORT.set()
+def abort_ttl_s() -> float:
+    """TTL for a new stop request. Unset/invalid = 120 s; 0, negative or non-finite = never auto-clear."""
+    raw = (os.environ.get(ABORT_TTL_ENV) or "").strip()
+    if not raw:
+        return ABORT_TTL_DEFAULT_S
+    try:
+        val = float(raw)
+    except ValueError:
+        return ABORT_TTL_DEFAULT_S
+    return val if math.isfinite(val) and val > 0 else 0.0
+
+
+def _abort_expire_locked(now: float) -> None:
+    if not ABORT.is_set():
+        return
+    ttl = float(ABORT_META.get("ttl_s") or 0.0)
+    t0 = ABORT_META.get("t0")
+    if ttl > 0 and t0 is not None and now - t0 >= ttl:
+        ABORT.clear()
+        ABORT_META.clear()
+
+
+def request_abort(reason: str = "operator", ttl_s: float | None = None) -> dict:
+    """Raise the stop flag (a repeat request restarts the TTL). Returns the switch state."""
+    ttl = abort_ttl_s() if ttl_s is None else max(0.0, float(ttl_s))
+    with _ABORT_LOCK:
+        ABORT_META.clear()
+        ABORT_META.update(reason=reason, requested_at=time.time(), t0=_abort_clock(), ttl_s=ttl)
+        ABORT.set()
     return abort_state()
 
 
 def clear_abort() -> dict:
-    """Lower the stop flag (call after a refusal so the next act can run)."""
-    ABORT.clear()
-    ABORT_META.clear()
+    """Lower the stop flag now (instead of waiting for the TTL)."""
+    with _ABORT_LOCK:
+        ABORT.clear()
+        ABORT_META.clear()
     return abort_state()
 
 
+def abort_active() -> bool:
+    with _ABORT_LOCK:
+        _abort_expire_locked(_abort_clock())
+        return ABORT.is_set()
+
+
 def abort_state() -> dict:
-    return {"aborted": ABORT.is_set(), **({"reason": ABORT_META.get("reason"),
-                                           "requested_at": ABORT_META.get("requested_at")}
-                                          if ABORT.is_set() else {})}
+    """``abort_active`` always; reason / requested_at / ttl_s / remaining_s while it is on.
+
+    ``abort_ttl_s`` 0 means it never auto-clears (``abort_remaining_s`` is then None).
+    """
+    with _ABORT_LOCK:
+        now = _abort_clock()
+        _abort_expire_locked(now)
+        if not ABORT.is_set():
+            return {"abort_active": False}
+        ttl = float(ABORT_META.get("ttl_s") or 0.0)
+        t0 = ABORT_META.get("t0", now)
+        return {
+            "abort_active": True,
+            "abort_reason": ABORT_META.get("reason"),
+            "abort_requested_at": ABORT_META.get("requested_at"),
+            "abort_ttl_s": ttl,
+            "abort_remaining_s": round(max(0.0, ttl - (now - t0)), 1) if ttl > 0 else None,
+        }
 
 
 def _abort_step(out: dict, n: int) -> bool:
     """True = stop before step ``n``. Mirrors _identity_abort's shape (out updated, caller returns)."""
-    if not ABORT.is_set():
+    if not abort_active():
         return False
     out["ok"] = False
     out["aborted"] = True
     out["abort_step"] = n
     out["reason"] = "aborted"
     out["error"] = f"aborted by operator before step {n}"
-    out["hint"] = 'clear the flag with abort(clear=true) before acting again'
+    out["hint"] = "clear the flag with abort(clear=true) before acting again, or wait for it to auto-clear"
     for s in out.get("steps") or []:
         s.pop("_uia_control", None)
         s.pop("_uia_action", None)
     return True
 
 
-def annotate_verification(out):
-    """Attach one verdict + evidence block to an act result (P0-3).
+# Step flags run_chain sets only after it dispatched that step's input.
+_SENT_FLAGS = ("clicked", "hovered", "dragged", "scrolled", "tapped", "invoked", "posted", "typed")
 
-    "observed" only when a change was actually measured; "sent" means input was dispatched but
-    nothing confirmed it landed; "refused" means nothing was sent. Dry runs keep verification=None.
+
+def _step_sent(step) -> bool:
+    if not isinstance(step, dict):
+        return False
+    if any(step.get(k) is True for k in _SENT_FLAGS):
+        return True
+    # replace=true clears the field with keys before typing: that already reached the window.
+    rc = step.get("replace_clear")
+    return isinstance(rc, dict) and bool(rc.get("ok") or rc.get("method"))
+
+
+def count_steps_sent(out: dict) -> int:
+    """Steps whose input was dispatched. Flat act: inner steps. Chain: chain steps that sent anything."""
+    done = out.get("completed_steps")
+    if isinstance(done, list):
+        return sum(1 for b in done if isinstance(b, dict) and any(_step_sent(s) for s in (b.get("steps") or [])))
+    return sum(1 for s in (out.get("steps") or []) if _step_sent(s))
+
+
+VERIFICATION_VERDICTS = ("observed", "sent", "partial", "refused", "aborted")
+
+
+def annotate_verification(out):
+    """Attach one verdict + evidence block + the abort switch state to an act result (P0-3).
+
+    observed: ok and a screen change was measured. sent: ok, input dispatched, nothing confirmed it.
+    partial: failed after at least one step's input was already sent. refused: failed before any
+    input was sent. aborted: operator stop (evidence.steps_sent says how far it got). Dry runs keep
+    verification=None. Every result, dry runs included, carries abort_active (+ remaining TTL).
     """
     if not isinstance(out, dict):
         return out
+    out.update(abort_state())
     if out.get("dry_run"):
         out.setdefault("verification", None)
+        if out.get("abort_active"):
+            left = out.get("abort_remaining_s")
+            out["warnings"] = (out.get("warnings") or []) + [
+                "operator abort is active: a live act refuses at its first step until abort(clear=true)"
+                + (f" or the flag auto-clears in {left:g}s" if left is not None else " (no auto-clear)")
+            ]
         return out
+    sent = count_steps_sent(out)
     if out.get("aborted"):
         out["verification"] = "aborted"
     elif out.get("ok") is False:
-        out["verification"] = "refused"
+        out["verification"] = "partial" if sent else "refused"
     elif out.get("screen_changed") is True:
         out["verification"] = "observed"
     else:
         out["verification"] = "sent"
-    evidence = {}
+    evidence = out.get("evidence") if isinstance(out.get("evidence"), dict) else {}
+    evidence["steps_sent"] = sent
     for key in ("screen_changed", "changed_ratio", "chosen_method", "focused", "foreground_ok",
                 "typed_verified", "windows_snapshot_changed", "new_windows"):
         if key in out:
             evidence[key] = out[key]
-    out.setdefault("evidence", evidence)
+    out["evidence"] = evidence
     return out
 
 

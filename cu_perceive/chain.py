@@ -106,7 +106,8 @@ def _brief(i: int, step: dict, result: dict) -> dict:
     keep = ("ok", "reason", "error", "hint", "dry_run", "steps", "typed_verified", "typed_note",
             "new_windows", "after", "blocking_window", "foreground_click_count",
             "planned_foreground_click_count", "warnings", "stamp_ok", "ime_skipped",
-            "new_window_wait_ms", "new_window_wait_reason", "windows_snapshot_changed", "suggested_hwnd")
+            "new_window_wait_ms", "new_window_wait_reason", "windows_snapshot_changed", "suggested_hwnd",
+            "aborted", "abort_step")
     b = {"index": i, "step": step, **{k: result[k] for k in keep if k in result}}
     age = (result.get("stamp_check") or {}).get("age_sec")
     if age is not None:
@@ -166,8 +167,11 @@ def run_steps(
             # generic step_error (the step itself refused with reason=aborted).
             if result.get("aborted"):
                 out["aborted"] = True
-                # chain-level index: callers plan across steps, the inner index is in the brief
+                # abort_step is the chain-level index (callers plan across steps); the flat act's own
+                # step index is kept as abort_inner_step.
                 out["abort_step"] = i
+                if result.get("abort_step") is not None:
+                    out["abort_inner_step"] = result["abort_step"]
                 out["stop_reason"] = "aborted"
             if result.get("blocking_window"):
                 out["blocking_window"] = result["blocking_window"]

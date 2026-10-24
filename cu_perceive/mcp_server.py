@@ -743,16 +743,21 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         return annotate_verification(out)
 
     @_tool
-    def abort(clear: bool = False, reason: str = "operator"):
-        """Stop a live act at the next step boundary; clear=true lowers the flag again.
+    def abort(clear: bool = False, reason: str = "operator", status: bool = False):
+        """Operator stop for live acts. Every call returns the switch state (abort_active, abort_remaining_s).
 
-        The flag is checked right before every dispatched step (the same place window identity is
-        re-checked), so an in-flight act sends at most the step already running and then returns
-        ok=false, reason=aborted, verification=aborted, abort_step=N — nothing after it is sent.
-        Call abort(clear=true) before acting again, otherwise every act refuses at step 0.
+        Default: raise the stop flag. It is process-wide (every client of this server stops) and is
+        checked right before each dispatched step, so an in-flight act sends at most the step already
+        running and then returns verification "aborted" with abort_step (chain calls also report
+        abort_inner_step) and evidence.steps_sent. Live acts keep refusing until clear=true or the
+        flag auto-clears after CU_PERCEIVE_ABORT_TTL_S seconds (default 120, 0 = never); a repeat
+        request restarts the timer. status=true only reads the state. Dry runs still plan and report
+        abort_active.
         """
         if clear:
             return {"ok": True, "cleared": True, **clear_abort()}
+        if status:
+            return {"ok": True, **abort_state()}
         return {"ok": True, **request_abort(reason or "operator")}
 
     def _flat_specs(f: dict):
