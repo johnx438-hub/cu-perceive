@@ -162,6 +162,13 @@ def run_steps(
             failed = True
             out.update(ok=False, stopped=True, stopped_at=i, stop_reason=result.get("reason") or "step_error",
                        error=f"steps[{i}] failed: {result.get('error') or result.get('reason') or 'error'}")
+            # Operator stop: surface it at chain level so callers see aborted/abort_step, not just a
+            # generic step_error (the step itself refused with reason=aborted).
+            if result.get("aborted"):
+                out["aborted"] = True
+                # chain-level index: callers plan across steps, the inner index is in the brief
+                out["abort_step"] = i
+                out["stop_reason"] = "aborted"
             if result.get("blocking_window"):
                 out["blocking_window"] = result["blocking_window"]
             break

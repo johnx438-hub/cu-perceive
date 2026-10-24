@@ -16,6 +16,76 @@ LIVE_ACT_LOCK = threading.Lock()
 _live_lock_state = threading.local()
 _ime_restore = threading.local()
 
+# Operator stop switch (P0-1). Set from another thread/MCP call; every step boundary checks it
+# before dispatching input, so an in-flight act stops between steps instead of running to the end.
+ABORT = threading.Event()
+ABORT_META: dict = {}
+
+
+def request_abort(reason: str = "operator") -> dict:
+    """Raise the stop flag. Returns the current state so callers can echo it back."""
+    ABORT_META["reason"] = reason
+    ABORT_META["requested_at"] = time.time()
+    ABORT.set()
+    return abort_state()
+
+
+def clear_abort() -> dict:
+    """Lower the stop flag (call after a refusal so the next act can run)."""
+    ABORT.clear()
+    ABORT_META.clear()
+    return abort_state()
+
+
+def abort_state() -> dict:
+    return {"aborted": ABORT.is_set(), **({"reason": ABORT_META.get("reason"),
+                                           "requested_at": ABORT_META.get("requested_at")}
+                                          if ABORT.is_set() else {})}
+
+
+def _abort_step(out: dict, n: int) -> bool:
+    """True = stop before step ``n``. Mirrors _identity_abort's shape (out updated, caller returns)."""
+    if not ABORT.is_set():
+        return False
+    out["ok"] = False
+    out["aborted"] = True
+    out["abort_step"] = n
+    out["reason"] = "aborted"
+    out["error"] = f"aborted by operator before step {n}"
+    out["hint"] = 'clear the flag with abort(clear=true) before acting again'
+    for s in out.get("steps") or []:
+        s.pop("_uia_control", None)
+        s.pop("_uia_action", None)
+    return True
+
+
+def annotate_verification(out):
+    """Attach one verdict + evidence block to an act result (P0-3).
+
+    "observed" only when a change was actually measured; "sent" means input was dispatched but
+    nothing confirmed it landed; "refused" means nothing was sent. Dry runs keep verification=None.
+    """
+    if not isinstance(out, dict):
+        return out
+    if out.get("dry_run"):
+        out.setdefault("verification", None)
+        return out
+    if out.get("aborted"):
+        out["verification"] = "aborted"
+    elif out.get("ok") is False:
+        out["verification"] = "refused"
+    elif out.get("screen_changed") is True:
+        out["verification"] = "observed"
+    else:
+        out["verification"] = "sent"
+    evidence = {}
+    for key in ("screen_changed", "changed_ratio", "chosen_method", "focused", "foreground_ok",
+                "typed_verified", "windows_snapshot_changed", "new_windows"):
+        if key in out:
+            evidence[key] = out[key]
+    out.setdefault("evidence", evidence)
+    return out
+
 
 def read_frame(path: Path) -> dict:
     """Parse one stamp JSON. ValueError (not a bare JSONDecodeError) when empty or partial."""
@@ -2583,7 +2653,7 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
         from .input import click_xy
 
         for n, step in enumerate(steps):
-            if _identity_abort(out, frame or {}, steps, n):
+            if _abort_step(out, n) or _identity_abort(out, frame or {}, steps, n):
                 return out
             via = step["via"]
             if via not in ("id", "xy", "norm"):
@@ -2650,7 +2720,7 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
         from .uia import UiaError, invoke_control
 
         for n, step in enumerate(steps):
-            if _identity_abort(out, frame or {}, steps, n):
+            if _abort_step(out, n) or _identity_abort(out, frame or {}, steps, n):
                 return out
             via = step["via"]
             if via not in ("id", "xy", "norm"):
@@ -2698,7 +2768,7 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
         from .input import post_click_xy
         hwnd = int((frame or {}).get("hwnd") or 0)
         for n, step in enumerate(steps):
-            if _identity_abort(out, frame or {}, steps, n):
+            if _abort_step(out, n) or _identity_abort(out, frame or {}, steps, n):
                 return out
             via = step["via"]
             if via not in ("id", "xy", "norm"):
@@ -2734,7 +2804,7 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
     clicked_window: int | None = None
     try:
         for n, step in enumerate(steps):
-            if _identity_abort(out, frame or {}, steps, n):
+            if _abort_step(out, n) or _identity_abort(out, frame or {}, steps, n):
                 return out
             via = step["via"]
             if via in KEYBOARD_VIAS:

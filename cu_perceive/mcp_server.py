@@ -264,7 +264,8 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
     from mcp.server.transport_security import TransportSecuritySettings
     from PIL import Image as PILImage
 
-    from .act import StampWindowMismatch, coerce_ids, load_frame, parse_steps, run_chain
+    from .act import (StampWindowMismatch, abort_state, annotate_verification, clear_abort,
+                      coerce_ids, load_frame, parse_steps, request_abort, run_chain)
     from .browser.tools import register as register_browser_tools
     from .core import perceive
     from .extras import MissingExtraError
@@ -683,14 +684,14 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
             params = inspect.signature(act).parameters
             kw = {k: v for k, v in locals().items() if k in params}
             kw["check_change"] = False
-            return _act_with_change(kw)
+            return annotate_verification(_act_with_change(kw))
         ignored_min_ratio = (["change_min_ratio only applies with check_change=true; ignored"]
                              if change_min_ratio is not None else [])
         if steps is not None and steps != []:
             out = _act_chain(steps, locals())
             if ignored_min_ratio and isinstance(out, dict):
                 out["warnings"] = ignored_min_ratio + (out.get("warnings") or [])
-            return out
+            return annotate_verification(out)
         send = bool(go) and not dry_run
         notes = []
         notes.extend(ignored_min_ratio)
@@ -739,7 +740,20 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         out["json"] = str(path) if path else None
         if notes:
             out["warnings"] = notes + (out.get("warnings") or [])
-        return out
+        return annotate_verification(out)
+
+    @_tool
+    def abort(clear: bool = False, reason: str = "operator"):
+        """Stop a live act at the next step boundary; clear=true lowers the flag again.
+
+        The flag is checked right before every dispatched step (the same place window identity is
+        re-checked), so an in-flight act sends at most the step already running and then returns
+        ok=false, reason=aborted, verification=aborted, abort_step=N — nothing after it is sent.
+        Call abort(clear=true) before acting again, otherwise every act refuses at step 0.
+        """
+        if clear:
+            return {"ok": True, "cleared": True, **clear_abort()}
+        return {"ok": True, **request_abort(reason or "operator")}
 
     def _flat_specs(f: dict):
         from .settings import get as _cfg
