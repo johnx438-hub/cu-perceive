@@ -167,6 +167,10 @@ def run_steps(
             # generic step_error (the step itself refused with reason=aborted).
             if result.get("aborted"):
                 out["aborted"] = True
+                out["reason"] = "aborted"
+                out["error"] = f"steps[{i}] not run: {result.get('error') or 'aborted by operator'}"
+                if isinstance(result.get("evidence"), dict):
+                    out["evidence"] = dict(result["evidence"])
                 # abort_step is the chain-level index (callers plan across steps); the flat act's own
                 # step index is kept as abort_inner_step.
                 out["abort_step"] = i
@@ -202,7 +206,14 @@ def run_steps(
         # A failed step did not complete; a guard stop happens after its step completed.
         start = stopped if failed else stopped + 1
         out["remaining_steps"] = steps[start:]
-        out["hint"] = RE_PERCEIVE_HINT
+        if out.get("aborted"):
+            # Operator stop: these steps were deliberately not run; do not steer the agent to resume.
+            from .act import ABORT_HINT
+
+            out["hint"] = ABORT_HINT
+            out["remaining_steps_not_run_reason"] = "operator_abort"
+        else:
+            out["hint"] = RE_PERCEIVE_HINT
     else:
         out["remaining_steps"] = []
     out["completed_count"] = sum(1 for d in done if d.get("ok"))

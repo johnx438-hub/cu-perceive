@@ -93,7 +93,7 @@ class TestSwitchLifetime(_Base):
             out = run_chain(_screen(), parse_steps(norm="10,10"), dry_run=False)
             self.assertTrue(out.get("aborted"))
         click.assert_not_called()
-        self.assertEqual(act_mod.clear_abort(), {"abort_active": False})
+        self.assertEqual(act_mod.clear_abort(), {"abort_active": False, "cleared_reason": "op"})
         out = annotate_verification(run_chain(_screen(), parse_steps(norm="10,10"), dry_run=False))
         self.assertTrue(out["ok"], out)
         self.assertEqual(out["verification"], "sent")
@@ -224,7 +224,8 @@ class TestAbortTool(_Base):
         self.assertTrue(st["ok"] and st["abort_active"])
         self.assertEqual(st["abort_reason"], "stop pill")
         self.assertTrue(abort(status=True)["abort_active"])
-        self.assertEqual(abort(clear=True), {"ok": True, "cleared": True, "abort_active": False})
+        self.assertEqual(abort(clear=True), {"ok": True, "cleared": True, "abort_active": False,
+                                              "cleared_reason": "stop pill"})
 
 
 if __name__ == "__main__":

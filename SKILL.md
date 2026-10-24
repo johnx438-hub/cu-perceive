@@ -120,8 +120,16 @@ OCR / UIA / YOLO 是可选包（`[ocr]` / `[uia]` / `[yolo]`），第一次用�
 | 出图目录 | `--out` | `out_dir`。写进 WSL workspace 用 UNC `\\wsl.localhost\Ubuntu\home\<user>\...`，不要 `/home/<user>`（会落到 `C:\home\<user>`）。`/mnt/c/...` 仍可用。另有 `map_wsl` |
 | 拉前台再抓 | `--focus` | `focus=true`（默认 false，不抢前台） |
 | 采集后端 | `--capture auto|wgc|printwindow|screen|dwm` | `capture`（`screen` 需 focus；`dwm` 实验性） |
+| 操作员停止 | —（只有 MCP） | `abort`（默认拉起停止；`status=true` 只读；`clear=true` 解除——那是操作员的事） |
 
 `launch` / `launch_app` 会真启动，没有 dry-run。
+
+### act 结果怎么读（verification / abort）
+
+- 每个 MCP `act` 结果都有 `verification` + `evidence`（`steps_sent` 等）+ `abort_active`。
+- `verification`：`observed`（有改动被测到）/ `sent`（发出了，没确认落地）/ `partial`（发了一部分后失败，含逐字打字中途失败）/ `refused`（什么都没发）/ `aborted`（操作员停止）/ `null`（dry run）。
+- `partial` 时先 perceive 看现场再决定，不要整段重发（可能重复输入）。
+- **硬规则**：看到 `verification="aborted"` 或 `abort_active=true` → 停手，向人汇报；不要重试，不要自己调 `abort(clear=true)`。停止只管桌面 `act`，不管 `browser_act`。
 
 ## WSL / Grok Build / minimal-agent-ts
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import contextlib
 import threading
 import time
 from pathlib import Path
@@ -29,6 +30,28 @@ ABORT = threading.Event()
 ABORT_META: dict = {}
 _ABORT_LOCK = threading.Lock()
 _abort_clock = time.monotonic  # tests patch this to move time
+# TTL is judged as of the start of the outermost live act (flat act or whole chain): a stop that was
+# still on when the act began stays on for that whole act, however long its steps take, so expiry
+# can never lift a stop mid-act. Outside an act the real clock is used.
+_abort_epoch = threading.local()
+ABORT_REASON_MAX = 200
+ABORT_HINT = (
+    "operator stop: do not retry and do not clear the flag yourself; report to the operator. "
+    "It lifts when the operator calls abort(clear=true) or the TTL runs out (see abort_remaining_s)"
+)
+
+
+@contextlib.contextmanager
+def abort_epoch():
+    """Pin abort TTL evaluation to now for the duration of this (outermost) live act."""
+    if getattr(_abort_epoch, "t", None) is not None:
+        yield
+        return
+    _abort_epoch.t = _abort_clock()
+    try:
+        yield
+    finally:
+        _abort_epoch.t = None
 
 
 def abort_ttl_s() -> float:
@@ -48,6 +71,9 @@ def _abort_expire_locked(now: float) -> None:
         return
     ttl = float(ABORT_META.get("ttl_s") or 0.0)
     t0 = ABORT_META.get("t0")
+    epoch = getattr(_abort_epoch, "t", None)
+    if epoch is not None:
+        now = min(now, epoch)
     if ttl > 0 and t0 is not None and now - t0 >= ttl:
         ABORT.clear()
         ABORT_META.clear()
@@ -56,6 +82,7 @@ def _abort_expire_locked(now: float) -> None:
 def request_abort(reason: str = "operator", ttl_s: float | None = None) -> dict:
     """Raise the stop flag (a repeat request restarts the TTL). Returns the switch state."""
     ttl = abort_ttl_s() if ttl_s is None else max(0.0, float(ttl_s))
+    reason = str(reason or "operator")[:ABORT_REASON_MAX]
     with _ABORT_LOCK:
         ABORT_META.clear()
         ABORT_META.update(reason=reason, requested_at=time.time(), t0=_abort_clock(), ttl_s=ttl)
@@ -64,11 +91,16 @@ def request_abort(reason: str = "operator", ttl_s: float | None = None) -> dict:
 
 
 def clear_abort() -> dict:
-    """Lower the stop flag now (instead of waiting for the TTL)."""
+    """Lower the stop flag now (instead of waiting for the TTL). Echoes the reason it cleared, if any."""
     with _ABORT_LOCK:
+        _abort_expire_locked(_abort_clock())
+        prev = ABORT_META.get("reason") if ABORT.is_set() else None
         ABORT.clear()
         ABORT_META.clear()
-    return abort_state()
+    st = abort_state()
+    if prev is not None:
+        st["cleared_reason"] = prev
+    return st
 
 
 def abort_active() -> bool:
@@ -100,14 +132,18 @@ def abort_state() -> dict:
 
 def _abort_step(out: dict, n: int) -> bool:
     """True = stop before step ``n``. Mirrors _identity_abort's shape (out updated, caller returns)."""
-    if not abort_active():
+    st = abort_state()
+    if not st.get("abort_active"):
         return False
     out["ok"] = False
     out["aborted"] = True
     out["abort_step"] = n
     out["reason"] = "aborted"
     out["error"] = f"aborted by operator before step {n}"
-    out["hint"] = "clear the flag with abort(clear=true) before acting again, or wait for it to auto-clear"
+    out["hint"] = ABORT_HINT
+    ev = out.get("evidence") if isinstance(out.get("evidence"), dict) else {}
+    ev.update(abort_step=n, abort_reason=st.get("abort_reason"), abort_requested_at=st.get("abort_requested_at"))
+    out["evidence"] = ev
     for s in out.get("steps") or []:
         s.pop("_uia_control", None)
         s.pop("_uia_action", None)
@@ -115,7 +151,8 @@ def _abort_step(out: dict, n: int) -> bool:
 
 
 # Step flags run_chain sets only after it dispatched that step's input.
-_SENT_FLAGS = ("clicked", "hovered", "dragged", "scrolled", "tapped", "invoked", "posted", "typed")
+# typed_partial: per-character typing failed after some characters already reached the window.
+_SENT_FLAGS = ("clicked", "hovered", "dragged", "scrolled", "tapped", "invoked", "posted", "typed", "typed_partial")
 
 
 def _step_sent(step) -> bool:
@@ -2406,7 +2443,7 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
             "hint": 'omit ime, or pass ime="off" to switch the target window to English for this act',
         }
     if not dry_run and not getattr(_live_lock_state, "held", False):
-        with LIVE_ACT_LOCK:
+        with LIVE_ACT_LOCK, abort_epoch():
             _live_lock_state.held = True
             _ime_restore.state = None
             before = _snapshot_windows()
@@ -2715,6 +2752,9 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
             s.pop("_uia_control", None)
             s.pop("_uia_action", None)
         return out
+    if _abort_step(out, 0):
+        # Before focus / IME: a stopped act must not touch the foreground window or the keyboard layout.
+        return out
     elev_err = _elevated_target_refusal(out, frame or {})
     if elev_err:
         for s in steps:
@@ -2994,6 +3034,9 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                     typed = {"ok": False, "reason": "clipboard_failed", "error": str(e)}
                 if isinstance(typed, dict) and typed.get("ok") is False:
                     step["typed"] = False
+                    if typed.get("sent_chars"):
+                        step["typed_partial"] = True
+                        step["sent_chars"] = typed["sent_chars"]
                     out["ok"] = False
                     out["reason"] = typed.get("reason") or "clipboard_failed"
                     out["error"] = typed.get("error") or "text input failed"

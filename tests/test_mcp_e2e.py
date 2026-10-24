@@ -190,7 +190,9 @@ class TestMcpServerE2E(unittest.TestCase):
         self.assertEqual(err["reason"], "bad_args")
         self.assertIn("action", err["error"])
         self.assertIn("norm", err["valid_step_fields"])
-        self.assertTrue(err["dry_run"])
+        # PR19 review: a live (go=true) call with bad steps is refused, not reported as a dry run.
+        self.assertFalse(err["dry_run"])
+        self.assertEqual(err["verification"], "refused")
 
         res = self._rpc("tools/call", {"name": "perceive_window", "arguments": {"image": str(self.png), "region": "x"}})
         self.assertTrue(res["result"]["isError"], res)

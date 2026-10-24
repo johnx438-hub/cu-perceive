@@ -301,20 +301,28 @@ block (`steps_sent`, plus `screen_changed`, `changed_ratio`, `chosen_method`,
 | --- | --- |
 | `observed` | ok, and a screen change was measured (`check_change=true`) |
 | `sent` | ok, input dispatched, nothing confirmed it landed |
-| `partial` | failed after at least one step's input was already sent |
+| `partial` | failed after at least one step's input was already sent (a half-typed `via=keys` text counts: `typed_partial`, `sent_chars`) |
 | `refused` | failed before any input was sent |
 | `aborted` | operator stop; `evidence.steps_sent` says how far it got |
 | `null` | dry run |
 
 `steps_sent` counts inner steps for a flat act and chain steps for `steps=[...]`.
+Refusals before any input (bad arguments, stamp/hwnd errors) carry the same
+fields with `refused` (`null` for a dry run).
 
-The `abort` tool raises a process-wide stop flag: every client of this server
-stops. It is checked before each dispatched step, so an in-flight act sends at
+The `abort` tool raises a process-wide stop flag: every desktop `act` of every
+client of this server stops (`browser_act` is not covered). It is checked before
+focus/IME changes and before each dispatched step, so an in-flight act sends at
 most the step already running and returns `reason: "aborted"`, `abort_step`
-(chain index for chains, plus `abort_inner_step`). Live acts keep refusing
+(chain index for chains, plus `abort_inner_step`) and the stop's reason in
+`evidence`. A stopped chain's `remaining_steps` were deliberately not run and its
+`hint` says to report, not resume. Live acts keep refusing
 until `abort(clear=true)` or the flag auto-clears after
 `CU_PERCEIVE_ABORT_TTL_S` seconds (default 120, `0` = never). A repeat request
-restarts the timer; `abort(status=true)` only reads the state. Every act
+restarts the timer; `abort(status=true)` only reads the state. The TTL is judged
+as of the start of each act: a stop that was on when an act began holds for that
+whole act, however long its steps take. An agent that sees `aborted` should stop
+and report to the operator rather than clear the flag itself. Every act
 result, dry runs included, reports `abort_active` and, while it is on,
 `abort_remaining_s`.
 
