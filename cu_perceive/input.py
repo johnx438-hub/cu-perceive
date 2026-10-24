@@ -232,17 +232,25 @@ def post_click_xy(
 def type_text(text: str, gap: float | None = None) -> dict:
     if gap is None:
         gap = float(_cfg("timing.type_gap_s"))
-    for ch in text:
-        code = ord(ch)
-        if ch == "\n":
-            tap_key("enter")
-            continue
-        down = INPUT(type=INPUT_KEYBOARD, union=INPUT_UNION(ki=KEYBDINPUT(0, code, KEYEVENTF_UNICODE, 0, 0)))
-        up = INPUT(type=INPUT_KEYBOARD, union=INPUT_UNION(ki=KEYBDINPUT(0, code, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP, 0, 0)))
-        _send(down)
-        _send(up)
-        if gap:
-            time.sleep(gap)
+    sent = 0
+    try:
+        for ch in text:
+            code = ord(ch)
+            if ch == "\n":
+                tap_key("enter")
+                sent += 1
+                continue
+            down = INPUT(type=INPUT_KEYBOARD, union=INPUT_UNION(ki=KEYBDINPUT(0, code, KEYEVENTF_UNICODE, 0, 0)))
+            up = INPUT(type=INPUT_KEYBOARD, union=INPUT_UNION(ki=KEYBDINPUT(0, code, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP, 0, 0)))
+            _send(down)
+            _send(up)
+            sent += 1
+            if gap:
+                time.sleep(gap)
+    except Exception as e:
+        # Characters before the failure already reached the window: callers report it as partial.
+        e.sent_chars = sent  # type: ignore[attr-defined]
+        raise
     return {"ok": True, "typed": text, "n": len(text)}
 
 
@@ -821,7 +829,8 @@ def enter_text(text: str, via: str = "paste") -> dict:
         try:
             result = type_text(text)
         except Exception as e:
-            return {"ok": False, "reason": "input_failed", "error": str(e), "via": "keys"}
+            return {"ok": False, "reason": "input_failed", "error": str(e), "via": "keys",
+                    "sent_chars": int(getattr(e, "sent_chars", 0) or 0)}
         result["via"] = "keys"
         return result
     return paste_text(text)

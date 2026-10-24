@@ -312,8 +312,9 @@ class TestSchemaMatchesImplementation(unittest.TestCase):
     def setUpClass(cls):
         cls.tools = _collect_tools()
 
-    def test_eleven_tools(self):
-        self.assertEqual(len(self.tools), 11, sorted(self.tools))
+    def test_twelve_tools(self):
+        self.assertEqual(len(self.tools), 12, sorted(self.tools))
+        self.assertIn("abort", self.tools)
         self.assertIn("config", self.tools)
 
     def test_doc_mentioned_args_are_in_schema(self):
@@ -356,7 +357,7 @@ class TestSchemaMatchesImplementation(unittest.TestCase):
                 mock.patch("uvicorn.Server.run", lambda self: None):
             mcp_server.serve(port=0)
         listed = asyncio.run(captured["app"].list_tools())
-        self.assertEqual(len(listed), 11)
+        self.assertEqual(len(listed), 12)
         for t in listed:
             schema = getattr(t, "inputSchema", None) or getattr(t, "input_schema", None) or {}
             props = set((schema.get("properties") or {}).keys())

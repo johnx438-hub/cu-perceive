@@ -106,7 +106,8 @@ def _brief(i: int, step: dict, result: dict) -> dict:
     keep = ("ok", "reason", "error", "hint", "dry_run", "steps", "typed_verified", "typed_note",
             "new_windows", "after", "blocking_window", "foreground_click_count",
             "planned_foreground_click_count", "warnings", "stamp_ok", "ime_skipped",
-            "new_window_wait_ms", "new_window_wait_reason", "windows_snapshot_changed", "suggested_hwnd")
+            "new_window_wait_ms", "new_window_wait_reason", "windows_snapshot_changed", "suggested_hwnd",
+            "aborted", "abort_step")
     b = {"index": i, "step": step, **{k: result[k] for k in keep if k in result}}
     age = (result.get("stamp_check") or {}).get("age_sec")
     if age is not None:
@@ -162,6 +163,20 @@ def run_steps(
             failed = True
             out.update(ok=False, stopped=True, stopped_at=i, stop_reason=result.get("reason") or "step_error",
                        error=f"steps[{i}] failed: {result.get('error') or result.get('reason') or 'error'}")
+            # Operator stop: surface it at chain level so callers see aborted/abort_step, not just a
+            # generic step_error (the step itself refused with reason=aborted).
+            if result.get("aborted"):
+                out["aborted"] = True
+                out["reason"] = "aborted"
+                out["error"] = f"steps[{i}] not run: {result.get('error') or 'aborted by operator'}"
+                if isinstance(result.get("evidence"), dict):
+                    out["evidence"] = dict(result["evidence"])
+                # abort_step is the chain-level index (callers plan across steps); the flat act's own
+                # step index is kept as abort_inner_step.
+                out["abort_step"] = i
+                if result.get("abort_step") is not None:
+                    out["abort_inner_step"] = result["abort_step"]
+                out["stop_reason"] = "aborted"
             if result.get("blocking_window"):
                 out["blocking_window"] = result["blocking_window"]
             break
@@ -191,7 +206,14 @@ def run_steps(
         # A failed step did not complete; a guard stop happens after its step completed.
         start = stopped if failed else stopped + 1
         out["remaining_steps"] = steps[start:]
-        out["hint"] = RE_PERCEIVE_HINT
+        if out.get("aborted"):
+            # Operator stop: these steps were deliberately not run; do not steer the agent to resume.
+            from .act import ABORT_HINT
+
+            out["hint"] = ABORT_HINT
+            out["remaining_steps_not_run_reason"] = "operator_abort"
+        else:
+            out["hint"] = RE_PERCEIVE_HINT
     else:
         out["remaining_steps"] = []
     out["completed_count"] = sum(1 for d in done if d.get("ok"))

@@ -290,6 +290,42 @@ every json in a large output directory.
   `missing_extra` / `install` fields as `perceive --uia`. `--method auto`
   without it falls back to input and says so in `warnings`.
 
+### Verification and operator stop (MCP)
+
+Every MCP `act` result carries one `verification` verdict and an `evidence`
+block (`steps_sent`, plus `screen_changed`, `changed_ratio`, `chosen_method`,
+`focused`, `foreground_ok`, `typed_verified`, `windows_snapshot_changed`,
+`new_windows` when present):
+
+| verdict | meaning |
+| --- | --- |
+| `observed` | ok, and a screen change was measured (`check_change=true`) |
+| `sent` | ok, input dispatched, nothing confirmed it landed |
+| `partial` | failed after at least one step's input was already sent (a half-typed `via=keys` text counts: `typed_partial`, `sent_chars`) |
+| `refused` | failed before any input was sent |
+| `aborted` | operator stop; `evidence.steps_sent` says how far it got |
+| `null` | dry run |
+
+`steps_sent` counts inner steps for a flat act and chain steps for `steps=[...]`.
+Refusals before any input (bad arguments, stamp/hwnd errors) carry the same
+fields with `refused` (`null` for a dry run).
+
+The `abort` tool raises a process-wide stop flag: every desktop `act` of every
+client of this server stops (`browser_act` is not covered). It is checked before
+focus/IME changes and before each dispatched step, so an in-flight act sends at
+most the step already running and returns `reason: "aborted"`, `abort_step`
+(chain index for chains, plus `abort_inner_step`) and the stop's reason in
+`evidence`. A stopped chain's `remaining_steps` were deliberately not run and its
+`hint` says to report, not resume. Live acts keep refusing
+until `abort(clear=true)` or the flag auto-clears after
+`CU_PERCEIVE_ABORT_TTL_S` seconds (default 120, `0` = never). A repeat request
+restarts the timer; `abort(status=true)` only reads the state. The TTL is judged
+as of the start of each act: a stop that was on when an act began holds for that
+whole act, however long its steps take. An agent that sees `aborted` should stop
+and report to the operator rather than clear the flag itself. Every act
+result, dry runs included, reports `abort_active` and, while it is on,
+`abort_remaining_s`.
+
 CLI output is always UTF-8 (window titles can contain any script), whatever the
 console code page is. Decode it as UTF-8. PowerShell decodes captured output
 (`$x = cu-perceive ...` or a pipe) with `[Console]::OutputEncoding`, which is not

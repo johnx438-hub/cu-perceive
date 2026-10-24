@@ -264,7 +264,8 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
     from mcp.server.transport_security import TransportSecuritySettings
     from PIL import Image as PILImage
 
-    from .act import StampWindowMismatch, coerce_ids, load_frame, parse_steps, run_chain
+    from .act import (StampWindowMismatch, abort_state, annotate_verification, clear_abort,
+                      coerce_ids, load_frame, parse_steps, request_abort, run_chain)
     from .browser.tools import register as register_browser_tools
     from .core import perceive
     from .extras import MissingExtraError
@@ -683,14 +684,14 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
             params = inspect.signature(act).parameters
             kw = {k: v for k, v in locals().items() if k in params}
             kw["check_change"] = False
-            return _act_with_change(kw)
+            return annotate_verification(_act_with_change(kw))
         ignored_min_ratio = (["change_min_ratio only applies with check_change=true; ignored"]
                              if change_min_ratio is not None else [])
         if steps is not None and steps != []:
             out = _act_chain(steps, locals())
             if ignored_min_ratio and isinstance(out, dict):
                 out["warnings"] = ignored_min_ratio + (out.get("warnings") or [])
-            return out
+            return annotate_verification(out)
         send = bool(go) and not dry_run
         notes = []
         notes.extend(ignored_min_ratio)
@@ -713,15 +714,17 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
                 input_via=_nz_str(via),
             )
         except ValueError as e:
-            return {"ok": False, "error": str(e), "dry_run": not send, "reason": "bad_args",
-                    "hint": 'points are norm="x,y" / xy="x,y" (or [x,y]); scroll="down:3" / "up:3"'}
+            return annotate_verification({
+                "ok": False, "error": str(e), "dry_run": not send, "reason": "bad_args",
+                "hint": 'points are norm="x,y" / xy="x,y" (or [x,y]); scroll="down:3" / "up:3"'})
         try:
             frame, path = load_frame(stamp=_nz_str(stamp), hwnd=_nz_int(hwnd))
         except StampWindowMismatch as e:
-            return {"ok": False, "error": str(e), "dry_run": not send, "reason": "hwnd_mismatch",
-                    "hint": "perceive_window(hwnd=...) and pass that stamp, or drop hwnd"}
+            return annotate_verification({
+                "ok": False, "error": str(e), "dry_run": not send, "reason": "hwnd_mismatch",
+                "hint": "perceive_window(hwnd=...) and pass that stamp, or drop hwnd"})
         except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError) as e:
-            return {"ok": False, "error": str(e), "dry_run": not send}
+            return annotate_verification({"ok": False, "error": str(e), "dry_run": not send})
         out = run_chain(
             frame,
             specs,
@@ -739,7 +742,30 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         out["json"] = str(path) if path else None
         if notes:
             out["warnings"] = notes + (out.get("warnings") or [])
-        return out
+        return annotate_verification(out)
+
+    @_tool
+    def abort(clear: bool = False, reason: str = "operator", status: bool = False):
+        """Operator stop for live acts. Every call returns the switch state (abort_active, abort_remaining_s).
+
+        Default: raise the stop flag. It is process-wide (every desktop act of every client of this
+        server stops; browser_act is not covered) and is
+        checked right before each dispatched step, so an in-flight act sends at most the step already
+        running and then returns verification "aborted" with abort_step (chain calls also report
+        abort_inner_step) and evidence.steps_sent. Live acts keep refusing until clear=true or the
+        flag auto-clears after CU_PERCEIVE_ABORT_TTL_S seconds (default 120, 0 = never); a repeat
+        request restarts the timer. status=true only reads the state. Dry runs still plan and report
+        abort_active. An agent that hits verification "aborted" must stop and report to the operator,
+        not clear the flag itself.
+        """
+        if clear and status:
+            return {"ok": False, "reason": "bad_args", "error": "pass clear=true or status=true, not both",
+                    **abort_state()}
+        if clear:
+            return {"ok": True, "cleared": True, **clear_abort()}
+        if status:
+            return {"ok": True, **abort_state()}
+        return {"ok": True, **request_abort(reason or "operator")}
 
     def _flat_specs(f: dict):
         from .settings import get as _cfg
@@ -785,11 +811,12 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         send = bool(call.get("go")) and not call.get("dry_run")
         mixed = [k for k in ACTION_FIELDS if call.get(k) not in (None, "", [], 0)]
         if mixed:
-            return {"ok": False, "reason": "bad_args", "dry_run": True,
+            return {"ok": False, "reason": "bad_args", "dry_run": not send,
                     "error": f"steps cannot be combined with top-level action field(s) {', '.join(mixed)}",
                     "hint": "put every action inside steps=[...], or drop steps for a flat single-step act"}
         norm_steps, err = validate_steps(steps)
         if err:
+            err["dry_run"] = not send  # a live call with bad steps is refused, not a dry run
             return err
         try:
             frame, path = load_frame(stamp=_nz_str(call.get("stamp", "")), hwnd=_nz_int(call.get("hwnd", 0)))
@@ -827,7 +854,14 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
 
             return window_title(stamp_hwnd)
 
-        out = run_steps(norm_steps, run_one, send=send, stamp_hwnd=stamp_hwnd, title_now=title_now)
+        if send:
+            # One abort epoch for the whole chain: a stop on at chain start stays on for every step.
+            from .act import abort_epoch
+
+            with abort_epoch():
+                out = run_steps(norm_steps, run_one, send=send, stamp_hwnd=stamp_hwnd, title_now=title_now)
+        else:
+            out = run_steps(norm_steps, run_one, send=send, stamp_hwnd=stamp_hwnd, title_now=title_now)
         out["stamp"] = (frame or {}).get("stamp")
         out["hwnd"] = stamp_hwnd or None
         out["json"] = str(path) if path else None
