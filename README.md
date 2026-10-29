@@ -2,6 +2,17 @@
 
 Windows computer use. Pin one window, read its 0-1000 grid map, then act.
 
+## Who it's for
+
+For people running a cloud-hosted bot agent who want it to close the loop on
+their own Windows desktop. The agent plans in the cloud; cu-perceive looks at a
+local window, acts on it, and reports back what actually happened. It sits
+beside the agent you already use; it does not replace it.
+
+Ez-CU is two parts: this package (desktop windows: perceive / act / verify) and,
+optionally, the external `bsk` CLI from Tencent BrowserSkill (MIT) for pages
+inside Chrome/Edge (see Browser). bsk is not bundled.
+
 One core, two faces:
 
 - CLI: `cu-perceive perceive|windows|act` (or `python -m cu_perceive ...`)
@@ -27,11 +38,27 @@ One core, two faces:
   external `bsk` CLI. Other apps, and the browser window as a desktop window,
   stay on `windows` / `perceive_window` / `act`.
 
+## Known limitations
+
+- Windows only. Tests mock Win32 on Linux; real capture needs a manual check.
+- Elevated (admin) windows are refused (`elevated_target`).
+- With `--go`, real input goes to the foreground session: the target window
+  must be in the foreground, so this is not a background or second-user tool.
+- `abort` stops desktop `act` only; it does not cover `browser_act`.
+
+## Security summary
+
+- Desktop `act` is dry-run by default; input is sent only with `--go` / `go=true`.
+- The MCP server binds loopback only (`127.0.0.1`); never bind 0.0.0.0.
+- Each step checks window identity and foreground before sending, and results
+  are verified after.
+- An operator `abort` switch stops pending desktop acts.
+
 ## Install
 
 Core (grid map, background capture, act with `input` / `post`):
 
-    python -m pip install "cu-perceive @ git+<repo-url>"
+    python -m pip install "cu-perceive @ git+https://github.com/johnx438-hub/cu-perceive"
     # or from a checkout:
     python -m pip install -e .
 
@@ -417,6 +444,11 @@ also attaches the values. Profiles are `default`, `demo-slow-human`, and
 | Clipboard worker child | off | `CU_PERCEIVE_CLIPBOARD_CHILD=1` (also forces the in-process clipboard path) |
 | WSL Windows Python | unset | `CU_PERCEIVE_PYTHON` (path to `python.exe` for `bin/cu-perceive.sh`) |
 | Win32 test simulation | off | `CU_PERCEIVE_TEST_SIMULATE_WIN32=1` (tests only) |
+
+`CU_PERCEIVE_ALLOWED_HOSTS` is a comma-separated list of extra Host names the
+MCP server accepts (default: none, loopback only). To reach the server from
+another machine, keep it on loopback, put an authenticated reverse proxy in
+front, and add that proxy's Host name here.
 
 The CLI and the MCP server each resolve the output dir on their own. The CLI
 defaults to `%LOCALAPPDATA%\cu-perceive\shots\perceive` for the user running
