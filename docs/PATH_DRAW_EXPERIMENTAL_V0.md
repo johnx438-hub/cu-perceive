@@ -1,6 +1,6 @@
 # cu-perceive Path Draw — Experimental Mode Spec v0
 
-> 2026-09-06 · Chitose / Shawn  
+> 2026-09-06 · maintainers  
 > **实验模式 only** —— 默认 CU 流程不变；不进日常 `windows → perceive → act` 主路径。  
 > 目标：剪影/线稿 → 视觉软件提折线 → `drag-norm` 连播；**禁止** OCR/YOLO 认笔触；**禁止** agent 心算密点。
 
@@ -120,7 +120,7 @@ v0 可不实现；合同先占位。
 ## 验收（实验）
 
 1. 一张黑白剪影圆/星 → `path-extract` → 点数在 8–400 → dry-run 折线合理。  
-2. 画图软件或空白窗：`--path` + stamp dry-run 出 screen 折线；Shawn 说 `--go` 后出现可见笔迹（或拖选残影）。  
+2. 画图软件或空白窗：`--path` + stamp dry-run 出 screen 折线；操作者确认 `--go` 后出现可见笔迹（或拖选残影）。  
 3. 故意塞照片给 YOLO/OCR 路径：**不**走本实验；文档写明。  
 4. WSL agent 收到 path 文件内只有 norm 数组 + 相对说明；若带绝对图路径，遵守 [godot-mcp-paths](sand-workflow:godot-mcp-paths) 同类纪律（Win↔`/mnt/c`），**不**改 path 点语义。
 

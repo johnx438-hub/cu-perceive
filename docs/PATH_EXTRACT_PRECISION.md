@@ -1,6 +1,6 @@
 # Path Extract → Norm 精度调研（实验）
 
-> 2026-09-06 · Chitose / Shawn  
+> 2026-09-06 · maintainers  
 > 接昨晚 Paint 圆 `--go` 通了之后的「轮廓提取映射更精细」。  
 > **调研笔记**；**E1 landed**（弧长重采样 + 相对 simplify + overlay）；**E2 landed**（手动 `--roi` + act 认 `source.roi`）。  
 > 基线：`cu_perceive/path_extract.py` · 合同：`docs/PATH_DRAW_EXPERIMENTAL_V0.md`

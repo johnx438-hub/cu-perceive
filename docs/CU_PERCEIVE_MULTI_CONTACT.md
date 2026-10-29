@@ -1,6 +1,6 @@
 # cu-perceive 多场景接触（设计）
 
-> 2026-09-06 · Chitose / Shawn  
+> 2026-09-06 · maintainers  
 > **设计合同；S1 `method=post` + S2 `method=uia` + S3 `method=auto` + S4 `perceive --uia` 已落地（实验）。**  
 > 输入：cu-perceive 现合同 · path-draw 实验 · open-cu 非侵入点击调研 · Codex `computer_use` 策略旁证  
 > 档案：`open-cu-windows-vs-cu-perceive.md` · `open-cu-noninvasive-click.md` · `PATH_EXTRACT_PRECISION.md`
@@ -86,7 +86,7 @@ default = "allow"  # or deny
 
 | 步 | 内容 | 验收 |
 |---|---|---|
-| S0 | 本文合同 + skill 一段「场景选路」 | Shawn 点头 |
+| S0 | 本文合同 + skill 一段「场景选路」 | 维护者确认 |
 | S1 | `act --method post` 单点（Notepad 按钮/菜单） | **已落地** dry-run 字段齐；`--go` PostMessage，不 SetCursorPos/不静默退 SendInput |
 | S2 | `act --method uia` + 最小元素解析 | **已落地** dry-run 报 name/control_type/patterns；`--go` Invoke/Toggle/Expand/Select，失败不退 post/input |
 | S3 | `method=auto` 启发（有 uia hit+pattern → uia else input；永不选 post） | **已落地** dry-run 报 `chosen_method`；`--go` 只跑所选路径 |
@@ -140,7 +140,7 @@ agent 侧 skill 写死：
 
 1. 先 `windows` / `perceive` 看是控件 UI 还是画布/网页壳  
 2. 查上表选 `method`  
-3. dry-run → Shawn `--go`  
+3. dry-run → 操作者 `--go`  
 4. 画布/轨迹走 A+B；原声控件优先 C  
 
 ## 9. 结论

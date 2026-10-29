@@ -145,7 +145,7 @@ MCP 本机 loopback（不碰 8000 的 windows-mcp）：
 
 Grok: ~/.grok/config.toml 里 [mcp_servers.cu-perceive]。
 minimal-agent-ts: agent.json 的 mcp_servers 里同名一项。
-当前端口是 8771。8766 可能还有旧进程 / Tailscale 反代，别连。
+默认端口 8771（`--port` 可改）。
 MCP 默认带压缩图；要全分辨率走磁盘路径。CLI 仍用 map 路径。WSL 用返回的 `map_wsl` / `png_wsl`。写进 Linux workspace 用 UNC： `\\wsl.localhost\Ubuntu\home\<user>\...`（发行版名用 `CU_PERCEIVE_WSL_DISTRO` 改）。 不要传 `/home/<user>/...`，Win Python 会当相对路径写到 `C:\home\<user>`，不报错。 `/mnt/c/...` 仍映射到 NTFS。origin.left <= -10000 是最小化哨兵，丢掉 stamp 重 perceieve。
 
 

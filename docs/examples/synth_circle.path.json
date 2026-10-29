@@ -2,7 +2,7 @@
   "version": 1,
   "experimental": true,
   "source": {
-    "image": "C:\\Users\\jawn\\src\\cu-perceive\\docs\\examples\\synth_circle.png",
+    "image": "docs/examples/synth_circle.png",
     "width": 400,
     "height": 400,
     "mode": "contour"
