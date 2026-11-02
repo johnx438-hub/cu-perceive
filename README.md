@@ -345,6 +345,10 @@ every json in a large output directory.
   nothing. A no-pattern hit whose own name and type match the node is still clicked with input under `auto`;
   `method=uia` refuses it with `reason: "uia_no_pattern"`. Steps given only by `--norm` / `--xy`, and nodes
   without a name, keep the fallback: `auto` uses an input click when UIA finds no invokable control there.
+  `method=input` (the default) does not check the name: with `--uia-name`, `uia:#N` or a UIA id it clicks the
+  node's coordinates from the stamp, so on a stale stamp it clicks whatever is there now. For Chromium/Electron
+  apps (`Chrome_WidgetWin_*` windows, for example Xunlei), act on UIA nodes with `method=auto`, which checks the
+  name and refuses as above.
 
 ### Verification and operator stop (MCP)
 

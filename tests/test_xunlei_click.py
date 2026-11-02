@@ -13,7 +13,7 @@ from test_round4_points import COVER, HWND, _Desk, _window_frame
 
 from cu_perceive import uia as uia_mod
 from cu_perceive import windows as win_mod
-from cu_perceive.act import parse_steps, run_chain
+from cu_perceive.act import count_steps_sent, parse_steps, run_chain
 
 TOP = 3807628
 
@@ -923,15 +923,65 @@ class TestTargetUnverifiedD5(unittest.TestCase):
         self.assertFalse(out["ok"])
         self.assertEqual(out["reason"], "uia_no_pattern")
 
+    def _missing_uia_extra(self):
+        """uia extra missing: missing_modules reports it and the hit-test raises the install error."""
+        err = uia_mod.UiaError("uiautomation missing")
+        err.install = "pip install -e .[uia]"
+        for p in (
+            mock.patch("cu_perceive.extras.missing_modules", return_value=["uiautomation"]),
+            mock.patch("cu_perceive.uia.element_from_screen_point", side_effect=err),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_missing_extra_named_auto_refused(self):
+        self._missing_uia_extra()
+        for dry in (True, False):
+            with self.subTest(dry=dry):
+                out, click, inv = self._run("auto", dry)
+                self._assert_refused(out, click, inv, "probe_failed")
+                self.assertEqual(out["steps"][0]["uia_probe_attempts"], 1)
+                self.assertIsNone(out["steps"][0]["chosen_method"])
+
+    def test_missing_extra_plain_norm_auto_falls_back(self):
+        self._missing_uia_extra()
+        out, click, inv = self._run("auto", True, specs=parse_steps(norm="582,767"))
+        self.assertTrue(out["ok"], out.get("error"))
+        self.assertEqual(out["steps"][0]["chosen_method"], "input")
+        self.assertNotIn("uia_reason", out["steps"][0])
+        self.assertEqual(out["planned_foreground_click_count"], 1)
+        self.assertTrue(any("uia extra not installed" in w for w in out.get("warnings") or []))
+        click.assert_not_called()
+        inv.assert_not_called()
+
     def test_reprobe_root_then_login_refused(self):
         login = FakeCtrl("登录", "ButtonControl", (700, 825, 830, 860), ["Invoke"])
         _patch_hits(self, _root_doc(), login)
-        out, _click, _inv = self._run("auto", True)
+        out, click, inv = self._run("auto", True)
         self.assertFalse(out["ok"])
         self.assertEqual(out["reason"], "uia_target_mismatch")
         self.assertEqual(out["resolved_uia"]["name"], "登录")
         self.assertEqual(out["steps"][0]["uia_probe_attempts"], 2)
+        self.assertIsNone(out["steps"][0]["chosen_method"])
         self.assertEqual(out["planned_foreground_click_count"], 0)
+        self.assertEqual(out.get("foreground_click_count", 0), 0)
+        click.assert_not_called()
+        inv.assert_not_called()
+
+    def test_reprobe_root_then_login_refused_go(self):
+        login = FakeCtrl("登录", "ButtonControl", (700, 825, 830, 860), ["Invoke"])
+        _patch_hits(self, _root_doc(), login)
+        out, click, inv = self._run("auto", False)
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["reason"], "uia_target_mismatch")
+        self.assertEqual(out["resolved_uia"]["name"], "登录")
+        self.assertEqual(out["steps"][0]["uia_probe_attempts"], 2)
+        self.assertIsNone(out["steps"][0]["chosen_method"])
+        self.assertFalse(out["steps"][0]["foreground_used"])
+        self.assertEqual(out.get("foreground_click_count", 0), 0)
+        self.assertEqual(count_steps_sent(out), 0)
+        click.assert_not_called()
+        inv.assert_not_called()
 
     def test_reprobe_root_then_match_chooses_uia(self):
         _doc, _btn, text = _chromium_button()
@@ -1033,6 +1083,34 @@ class TestTargetUnverifiedD5(unittest.TestCase):
         info = uia_mod.resolve_at_screen(766, 842, expect_name="\ue65f ", expect_control_type="ButtonControl")
         self.assertEqual(info["reason"], "uia_no_pattern")
         self.assertNotIn("uia_unverified", info)
+
+    def test_plan_time_refusal_sets_invoked_false(self):
+        cases = (
+            ("uia", True, None, _root_doc()),
+            ("uia", False, None, _root_doc()),
+            ("auto", True, None, _root_doc()),
+            ("auto", False, None, _root_doc()),
+            ("uia", True, parse_steps(norm="582,767"), _root_doc()),          # uia_no_pattern
+            ("auto", False, None, FakeCtrl("登录", "ButtonControl", (700, 825, 830, 860), ["Invoke"])),  # D2 mismatch
+        )
+        for method, dry, specs, hit in cases:
+            with self.subTest(method=method, dry=dry, plain=specs is not None, hit=hit.Name):
+                _patch_hit(self, hit)
+                out, click, inv = self._run(method, dry, specs=specs)
+                self.assertFalse(out["ok"])
+                self.assertIs(out["steps"][0]["invoked"], False)
+                self.assertEqual(count_steps_sent(out), 0)
+                click.assert_not_called()
+                inv.assert_not_called()
+
+    def test_plan_ok_dry_run_has_no_invoked_key(self):
+        _doc, _btn, text = _chromium_button()
+        _patch_hit(self, text)
+        for method in ("uia", "auto"):
+            with self.subTest(method=method):
+                out, _click, _inv = self._run(method, True)
+                self.assertTrue(out["ok"], out.get("error"))
+                self.assertNotIn("invoked", out["steps"][0])
 
 
 if __name__ == "__main__":

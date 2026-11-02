@@ -2746,6 +2746,8 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
         # Fail-closed if any step lacked a usable pattern / hwnd mismatch
         bad = [s for s in steps if s.get("via") in ("id", "xy", "norm") and not s.get("uia_ok")]
         if bad:
+            for s in bad:
+                s["invoked"] = False   # P3-3: refused at plan time, nothing invoked
             out["ok"] = False
             out["error"] = bad[0].get("uia_error") or "UIA resolve failed"
             _note_uia_mismatch(out, bad[0])
@@ -2769,6 +2771,8 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
             return out
         bad = [s for s in steps if s.get("via") in ("id", "xy", "norm") and s.get("uia_reason") == "uia_target_mismatch"]
         if bad:
+            for s in bad:
+                s["invoked"] = False   # P3-3: refused at plan time, nothing invoked
             out["ok"] = False
             out["error"] = bad[0].get("uia_error") or "UIA target mismatch"
             _note_uia_mismatch(out, bad[0])
