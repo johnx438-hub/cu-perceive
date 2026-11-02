@@ -279,7 +279,10 @@ every json in a large output directory.
   `outside_window`, `other_process`, `transparent_overlay`), the hit `hwnd`,
   `title` and `pid`. A dry run lists such points in `points_not_on_target`
   and warns. A covering window inside the rect is still `point_covered`.
-  Owned popups of the same process outside the rect are allowed.
+  A point outside the rect is allowed only when the window there is owned by the stamp window (its
+  GW_OWNER chain reaches it, for example its dialogs and popups) or is a popup menu on its thread, and
+  belongs to the same process. Any other window outside the rect, including another top-level window of
+  the same process, is refused with `outside_window`.
 - Every refusal also carries `reason` (a stable code such as `point_covered`,
   `point_not_on_target`, `uia_target_mismatch`,
   `not_foreground`, `not_foreground_after_focus`, `point_covered_after_focus`,
@@ -325,12 +328,13 @@ every json in a large output directory.
   before. `steps[i].uia` reports the resolved `name`, `control_type`,
   `pattern`, `ancestor_hops` (0 for a direct hit) and `hit` (the element the
   point actually hit).
-- A step planned from a stamp node (`--uia-name`, `uia:#N`, a UIA id) must
-  resolve to that node: same name (private-use icon glyphs U+E000-U+F8FF and
-  whitespace ignored, so `\ue65f 新建任务` matches `新建任务`) and same control
-  type. Otherwise `method=uia` fails closed with
-  `reason: "uia_target_mismatch"`, `expected_uia` and `resolved_uia`, and
-  invokes nothing; `method=auto` uses input for that step.
+- A step planned from a stamp node (`--uia-name`, `uia:#N`, a UIA id) must resolve to that
+  node. The name matches when the resolved control's name, or (after an ancestor walk) the name of the element
+  the point hit, equals the node's name, with private-use icon glyphs U+E000-U+F8FF and whitespace ignored (so
+  `\ue65f 新建任务` matches `新建任务`). The control type is checked on the element that matched by name. A node
+  without a name is matched by control type and containment only. Otherwise the act fails closed with
+  `reason: "uia_target_mismatch"`, `expected_uia` and `resolved_uia`, and nothing is invoked or clicked; this
+  applies to `method=uia` and `method=auto` (auto does not fall back to an input click).
 
 ### Verification and operator stop (MCP)
 

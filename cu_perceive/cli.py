@@ -28,6 +28,12 @@ def _act_type_key_order(argv: list[str] | None) -> list[dict] | None:
 
 
 
+PERCEIVE_PASSTHROUGH = (
+    "pick_reason", "deprioritized", "pick_warning", "pick_overlay", "pick_hint",
+    "suggested_hwnd", "uia_fallback", "uia_fallback_hint",
+)
+
+
 def _slim_win(w: dict) -> dict:
     return {
         "id": w.get("id"),
@@ -166,7 +172,7 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument(
         "--method",
         default="input",
-        help="contact method: input (SendInput, default) | post (HWND PostMessage, S1) | uia (UIA patterns, S2) | auto (S3: uia if hit+pattern else input; left click only)",
+        help="contact method: input (SendInput, default) | post (HWND PostMessage, S1) | uia (UIA patterns, S2) | auto (S3: uia if hit+pattern else input; refuses on uia_target_mismatch; left click only)",
     )
     a.add_argument("--double", action="store_true")
     a.add_argument("--type", "--text", dest="text", help="type text. Default pastes (clipboard + Ctrl+V) and restores the previous clipboard text. CLI: --type or --text; MCP field is text")
@@ -339,6 +345,9 @@ def main(argv: list[str] | None = None) -> int:
             "json": out["json"],
         }
         for k in ("identity", "capture", "focused", "warnings"):
+            if k in out:
+                slim[k] = out[k]
+        for k in PERCEIVE_PASSTHROUGH:
             if k in out:
                 slim[k] = out[k]
         if out.get("verify_light"):

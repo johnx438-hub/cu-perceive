@@ -1,7 +1,7 @@
 """S2 method=uia: resolve AutomationElement at a screen point, Invoke/Toggle/Expand/Select.
 
 Non-invasive: no SetCursorPos / SendInput / PostMessage. Fail-closed if no pattern.
-S3: choose_auto_method / probe_at_screen — uia iff under stamp + preferred pattern, else input.
+S3: choose_auto_method / probe_at_screen — uia iff under stamp + preferred pattern, else input; a uia_target_mismatch refuses instead of falling back to input.
 Soft-miss (no preferred pattern on a real element): one same-point reprobe, then choose uia|input.
 """
 from __future__ import annotations
@@ -189,8 +189,14 @@ def _invokable_ancestor(ctrl, hit: dict[str, Any], sx: int, sy: int, max_hops: i
     """(control, info, hops) of the nearest ancestor with a preferred pattern, or None.
 
     The ancestor must share the hit element's top-level window and contain the point.
-    The walk stops at Document/Pane/Window (never resolves to them) and after max_hops.
+    Mid-ancestors that fail those checks (or whose top_hwnd cannot be read) are skipped
+    and never returned; the walk continues. Hard stops: GetParentControl exception or
+    None, a Document/Pane/Window ancestor (never walked through or resolved to), and
+    max_hops. hop counts every level. If the hit's top_hwnd cannot be read, no ancestor
+    is used.
     """
+    if hit.get("top_hwnd") is None:
+        return None
     if _is_root_type(str(hit.get("control_type") or "")):
         return None
     cur = ctrl
@@ -204,10 +210,12 @@ def _invokable_ancestor(ctrl, hit: dict[str, Any], sx: int, sy: int, max_hops: i
         pinfo = describe_control(parent)
         if _is_root_type(str(pinfo.get("control_type") or "")):
             return None
-        if pinfo.get("top_hwnd") != hit.get("top_hwnd"):
-            return None
+        if pinfo.get("top_hwnd") is None or pinfo.get("top_hwnd") != hit.get("top_hwnd"):
+            cur = parent
+            continue
         if not _bbox_contains(pinfo.get("bbox"), sx, sy):
-            return None
+            cur = parent
+            continue
         if pinfo.get("preferred_action"):
             return parent, pinfo, hop
         cur = parent
@@ -230,9 +238,11 @@ def resolve_at_screen(
     (same top-level window, rect containing the point, never Document/Pane/Window)
     to the nearest one that has one; ``ancestor_hops`` and ``hit`` report it.
     If no preferred pattern, ok=False (caller must not fall back).
-    expect_name / expect_control_type (the stamp node a step was planned from): the
-    resolved control must have that name (glyphs and whitespace ignored) and type,
-    else ok=False with reason=uia_target_mismatch.
+    expect_name / expect_control_type (the stamp node a step was planned from):
+    name matches if the resolved control's name or (when it is an ancestor of the
+    hit) the hit's name matches; type is checked on the node that matched by name;
+    unnamed planned node = type check on the resolved control only. Else ok=False
+    with reason=uia_target_mismatch.
     """
     sx, sy = int(sx), int(sy)
     ctrl = element_from_screen_point(sx, sy)
@@ -244,6 +254,7 @@ def resolve_at_screen(
             "method": "uia",
         }
     info = describe_control(ctrl)
+    hit_ctrl = ctrl
     info["ok"] = True
     info["screen"] = [sx, sy]
     info["method"] = "uia"
@@ -268,31 +279,65 @@ def resolve_at_screen(
                 f"{info.get('control_type')!r} name={info.get('name')!r} "
                 f"or on an ancestor within {int(max_hops)} levels"
             )
+            if info.get("top_hwnd") is None:
+                info["error"] += (
+                    "; the hit element's top-level window could not be read, so no ancestor was used"
+                )
             return info
         anc, ainfo, hops = found
         info = {**ainfo, "ok": True, "screen": [sx, sy], "method": "uia", "_control": anc,
                 "ancestor_hops": hops, "hit": hit}
     info["pattern"] = info.get("preferred_action")
-    if expect_name is not None or expect_control_type:
-        name_ok = expect_name is None or normalize_uia_name(info.get("name")) == normalize_uia_name(expect_name)
-        type_ok = not expect_control_type or (
-            _ctype_base(str(info.get("control_type") or "")).lower()
+    want = normalize_uia_name(expect_name) if expect_name is not None else ""
+    if want == "":
+        expect_name = None
+    if expect_name is None and not expect_control_type:
+        return info
+
+    def type_ok(node: dict[str, Any]) -> bool:
+        return not expect_control_type or (
+            _ctype_base(str(node.get("control_type") or "")).lower()
             == _ctype_base(str(expect_control_type)).lower()
         )
-        if not (name_ok and type_ok):
-            info["ok"] = False
-            info["reason"] = "uia_target_mismatch"
-            info["expected"] = {"name": expect_name, "control_type": expect_control_type}
-            via = ""
-            if info.get("ancestor_hops"):
-                h = info.get("hit") or {}
-                via = (f" (ancestor {info['ancestor_hops']} level(s) above the hit "
-                       f"{h.get('control_type')!r} {h.get('name')!r})")
-            info["error"] = (
-                f"UIA element at ({sx},{sy}) is {info.get('control_type')!r} {info.get('name')!r}{via}, "
-                f"not the planned {expect_control_type or '?'!r} {expect_name!r}; nothing invoked "
-                "(the view may have changed: re-perceive with uia=true)"
-            )
+
+    candidates: list[tuple[str, dict[str, Any]]] = [("resolved", info)]
+    if info.get("ancestor_hops"):
+        is_desc = False
+        try:
+            is_desc = _uia_is_descendant(info["_control"], hit_ctrl)
+        except Exception:
+            is_desc = False
+        if is_desc:
+            candidates.append(("hit", hit))
+    matched = None
+    if expect_name is not None:
+        for src, node in candidates:
+            if normalize_uia_name(node.get("name")) == want and type_ok(node):
+                matched = src
+                break
+    elif type_ok(info):
+        matched = "resolved"
+    if matched:
+        if expect_name is not None:
+            info["name_matched"] = matched
+        return info
+    info["ok"] = False
+    info["reason"] = "uia_target_mismatch"
+    info["expected"] = {"name": expect_name, "control_type": expect_control_type}
+    via = ""
+    if info.get("ancestor_hops"):
+        h = info.get("hit") or {}
+        via = (f" (ancestor {info['ancestor_hops']} level(s) above the hit "
+               f"{h.get('control_type')!r} {h.get('name')!r})")
+    if expect_name is not None:
+        planned = f"{expect_control_type or '?'!r} {expect_name!r}"
+    else:
+        planned = f"unnamed {expect_control_type or '?'!r}"
+    info["error"] = (
+        f"UIA element at ({sx},{sy}) is {info.get('control_type')!r} {info.get('name')!r}{via}, "
+        f"not the planned {planned}; nothing invoked "
+        "(the view may have changed: re-perceive with uia=true)"
+    )
     return info
 
 
@@ -306,7 +351,8 @@ def probe_at_screen(
     """Soft UIA hit-test for method=auto. Never raises; ok reflects uia-worthiness.
 
     expect: expect_name / expect_control_type for resolve_at_screen. A target mismatch
-    clears preferred_action so method=auto never invokes the other control.
+    clears preferred_action so method=auto never invokes the other control; act.py
+    refuses the act on that reason (no input fallback).
     """
     try:
         info = resolve_at_screen(sx, sy, expect_hwnd=expect_hwnd, **expect)

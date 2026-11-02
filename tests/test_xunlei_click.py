@@ -142,7 +142,8 @@ class TestResolveAncestorWalk(unittest.TestCase):
     def test_expected_type_mismatch(self):
         _doc, _btn, text = _chromium_button()
         _patch_hit(self, text)
-        info = uia_mod.resolve_at_screen(766, 842, expect_name="新建任务", expect_control_type="TextControl")
+        # D1: the hit TextControl now matches by name+type
+        info = uia_mod.resolve_at_screen(766, 842, expect_name="新建任务", expect_control_type="CheckBoxControl")
         self.assertEqual(info.get("reason"), "uia_target_mismatch")
 
     def test_glyph_prefixed_name_matches(self):
@@ -395,5 +396,396 @@ class TestUiaFallbackHint(unittest.TestCase):
         self.assertIn("ocr", out["uia_fallback_hint"])
 
 
+def _yunpan_nav():
+    doc = FakeCtrl("迅雷", "DocumentControl", (138, 290, 1218, 1010))
+    wrap = FakeCtrl("", "TextControl", (138, 395, 330, 445), ["Invoke"], parent=doc)
+    text = FakeCtrl("云盘", "TextControl", (150, 405, 320, 435), parent=wrap)
+    return doc, wrap, text
+
+
+class TestNamePolicyD1(unittest.TestCase):
+    def setUp(self):
+        stub_live_window(self, TOP)
+        p = mock.patch("cu_perceive.extras.missing_modules", return_value=[])
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_hit_name_matches_unnamed_invokable_wrapper(self):
+        _doc, _wrap, text = _yunpan_nav()
+        _patch_hit(self, text)
+        info = uia_mod.resolve_at_screen(
+            224, 419, expect_hwnd=TOP, expect_name="云盘", expect_control_type="TextControl"
+        )
+        self.assertTrue(info["ok"], info.get("error"))
+        self.assertEqual(info["ancestor_hops"], 1)
+        self.assertEqual(info["name"], "")
+        self.assertEqual(info["name_matched"], "hit")
+        self.assertEqual(info["pattern"], "Invoke")
+
+    def test_resolved_name_still_matches(self):
+        _doc, _btn, text = _chromium_button()
+        _patch_hit(self, text)
+        info = uia_mod.resolve_at_screen(
+            766, 842, expect_hwnd=TOP, expect_name="\ue65f 新建任务", expect_control_type="ButtonControl"
+        )
+        self.assertTrue(info["ok"], info.get("error"))
+        self.assertEqual(info["name_matched"], "resolved")
+
+    def test_hit_name_ignored_when_not_descendant(self):
+        _doc, _wrap, text = _yunpan_nav()
+        _patch_hit(self, text)
+        with mock.patch("cu_perceive.uia._uia_is_descendant", return_value=False):
+            info = uia_mod.resolve_at_screen(
+                224, 419, expect_hwnd=TOP, expect_name="云盘", expect_control_type="TextControl"
+            )
+        self.assertFalse(info["ok"])
+        self.assertEqual(info["reason"], "uia_target_mismatch")
+
+    def test_type_checked_on_name_matched_node(self):
+        _doc, _wrap, text = _yunpan_nav()
+        _patch_hit(self, text)
+        info = uia_mod.resolve_at_screen(
+            224, 419, expect_hwnd=TOP, expect_name="云盘", expect_control_type="ButtonControl"
+        )
+        self.assertFalse(info["ok"])
+        self.assertEqual(info.get("reason"), "uia_target_mismatch")
+
+    def test_stale_login_plan_still_refused(self):
+        login = FakeCtrl("登录", "ButtonControl", (700, 825, 830, 860), ["Invoke"])
+        _patch_hit(self, login)
+        info = uia_mod.resolve_at_screen(
+            766, 842, expect_name="\ue65f 新建任务", expect_control_type="ButtonControl"
+        )
+        self.assertFalse(info["ok"])
+        self.assertEqual(info["reason"], "uia_target_mismatch")
+        self.assertEqual(info["ancestor_hops"], 0)
+        self.assertIn("登录", info["error"])
+
+    def test_stale_login_label_in_login_button_refused(self):
+        btn = FakeCtrl("登录", "ButtonControl", (700, 825, 830, 860), ["Invoke"])
+        text = FakeCtrl("登录", "TextControl", (700, 825, 830, 860), parent=btn)
+        _patch_hit(self, text)
+        info = uia_mod.resolve_at_screen(
+            766, 842, expect_name="\ue65f 新建任务", expect_control_type="ButtonControl"
+        )
+        self.assertFalse(info["ok"])
+        self.assertEqual(info["reason"], "uia_target_mismatch")
+
+    def test_run_chain_stale_plan_refused_uia_and_live(self):
+        login = FakeCtrl("登录", "ButtonControl", (700, 825, 830, 860), ["Invoke"])
+        _patch_hit(self, login)
+        dry = run_chain(_xunlei_frame(), parse_steps(uia_name="新建任务"), dry_run=True, method="uia")
+        self.assertEqual(dry["reason"], "uia_target_mismatch")
+        with mock.patch("cu_perceive.uia.invoke_control") as inv, mock.patch("time.sleep"):
+            live = run_chain(
+                _xunlei_frame(), parse_steps(uia_name="新建任务"), dry_run=False,
+                method="uia", new_window_wait_s=0,
+            )
+        self.assertEqual(live["reason"], "uia_target_mismatch")
+        inv.assert_not_called()
+
+    def test_unnamed_node_plan_has_no_expect_name(self):
+        from cu_perceive.act import plan_steps, uia_step_expectation
+
+        frame = _xunlei_frame()
+        frame["uia_nodes"] = list(frame["uia_nodes"]) + [
+            {"id": 113, "name": "", "control_type": "GroupControl", "norm": [10, 160, 150, 200],
+             "clickable": True, "patterns": ["Invoke"]},
+        ]
+        steps = plan_steps(frame, parse_steps(steps="uia:#113"))
+        self.assertIsNone(steps[0]["uia_name"])
+        self.assertEqual(steps[0]["uia_query"], "#113")
+        self.assertEqual(
+            uia_step_expectation(frame, steps[0]),
+            {"expect_name": None, "expect_control_type": "GroupControl"},
+        )
+
+    def test_unnamed_node_resolves_by_type(self):
+        doc = FakeCtrl("迅雷", "DocumentControl", (138, 290, 1218, 1010))
+        group = FakeCtrl("", "GroupControl", (138, 395, 330, 445), ["Invoke"], parent=doc)
+        text = FakeCtrl("上传", "TextControl", (150, 405, 320, 435), parent=group)
+        _patch_hit(self, text)
+        frame = _xunlei_frame()
+        frame["uia_nodes"] = list(frame["uia_nodes"]) + [
+            {"id": 113, "name": "", "control_type": "GroupControl", "norm": [10, 160, 150, 200],
+             "clickable": True, "patterns": ["Invoke"]},
+        ]
+        out = run_chain(frame, parse_steps(steps="uia:#113"), dry_run=True, method="uia")
+        self.assertTrue(out["ok"], out.get("error"))
+        self.assertEqual(out["steps"][0]["uia"]["ancestor_hops"], 1)
+
+    def test_unnamed_node_type_mismatch_never_echoes_query(self):
+        doc = FakeCtrl("迅雷", "DocumentControl", (138, 290, 1218, 1010))
+        btn = FakeCtrl("", "ButtonControl", (138, 395, 330, 445), ["Invoke"], parent=doc)
+        text = FakeCtrl("上传", "TextControl", (150, 405, 320, 435), parent=btn)
+        _patch_hit(self, text)
+        frame = _xunlei_frame()
+        frame["uia_nodes"] = list(frame["uia_nodes"]) + [
+            {"id": 113, "name": "", "control_type": "GroupControl", "norm": [10, 160, 150, 200],
+             "clickable": True, "patterns": ["Invoke"]},
+        ]
+        out = run_chain(frame, parse_steps(steps="uia:#113"), dry_run=True, method="uia")
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["reason"], "uia_target_mismatch")
+        self.assertNotIn("#113", out["error"])
+        self.assertIn("unnamed", out["error"])
+        self.assertIsNone(out["expected_uia"]["name"])
+
+    def test_glyph_only_expect_name_is_unnamed(self):
+        _doc, _btn, text = _chromium_button()
+        _patch_hit(self, text)
+        info = uia_mod.resolve_at_screen(
+            766, 842, expect_name="\ue65f ", expect_control_type="ButtonControl"
+        )
+        self.assertTrue(info["ok"], info.get("error"))
+
+
+class TestAutoMismatchD2(unittest.TestCase):
+    def setUp(self):
+        stub_live_window(self, TOP)
+        p = mock.patch("cu_perceive.extras.missing_modules", return_value=[])
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_auto_dry_run_mismatch_refused(self):
+        login = FakeCtrl("登录", "ButtonControl", (700, 825, 830, 860), ["Invoke"])
+        _patch_hit(self, login)
+        out = run_chain(_xunlei_frame(), parse_steps(uia_name="新建任务"), dry_run=True, method="auto")
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["reason"], "uia_target_mismatch")
+        self.assertIsNone(out["steps"][0]["chosen_method"])
+        self.assertEqual(out.get("planned_foreground_click_count", 0), 0)
+        self.assertEqual(out["resolved_uia"]["name"], "登录")
+
+    def test_auto_live_mismatch_sends_nothing(self):
+        login = FakeCtrl("登录", "ButtonControl", (700, 825, 830, 860), ["Invoke"])
+        _patch_hit(self, login)
+        with mock.patch("cu_perceive.input.click_xy") as click, \
+                mock.patch("cu_perceive.uia.invoke_control") as inv, \
+                mock.patch("time.sleep"):
+            out = run_chain(
+                _xunlei_frame(), parse_steps(uia_name="新建任务"), dry_run=False,
+                method="auto", new_window_wait_s=0,
+            )
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["reason"], "uia_target_mismatch")
+        click.assert_not_called()
+        inv.assert_not_called()
+        self.assertEqual(out.get("foreground_click_count", 0), 0)
+
+    def test_auto_no_pattern_still_falls_back_to_input(self):
+        doc = FakeCtrl("迅雷", "DocumentControl", (138, 290, 1218, 1010))
+        text = FakeCtrl("label", "TextControl", (700, 825, 830, 860), parent=doc)
+        _patch_hit(self, text)
+        frame = _xunlei_frame()
+        frame["uia_nodes"] = list(frame["uia_nodes"]) + [
+            {"id": 160, "name": "label", "control_type": "TextControl", "norm": [557, 747, 607, 787]},
+        ]
+        out = run_chain(frame, parse_steps(steps="uia:#160"), dry_run=True, method="auto")
+        self.assertTrue(out["ok"], out.get("error"))
+        self.assertEqual(out["steps"][0]["chosen_method"], "input")
+        self.assertIn("uia_skip_reason", out["steps"][0])
+        self.assertNotIn("uia_reason", out["steps"][0])
+
+    def test_auto_match_chooses_uia(self):
+        _doc, _btn, text = _chromium_button()
+        _patch_hit(self, text)
+        out = run_chain(_xunlei_frame(), parse_steps(uia_name="新建任务"), dry_run=True, method="auto")
+        self.assertTrue(out["ok"], out.get("error"))
+        self.assertEqual(out["steps"][0]["chosen_method"], "uia")
+
+
+SIB = 777002
+
+
+class TestOwnedPopupD3(unittest.TestCase):
+    def setUp(self):
+        self.at = HWND
+        self.class_names = {}
+        self.threads = {HWND: 10, POPUP: 10, SIB: 11}
+        self.pids = {HWND: 4242, POPUP: 4242, SIB: 4242}
+        patches = {
+            "window_from_point": lambda x, y: self.at,
+            "root_window": lambda h: h,
+            "owner_window": lambda h: {POPUP: HWND}.get(h, 0),
+            "class_name": lambda h: self.class_names.get(h, "Chrome_WidgetWin_0"),
+            "window_thread": lambda h: self.threads.get(h, 99),
+            "window_pid": lambda h: self.pids.get(h, 0),
+            "window_rect": lambda h: (300, 200, 1100, 700),
+            "window_title": lambda h: "t",
+            "window_exstyle": lambda h: 0x100,
+        }
+        for name, fn in patches.items():
+            p = mock.patch(f"cu_perceive._win32.{name}", side_effect=fn)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_owned_popup_outside_rect_allowed(self):
+        self.at = POPUP
+        ok, info = win_mod.point_owner(HWND, 1200, 800)
+        self.assertTrue(ok)
+        self.assertIsNone(win_mod.point_off_target(HWND, 1200, 800, info["hwnd"], ok))
+
+    def test_unrelated_same_pid_toplevel_outside_rect_refused(self):
+        self.at = SIB
+        ok, info = win_mod.point_owner(HWND, 1200, 800)
+        self.assertFalse(ok)
+        off = win_mod.point_off_target(HWND, 1200, 800, info["hwnd"], ok)
+        self.assertEqual(off["why"], "outside_window")
+        self.assertEqual(off["pid"], 4242)
+
+    def test_same_pid_menu_on_target_thread_allowed(self):
+        menu = 777003
+        self.at = menu
+        self.class_names[menu] = "#32768"
+        self.threads[menu] = 10
+        self.pids[menu] = 4242
+        ok, info = win_mod.point_owner(HWND, 1200, 800)
+        self.assertTrue(ok)
+        self.assertIsNone(win_mod.point_off_target(HWND, 1200, 800, info["hwnd"], ok))
+
+    def test_unrelated_same_pid_inside_rect_is_covered(self):
+        self.at = SIB
+        ok, info = win_mod.point_owner(HWND, 400, 300)
+        self.assertFalse(ok)
+        self.assertIsNone(win_mod.point_off_target(HWND, 400, 300, info["hwnd"], ok))
+
+
+class TestCliPerceivePassthroughD4(unittest.TestCase):
+    def test_cli_perceive_forwards_pick_and_fallback(self):
+        import io
+        import json
+        from contextlib import redirect_stdout
+
+        from cu_perceive.cli import PERCEIVE_PASSTHROUGH, main
+
+        payload = {
+            "stamp": "s", "items": [], "source": "window", "coord_space": "window", "hwnd": 1,
+            "json": "s.json", "uia": True, "uia_nodes": [], "uia_count": 0, "ok": True,
+            "pick_reason": "overlay_deprioritized",
+            "deprioritized": [{"hwnd": 2, "title": "x", "overlay": ["layered"]}],
+            "pick_warning": "overlay_candidate", "pick_overlay": ["layered"], "pick_hint": "h",
+            "suggested_hwnd": None, "uia_fallback": "no_accessibility_tree", "uia_fallback_hint": "fh",
+        }
+        buf = io.StringIO()
+        with mock.patch("cu_perceive.core.perceive", return_value=dict(payload)), redirect_stdout(buf):
+            rc = main(["perceive", "--exe", "thunder", "--uia"])
+        out = json.loads(buf.getvalue())
+        self.assertEqual(rc, 0)
+        for k in ("stamp", "source", "coord_space", "hwnd", "json", "uia", "uia_nodes",
+                  "uia_count", "ok", *PERCEIVE_PASSTHROUGH):
+            self.assertIn(k, out)
+            self.assertEqual(out[k], payload[k], k)
+        self.assertIsNone(out["suggested_hwnd"])
+
+    def test_cli_perceive_omits_absent_keys(self):
+        import io
+        import json
+        from contextlib import redirect_stdout
+
+        from cu_perceive.cli import PERCEIVE_PASSTHROUGH, main
+
+        payload = {
+            "stamp": "s", "items": [], "source": "window", "coord_space": "window", "hwnd": 1,
+            "json": "s.json", "uia": True, "uia_nodes": [], "uia_count": 0, "ok": True,
+        }
+        buf = io.StringIO()
+        with mock.patch("cu_perceive.core.perceive", return_value=dict(payload)), redirect_stdout(buf):
+            rc = main(["perceive", "--exe", "thunder", "--uia"])
+        out = json.loads(buf.getvalue())
+        self.assertEqual(rc, 0)
+        for k in PERCEIVE_PASSTHROUGH:
+            self.assertNotIn(k, out)
+
+
+class TestOverlayRankP31(unittest.TestCase):
+    def _find(self, rows, **kw):
+        with mock.patch("cu_perceive.windows.list_windows", return_value=[dict(r) for r in rows]), \
+                mock.patch("cu_perceive.windows.monitor_rects", return_value=MONITORS):
+            ranked = win_mod.find_windows(**kw)
+            return ranked, win_mod.pick_info(ranked)
+
+    def test_overlay_with_exact_title_ranks_below_normal(self):
+        overlay = _row(1, "迅雷", (2060, -160, 2868, 532), exstyle=0x00080008)
+        main = _row(2, "迅雷 主窗口", (138, 290, 1218, 1010))
+        ranked, meta = self._find([overlay, main], title="迅雷")
+        self.assertEqual(ranked[0]["hwnd"], 2)
+        self.assertEqual(meta["pick_reason"], "overlay_deprioritized")
+
+
+class TestWalkSkipP35(unittest.TestCase):
+    def test_walk_skips_mid_ancestor_not_containing_point(self):
+        btn = FakeCtrl("新建任务", "ButtonControl", (700, 825, 830, 860), ["Invoke"])
+        group = FakeCtrl("g", "GroupControl", (0, 0, 10, 10), parent=btn)
+        text = FakeCtrl("x", "TextControl", (749, 836, 801, 851), parent=group)
+        _patch_hit(self, text)
+        info = uia_mod.resolve_at_screen(766, 842)
+        self.assertTrue(info["ok"], info.get("error"))
+        self.assertEqual(info["ancestor_hops"], 2)
+        self.assertEqual(info["control_type"], "ButtonControl")
+
+    def test_walk_skips_invokable_mid_ancestor_not_containing_point(self):
+        btn = FakeCtrl("新建任务", "ButtonControl", (700, 825, 830, 860), ["Invoke"])
+        group = FakeCtrl("g", "GroupControl", (0, 0, 10, 10), ["Invoke"], parent=btn)
+        text = FakeCtrl("x", "TextControl", (749, 836, 801, 851), parent=group)
+        _patch_hit(self, text)
+        info = uia_mod.resolve_at_screen(766, 842)
+        self.assertTrue(info["ok"], info.get("error"))
+        self.assertEqual(info["ancestor_hops"], 2)
+        self.assertEqual(info["control_type"], "ButtonControl")
+
+    def test_walk_skip_respects_depth_limit(self):
+        btn = FakeCtrl("ok", "ButtonControl", (700, 825, 830, 860), ["Invoke"])
+        cur = btn
+        for i in range(4):
+            cur = FakeCtrl(f"g{i}", "GroupControl", (0, 0, 10, 10), parent=cur)
+        hit = FakeCtrl("x", "TextControl", (749, 836, 801, 851), parent=cur)
+        _patch_hit(self, hit)
+        info = uia_mod.resolve_at_screen(766, 842)
+        self.assertFalse(info["ok"])
+        self.assertIn("within 4 levels", info["error"])
+        ok = uia_mod.resolve_at_screen(766, 842, max_hops=5)
+        self.assertTrue(ok["ok"], ok.get("error"))
+        self.assertEqual(ok["ancestor_hops"], 5)
+
+
+class TestUnreadableTopHwndP36(unittest.TestCase):
+    def test_unreadable_top_hwnd_blocks_ancestor_walk(self):
+        doc = FakeCtrl("迅雷", "DocumentControl", (138, 290, 1218, 1010), top=None)
+        btn = FakeCtrl("\ue65f 新建任务", "ButtonControl", (700, 825, 830, 860), ["Invoke"], parent=doc, top=None)
+        text = FakeCtrl("新建任务", "TextControl", (749, 836, 801, 851), parent=btn, top=None)
+        _patch_hit(self, text)
+        info = uia_mod.resolve_at_screen(766, 842)
+        self.assertFalse(info["ok"])
+        self.assertIn("top-level window could not be read", info["error"])
+
+    def test_unreadable_top_hwnd_direct_hit_unchanged(self):
+        btn = FakeCtrl("新建任务", "ButtonControl", (700, 825, 830, 860), ["Invoke"], top=None)
+        _patch_hit(self, btn)
+        info = uia_mod.resolve_at_screen(766, 842)
+        self.assertTrue(info["ok"], info.get("error"))
+        self.assertEqual(info["ancestor_hops"], 0)
+
+    def test_ancestor_with_unreadable_top_skipped(self):
+        btn = FakeCtrl("新建任务", "ButtonControl", (700, 825, 830, 860), ["Invoke"], top=TOP)
+        group = FakeCtrl("g", "GroupControl", (700, 825, 830, 860), ["Invoke"], parent=btn, top=None)
+        text = FakeCtrl("新建任务", "TextControl", (749, 836, 801, 851), parent=group, top=TOP)
+        _patch_hit(self, text)
+        info = uia_mod.resolve_at_screen(766, 842)
+        self.assertTrue(info["ok"], info.get("error"))
+        self.assertEqual(info["ancestor_hops"], 2)
+        self.assertEqual(info["control_type"], "ButtonControl")
+
+
+class TestSplitNotOnTargetP37(unittest.TestCase):
+    def test_split_not_on_target_by_position(self):
+        from cu_perceive.act import _split_not_on_target
+
+        off, rest = _split_not_on_target([{"a": 1}, {"a": 1, "not_on_target": True}])
+        self.assertEqual((off, rest), ([{"a": 1}], [{"a": 1}]))
+        self.assertEqual(_split_not_on_target(None), ([], None))
+
+
 if __name__ == "__main__":
     unittest.main()
+

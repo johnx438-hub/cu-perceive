@@ -929,7 +929,8 @@ def plan_steps(frame: dict, specs: list[dict]) -> list[dict]:
                 "norm": [int(nx), int(ny)],
                 "center": [x, y],
                 "screen": [sx, sy],
-                "uia_name": node.get("name") if node.get("name") not in (None, "") else str(q),
+                "uia_name": node.get("name") if node.get("name") not in (None, "") else None,
+                "uia_query": str(q),
                 "uia_node_id": node.get("id"),
                 "button": spec.get("button") or "left",
                 "hover": bool(spec.get("hover")),
@@ -1084,11 +1085,19 @@ def uia_step_expectation(frame: dict, step: dict) -> dict:
                     break
             except (TypeError, ValueError):
                 continue
-    name = (node or {}).get("name")
-    if name in (None, ""):
+    name = None
+    if node is not None and node.get("name") not in (None, ""):
+        name = node.get("name")
+    else:
         name = step.get("uia_name")
-    out = {"expect_name": None if name is None else str(name)}
+    if name in (None, ""):
+        name = None
+    else:
+        name = str(name)
     ctype = (node or {}).get("control_type")
+    if name is None and not ctype:
+        return {}
+    out = {"expect_name": name}
     if ctype:
         out["expect_control_type"] = str(ctype)
     return out
@@ -1102,7 +1111,7 @@ def _note_uia_mismatch(out: dict, step: dict) -> None:
     out["reason"] = "uia_target_mismatch"
     out["expected_uia"] = info.get("expected")
     out["resolved_uia"] = {"name": info.get("name"), "control_type": info.get("control_type")}
-    out["hint"] = "re-perceive with uia=true and pick the target from the new uia_nodes; nothing was invoked"
+    out["hint"] = "re-perceive with uia=true and pick the target from the new uia_nodes; nothing was invoked or clicked"
 
 
 def enrich_uia_steps(frame: dict, steps: list[dict], *, double: bool = False) -> list[dict]:
@@ -1171,6 +1180,15 @@ def enrich_auto_steps(frame: dict, steps: list[dict], *, double: bool = False) -
         info, meta = probe_at_screen_with_reprobe(
             sx, sy, expect_hwnd=expect, **uia_step_expectation(frame, step)
         )
+        if info.get("reason") == "uia_target_mismatch":
+            step["method"] = "auto"
+            step["chosen_method"] = None
+            step["uia"] = public_element_info(info, frame)
+            step["uia_ok"] = False
+            step["uia_reason"] = "uia_target_mismatch"
+            step["uia_error"] = info.get("error")
+            step["uia_probe_attempts"] = 1
+            continue
         chosen = choose_auto_method(
             preferred_action=info.get("preferred_action"),
             top_hwnd=info.get("top_hwnd"),
@@ -1547,10 +1565,14 @@ def apply_foreground_accounting(out: dict) -> None:
         if step.get("via") not in ("id", "xy", "norm"):
             continue
         if method == "auto":
-            effective = step.get("chosen_method") or "input"
+            if step.get("uia_reason") == "uia_target_mismatch":
+                used = False
+            else:
+                effective = step.get("chosen_method") or "input"
+                used = effective == "input"
         else:
             effective = method
-        used = effective == "input"
+            used = effective == "input"
         step["foreground_used"] = used
         if used:
             count += 1
@@ -2102,6 +2124,16 @@ def _clicked_window(step: dict) -> int | None:
         return window_at_point(int(pts[0][1][0]), int(pts[0][1][1])) or None
     except Exception:
         return None
+
+
+def _split_not_on_target(found: list[dict] | None) -> tuple[list[dict], list[dict] | None]:
+    """(points_not_on_target, occluded) split by each entry's not_on_target flag, by position."""
+    if found is None:
+        return [], None
+    off, rest = [], []
+    for o in found:
+        (off if o.pop("not_on_target", False) else rest).append(o)
+    return off, rest
 
 
 def occluded_points(frame: dict, steps: list[dict], *, method: str) -> list[dict] | None:
@@ -2712,6 +2744,17 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
             out["steps"] = steps
             apply_foreground_accounting(out)
             return out
+        bad = [s for s in steps if s.get("via") in ("id", "xy", "norm") and s.get("uia_reason") == "uia_target_mismatch"]
+        if bad:
+            out["ok"] = False
+            out["error"] = bad[0].get("uia_error") or "UIA target mismatch"
+            _note_uia_mismatch(out, bad[0])
+            for s in steps:
+                s.pop("_uia_control", None)
+                s.pop("_uia_action", None)
+            out["steps"] = steps
+            apply_foreground_accounting(out)
+            return out
         click_steps = [s for s in steps if s.get("via") in ("id", "xy", "norm")]
         choices = [s.get("chosen_method") for s in click_steps]
         if choices and all(c == choices[0] for c in choices):
@@ -2785,9 +2828,8 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                     "window: --go will refuse; add a click on the target field"
                 )
         occluded = occluded_points(frame or {}, steps, method=method_n)
-        off_target = [o for o in occluded or [] if o.pop("not_on_target", False)]
+        off_target, occluded = _split_not_on_target(occluded)
         if off_target:
-            occluded = [o for o in occluded if o not in off_target]
             out["points_not_on_target"] = off_target
             warns.append(
                 "planned point(s) do not reach the stamp window's app: "
@@ -2869,13 +2911,21 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                     s.pop("_uia_control", None)
                     s.pop("_uia_action", None)
                 return out
+            if step.get("uia_reason") == "uia_target_mismatch":
+                out["ok"] = False
+                out["error"] = step.get("uia_error")
+                _note_uia_mismatch(out, step)
+                for s in steps:
+                    s.pop("_uia_control", None)
+                    s.pop("_uia_action", None)
+                return out
             chosen = step.get("chosen_method") or "input"
             if chosen == "uia":
                 ctrl = step.pop("_uia_control", None)
                 action = step.pop("_uia_action", None)
                 try:
                     if ctrl is None:
-                        from .uia import resolve_at_screen
+                        from .uia import public_element_info, resolve_at_screen
 
                         info = resolve_at_screen(
                             step["screen"][0],
@@ -2884,6 +2934,9 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                             **uia_step_expectation(frame or {}, step),
                         )
                         if not info.get("ok"):
+                            if info.get("reason") == "uia_target_mismatch":
+                                step["uia"] = public_element_info(info, frame or {})
+                                _note_uia_mismatch(out, step)
                             raise UiaError(info.get("error") or "UIA re-resolve failed")
                         ctrl = info.get("_control")
                         action = info.get("preferred_action")
@@ -2942,7 +2995,7 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
             try:
                 if ctrl is None:
                     # re-resolve if handle lost
-                    from .uia import resolve_at_screen
+                    from .uia import public_element_info, resolve_at_screen
 
                     info = resolve_at_screen(
                         step["screen"][0],
@@ -2951,6 +3004,9 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                         **uia_step_expectation(frame or {}, step),
                     )
                     if not info.get("ok"):
+                        if info.get("reason") == "uia_target_mismatch":
+                            step["uia"] = public_element_info(info, frame or {})
+                            _note_uia_mismatch(out, step)
                         raise UiaError(info.get("error") or "UIA re-resolve failed")
                     ctrl = info.get("_control")
                     action = info.get("preferred_action")

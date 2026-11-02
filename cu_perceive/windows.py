@@ -125,9 +125,10 @@ def list_windows(include_minimized: bool = True) -> list[dict]:
 
 
 PICK_RULE = (
-    "When title/exe match multiple windows: prefer exact/substring title hits, then windows "
-    "that do not look like overlays (WS_EX_LAYERED / WS_EX_TOOLWINDOW / WS_EX_NOACTIVATE, under "
-    "120x120, or under half on any monitor; see each row's overlay[]), then non-minimized, then "
+    "When title/exe match multiple windows: prefer windows that do not look like overlays "
+    "(WS_EX_LAYERED / WS_EX_TOOLWINDOW / WS_EX_NOACTIVATE, under "
+    "120x120, or under half on any monitor; see each row's overlay[]), then exact/substring "
+    "title hits, then non-minimized, then "
     "EnumWindows z-order (topmost first), then larger area. Not guaranteed to be "
     "GetForegroundWindow. Pass hwnd to pin one. Callers should use the windows[] array when "
     "several match. pick_warning=overlay_candidate means the pick itself looks like an overlay."
@@ -244,7 +245,7 @@ def _score_match(w: dict, title_l: str, exe_l: str, z_index: int) -> tuple:
     area = max(0, right - left) * max(0, bottom - top)
     if w.get("minimized"):
         area = 0
-    return (exact, title_hit, -len(w.get("overlay") or ()), exe_in_title,
+    return (-len(w.get("overlay") or ()), exact, title_hit, exe_in_title,
             0 if w.get("minimized") else 1, -int(z_index), area)
 
 
@@ -804,11 +805,11 @@ def point_owner(hwnd: int, x: int, y: int) -> tuple[bool, dict]:
 def point_off_target(hwnd: int, x: int, y: int, at: int, owner_ok: bool) -> dict | None:
     """Second check after point_owner: does a mouse event at (x, y) miss the target app?
 
-    owner_ok (point_owner passed): refuse only when the window at the point belongs to
-    another process than hwnd. Not owner_ok: "point_not_on_target" rather than "covered"
-    when nothing is at the point, the point is outside hwnd's window rect, or hwnd is a
-    layered window whose transparent part lets the click through to another process
-    (raising the window cannot fix any of those).
+    owner_ok must be point_owner's result, i.e. the window at the point is the
+    target, a window in the target's GW_OWNER chain (owned dialog/popup), or a popup
+    menu on its thread. Only then may a point lie outside the target rect, and it is
+    still refused when that window is another process. Any other window outside the
+    rect, including another top-level window of the same process, is outside_window.
 
     Returns None (no objection, or hwnd's pid/rect cannot be read: point_owner decides)
     or {why, hwnd, title, pid, target_pid} with why in other_process | no_window |
