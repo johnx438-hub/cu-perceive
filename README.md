@@ -284,7 +284,7 @@ every json in a large output directory.
   belongs to the same process. Any other window outside the rect, including another top-level window of
   the same process, is refused with `outside_window`.
 - Every refusal also carries `reason` (a stable code such as `point_covered`,
-  `point_not_on_target`, `uia_target_mismatch`,
+  `point_not_on_target`, `uia_target_mismatch`, `uia_no_pattern`,
   `not_foreground`, `not_foreground_after_focus`, `point_covered_after_focus`,
   `identity_changed` or `no_window_stamp`), `hint` (what to do next, for example
   "retry with focus=true") and, when another window is in the way,
@@ -318,7 +318,8 @@ every json in a large output directory.
   not wait. `after` is the foreground window when the act returns.
 - `--method uia` without the `uia` extra exits with code 3 and prints the same
   `missing_extra` / `install` fields as `perceive --uia`. `--method auto`
-  without it falls back to input and says so in `warnings`.
+  without it falls back to input and says so in `warnings`, except for a step planned from a named UIA node,
+  which is refused (`uia_target_mismatch`, `uia_unverified: "probe_failed"`).
 - `--method uia` / `auto` hit-test the point with UIA. Chromium/Electron apps
   return the label inside a button (a `TextControl` without patterns), so when
   the hit element has no Invoke/Toggle/ExpandCollapse/Select pattern, `act`
@@ -333,8 +334,17 @@ every json in a large output directory.
   the point hit, equals the node's name, with private-use icon glyphs U+E000-U+F8FF and whitespace ignored (so
   `\ue65f 新建任务` matches `新建任务`). The control type is checked on the element that matched by name. A node
   without a name is matched by control type and containment only. Otherwise the act fails closed with
-  `reason: "uia_target_mismatch"`, `expected_uia` and `resolved_uia`, and nothing is invoked or clicked; this
-  applies to `method=uia` and `method=auto` (auto does not fall back to an input click).
+  `reason: "uia_target_mismatch"`, `expected_uia` and `resolved_uia`, and
+  nothing is invoked or clicked. For a node that has a name, `method=uia` and `method=auto` also refuse with
+  `uia_target_mismatch` (plus `uia_unverified` saying why) when UIA cannot confirm the hit: the point hits a
+  Document, Pane or Window (`root_hit`); the hit has no Invoke/Toggle/ExpandCollapse/Select pattern, no ancestor
+  passes the walk, and the hit's own name or type is not the node's (`no_pattern_name_mismatch`); nothing is
+  found at the point (`no_element`); the hit is in another top-level window (`other_window`); or the UIA
+  hit-test fails (`probe_failed`). A root or no-pattern hit is probed once more under `auto` before it refuses.
+  `method=auto` then sends no input click: a dry run has `planned_foreground_click_count: 0` and `--go` sends
+  nothing. A no-pattern hit whose own name and type match the node is still clicked with input under `auto`;
+  `method=uia` refuses it with `reason: "uia_no_pattern"`. Steps given only by `--norm` / `--xy`, and nodes
+  without a name, keep the fallback: `auto` uses an input click when UIA finds no invokable control there.
 
 ### Verification and operator stop (MCP)
 

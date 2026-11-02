@@ -1103,6 +1103,19 @@ def uia_step_expectation(frame: dict, step: dict) -> dict:
     return out
 
 
+def _auto_input_unverified(expect: dict, info: dict) -> bool:
+    """D5: auto may input-click a step planned from a named node only when UIA matched the hit's own name."""
+    from .uia import normalize_uia_name
+
+    return bool(normalize_uia_name((expect or {}).get("expect_name"))) and (info or {}).get("name_matched") != "hit"
+
+
+UIA_NO_PATTERN_HINT = (
+    "the element at this point has no Invoke/Toggle/ExpandCollapse/Select pattern; nothing was invoked. "
+    "Click it with method=input (or method=auto), or re-perceive with uia=true if the view changed"
+)
+
+
 def _note_uia_mismatch(out: dict, step: dict) -> None:
     """Copy a uia_target_mismatch from a step onto the act result (both names)."""
     info = step.get("uia") or {}
@@ -1111,12 +1124,14 @@ def _note_uia_mismatch(out: dict, step: dict) -> None:
     out["reason"] = "uia_target_mismatch"
     out["expected_uia"] = info.get("expected")
     out["resolved_uia"] = {"name": info.get("name"), "control_type": info.get("control_type")}
+    if info.get("uia_unverified"):
+        out["uia_unverified"] = info["uia_unverified"]
     out["hint"] = "re-perceive with uia=true and pick the target from the new uia_nodes; nothing was invoked or clicked"
 
 
 def enrich_uia_steps(frame: dict, steps: list[dict], *, double: bool = False) -> list[dict]:
     """Resolve UIA element at each planned screen point (dry-run / live). No invoke."""
-    from .uia import public_element_info, resolve_at_screen
+    from .uia import public_element_info, resolve_expected
 
     if double:
         raise MethodError(
@@ -1134,7 +1149,7 @@ def enrich_uia_steps(frame: dict, steps: list[dict], *, double: bool = False) ->
                 f"method=uia is left-click only in S2 (got button={btn!r})"
             )
         sx, sy = int(step["screen"][0]), int(step["screen"][1])
-        info = resolve_at_screen(sx, sy, expect_hwnd=expect, **uia_step_expectation(frame, step))
+        info = resolve_expected(sx, sy, expect_hwnd=expect, **uia_step_expectation(frame, step))
         step["method"] = "uia"
         step["uia"] = public_element_info(info, frame)
         # keep live control for --go path
@@ -1157,6 +1172,7 @@ def enrich_auto_steps(frame: dict, steps: list[dict], *, double: bool = False) -
     """
     from .uia import (
         choose_auto_method,
+        mark_target_unverified,
         probe_at_screen_with_reprobe,
         public_element_info,
     )
@@ -1177,26 +1193,9 @@ def enrich_auto_steps(frame: dict, steps: list[dict], *, double: bool = False) -
                 f"method=auto is left-click only in S3 (got button={btn!r})"
             )
         sx, sy = int(step["screen"][0]), int(step["screen"][1])
-        info, meta = probe_at_screen_with_reprobe(
-            sx, sy, expect_hwnd=expect, **uia_step_expectation(frame, step)
-        )
-        if info.get("reason") == "uia_target_mismatch":
-            step["method"] = "auto"
-            step["chosen_method"] = None
-            step["uia"] = public_element_info(info, frame)
-            step["uia_ok"] = False
-            step["uia_reason"] = "uia_target_mismatch"
-            step["uia_error"] = info.get("error")
-            step["uia_probe_attempts"] = 1
-            continue
-        chosen = choose_auto_method(
-            preferred_action=info.get("preferred_action"),
-            top_hwnd=info.get("top_hwnd"),
-            expect_hwnd=expect,
-        )
+        exp = uia_step_expectation(frame, step)
+        info, meta = probe_at_screen_with_reprobe(sx, sy, expect_hwnd=expect, **exp)
         step["method"] = "auto"
-        step["chosen_method"] = chosen
-        step["uia"] = public_element_info(info, frame)
         if meta.get("reprobed"):
             step["uia_reprobe"] = True
             step["uia_probe_attempts"] = 2
@@ -1212,6 +1211,28 @@ def enrich_auto_steps(frame: dict, steps: list[dict], *, double: bool = False) -
             step["uia_first"] = first
         else:
             step["uia_probe_attempts"] = 1
+        chosen = None
+        if info.get("reason") != "uia_target_mismatch":
+            chosen = choose_auto_method(
+                preferred_action=info.get("preferred_action"),
+                top_hwnd=info.get("top_hwnd"),
+                expect_hwnd=expect,
+            )
+            if chosen == "input" and _auto_input_unverified(exp, info):
+                info = mark_target_unverified(
+                    info, sx=sx, sy=sy, expect_name=exp.get("expect_name"),
+                    expect_control_type=exp.get("expect_control_type"), why="unverified",
+                    detail=info.get("error") or "UIA did not confirm the control at the point",
+                )
+                chosen = None
+        step["uia"] = public_element_info(info, frame)
+        if chosen is None:
+            step["chosen_method"] = None
+            step["uia_ok"] = False
+            step["uia_reason"] = "uia_target_mismatch"
+            step["uia_error"] = info.get("error")
+            continue
+        step["chosen_method"] = chosen
         if chosen == "uia":
             if info.get("_control") is not None:
                 step["_uia_control"] = info["_control"]
@@ -2728,6 +2749,8 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
             out["ok"] = False
             out["error"] = bad[0].get("uia_error") or "UIA resolve failed"
             _note_uia_mismatch(out, bad[0])
+            if "reason" not in out and (bad[0].get("uia") or {}).get("reason") == "uia_no_pattern":
+                _set_refusal(out, "uia_no_pattern", UIA_NO_PATTERN_HINT)
             # strip live handles before return
             for s in steps:
                 s.pop("_uia_control", None)
@@ -2897,7 +2920,7 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
         return ime_err
     if method_n == "auto":
         # Live auto: execute chosen path only. No mid-go fallback uia->input.
-        from .uia import UiaError, invoke_control
+        from .uia import UiaError, invoke_control, mark_target_unverified
         from .input import click_xy
 
         for n, step in enumerate(steps):
@@ -2920,14 +2943,28 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                     s.pop("_uia_action", None)
                 return out
             chosen = step.get("chosen_method") or "input"
+            if chosen == "input" and _auto_input_unverified(uia_step_expectation(frame or {}, step), step.get("uia") or {}):
+                exp = uia_step_expectation(frame or {}, step)
+                step["uia"] = mark_target_unverified(
+                    dict(step.get("uia") or {}), sx=step["screen"][0], sy=step["screen"][1],
+                    expect_name=exp.get("expect_name"), expect_control_type=exp.get("expect_control_type"),
+                    why="unverified", detail="auto planned an input click that UIA did not confirm")
+                step["uia_reason"] = "uia_target_mismatch"
+                out["ok"] = False
+                out["error"] = step["uia"]["error"]
+                _note_uia_mismatch(out, step)
+                for s in steps:
+                    s.pop("_uia_control", None)
+                    s.pop("_uia_action", None)
+                return out
             if chosen == "uia":
                 ctrl = step.pop("_uia_control", None)
                 action = step.pop("_uia_action", None)
                 try:
                     if ctrl is None:
-                        from .uia import public_element_info, resolve_at_screen
+                        from .uia import public_element_info, resolve_expected
 
-                        info = resolve_at_screen(
+                        info = resolve_expected(
                             step["screen"][0],
                             step["screen"][1],
                             expect_hwnd=int((frame or {}).get("hwnd") or 0) or None,
@@ -2943,7 +2980,10 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                     result = invoke_control(ctrl, action=action)
                 except (UiaError, OSError, ValueError) as e:
                     out["ok"] = False
-                    out["error"] = f"UIA invoke failed (no input fallback): {e}"
+                    if out.get("reason") != "uia_target_mismatch":
+                        out["error"] = f"UIA invoke failed (no input fallback): {e}"
+                    else:
+                        out["error"] = step["uia"]["error"]
                     step["invoked"] = False
                     for s in steps:
                         s.pop("_uia_control", None)
@@ -2995,9 +3035,9 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
             try:
                 if ctrl is None:
                     # re-resolve if handle lost
-                    from .uia import public_element_info, resolve_at_screen
+                    from .uia import public_element_info, resolve_expected
 
-                    info = resolve_at_screen(
+                    info = resolve_expected(
                         step["screen"][0],
                         step["screen"][1],
                         expect_hwnd=int((frame or {}).get("hwnd") or 0) or None,
@@ -3007,13 +3047,18 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                         if info.get("reason") == "uia_target_mismatch":
                             step["uia"] = public_element_info(info, frame or {})
                             _note_uia_mismatch(out, step)
+                        elif info.get("reason") == "uia_no_pattern":
+                            _set_refusal(out, "uia_no_pattern", UIA_NO_PATTERN_HINT)
                         raise UiaError(info.get("error") or "UIA re-resolve failed")
                     ctrl = info.get("_control")
                     action = info.get("preferred_action")
                 result = invoke_control(ctrl, action=action)
             except (UiaError, OSError, ValueError) as e:
                 out["ok"] = False
-                out["error"] = f"UIA invoke failed (no post/input fallback): {e}"
+                if out.get("reason") != "uia_target_mismatch":
+                    out["error"] = f"UIA invoke failed (no post/input fallback): {e}"
+                else:
+                    out["error"] = step["uia"]["error"]
                 step["invoked"] = False
                 for s in steps:
                     s.pop("_uia_control", None)

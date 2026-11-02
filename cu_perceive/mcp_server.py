@@ -613,7 +613,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         On go it is pressed only while the stamp window (or one it owns) is in front, else hold_key_refused_step.
         method=input (default SendInput) | post (S1) | uia (S2) | auto (S3).
         post/uia/auto: single left clicks only (norm/xy/ids); reject drag/path/scroll/type/hold.
-        uia: Invoke|Toggle|Expand|Select; no silent fallback. auto: probe UIA → chosen_method=uia|input (never post); go runs chosen only.
+        uia: Invoke|Toggle|Expand|Select; no silent fallback. auto: probe UIA → chosen_method=uia|input (never post); go runs chosen only. A step from a named uia node (uia_name / uia:#N / uia id) is refused with reason=uia_target_mismatch (uia_unverified) when UIA cannot confirm it (root hit, unmatched no-pattern hit, probe failure); auto never input-clicks it.
         E3 same-stamp: multi norm with ";" or repeated clicks on one stamp; max_age_sec / strict_stamp
         pass through to stamp_check (ROI/moved stamps fail on go or when strict_stamp).
         steps=[{...}, ...] (max 20): a guarded chain, each step an object of flat act fields

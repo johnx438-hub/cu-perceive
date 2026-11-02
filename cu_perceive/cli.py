@@ -172,7 +172,7 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument(
         "--method",
         default="input",
-        help="contact method: input (SendInput, default) | post (HWND PostMessage, S1) | uia (UIA patterns, S2) | auto (S3: uia if hit+pattern else input; refuses on uia_target_mismatch; left click only)",
+        help="contact method: input (SendInput, default) | post (HWND PostMessage, S1) | uia (UIA patterns, S2) | auto (S3: uia if hit+pattern else input; a step from a named UIA node never falls back to an input click unless UIA matched the hit's own name, else uia_target_mismatch; left click only)",
     )
     a.add_argument("--double", action="store_true")
     a.add_argument("--type", "--text", dest="text", help="type text. Default pastes (clipboard + Ctrl+V) and restores the previous clipboard text. CLI: --type or --text; MCP field is text")

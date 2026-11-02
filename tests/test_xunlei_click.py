@@ -786,6 +786,255 @@ class TestSplitNotOnTargetP37(unittest.TestCase):
         self.assertEqual(_split_not_on_target(None), ([], None))
 
 
+def _root_doc():
+    return FakeCtrl("迅雷", "DocumentControl", (138, 290, 1218, 1010))
+
+
+def _patch_hits(testcase, *hits):
+    """element_from_screen_point returns hits in order (an exception instance is raised)."""
+    for p in (
+        mock.patch("cu_perceive.uia.element_from_screen_point", side_effect=list(hits)),
+        mock.patch("cu_perceive.uia.list_available_patterns", side_effect=lambda c: list(c.patterns)),
+    ):
+        p.start()
+        testcase.addCleanup(p.stop)
+
+
+class TestTargetUnverifiedD5(unittest.TestCase):
+    def setUp(self):
+        stub_live_window(self, TOP)
+        p = mock.patch("cu_perceive.extras.missing_modules", return_value=[])
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _run(self, method, dry_run, specs=None, frame=None):
+        with mock.patch("cu_perceive.input.click_xy") as click, \
+                mock.patch("cu_perceive.uia.invoke_control") as inv, mock.patch("time.sleep"):
+            out = run_chain(frame or _xunlei_frame(), specs or parse_steps(uia_name="新建任务"),
+                            dry_run=dry_run, method=method, new_window_wait_s=0)
+        return out, click, inv
+
+    def _assert_refused(self, out, click, inv, why):
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["reason"], "uia_target_mismatch")
+        self.assertEqual(out["uia_unverified"], why)
+        self.assertEqual(out.get("planned_foreground_click_count", 0), 0)
+        self.assertEqual(out.get("foreground_click_count", 0), 0)
+        click.assert_not_called()
+        inv.assert_not_called()
+
+    def test_resolve_root_hit_named_is_mismatch(self):
+        _patch_hit(self, _root_doc())
+        info = uia_mod.resolve_at_screen(
+            766, 842, expect_hwnd=TOP, expect_name="\ue65f 新建任务", expect_control_type="ButtonControl"
+        )
+        self.assertFalse(info["ok"])
+        self.assertEqual(info["reason"], "uia_target_mismatch")
+        self.assertEqual(info["uia_unverified"], "root_hit")
+        self.assertIsNone(info["preferred_action"])
+        self.assertEqual(info["expected"], {"name": "\ue65f 新建任务", "control_type": "ButtonControl"})
+        self.assertIn("迅雷", info["error"])
+        self.assertIn("新建任务", info["error"])
+
+    def test_stale_root_hit_uia_dry(self):
+        _patch_hit(self, _root_doc())
+        out, click, inv = self._run("uia", True)
+        self._assert_refused(out, click, inv, "root_hit")
+        self.assertEqual(out["resolved_uia"], {"name": "迅雷", "control_type": "DocumentControl"})
+        self.assertEqual(out["expected_uia"]["name"], "\ue65f 新建任务")
+
+    def test_stale_root_hit_uia_go(self):
+        _patch_hit(self, _root_doc())
+        out, click, inv = self._run("uia", False)
+        self._assert_refused(out, click, inv, "root_hit")
+        self.assertEqual(out["resolved_uia"], {"name": "迅雷", "control_type": "DocumentControl"})
+        self.assertEqual(out["expected_uia"]["name"], "\ue65f 新建任务")
+
+    def test_stale_root_hit_auto_dry(self):
+        _patch_hit(self, _root_doc())
+        out, click, inv = self._run("auto", True)
+        self._assert_refused(out, click, inv, "root_hit")
+        self.assertEqual(out["resolved_uia"], {"name": "迅雷", "control_type": "DocumentControl"})
+        self.assertEqual(out["expected_uia"]["name"], "\ue65f 新建任务")
+        self.assertIsNone(out["steps"][0]["chosen_method"])
+        self.assertFalse(out["steps"][0]["foreground_used"])
+        self.assertTrue(out["steps"][0]["uia_reprobe"])
+        self.assertEqual(out["steps"][0]["uia_probe_attempts"], 2)
+
+    def test_stale_root_hit_auto_go(self):
+        _patch_hit(self, _root_doc())
+        out, click, inv = self._run("auto", False)
+        self._assert_refused(out, click, inv, "root_hit")
+        self.assertEqual(out["resolved_uia"], {"name": "迅雷", "control_type": "DocumentControl"})
+        self.assertEqual(out["expected_uia"]["name"], "\ue65f 新建任务")
+        self.assertIsNone(out["steps"][0]["chosen_method"])
+        self.assertFalse(out["steps"][0]["foreground_used"])
+        self.assertTrue(out["steps"][0]["uia_reprobe"])
+        self.assertEqual(out["steps"][0]["uia_probe_attempts"], 2)
+
+    def test_no_pattern_other_name_refused(self):
+        hit = FakeCtrl("登录", "TextControl", (700, 825, 830, 860), parent=_root_doc())
+        _patch_hit(self, hit)
+        for method, dry in (("uia", True), ("auto", True), ("auto", False)):
+            with self.subTest(method=method, dry=dry):
+                out, click, inv = self._run(method, dry)
+                self._assert_refused(out, click, inv, "no_pattern_name_mismatch")
+                self.assertEqual(out["resolved_uia"]["name"], "登录")
+
+    def test_no_pattern_own_name_match_still_allowed(self):
+        frame = _xunlei_frame()
+        hit = FakeCtrl("新建任务", "TextControl", (749, 836, 801, 851), parent=_root_doc())
+        _patch_hit(self, hit)
+        specs = parse_steps(steps="uia:#153")
+        out, _click, _inv = self._run("auto", True, specs=specs, frame=frame)
+        self.assertTrue(out["ok"], out.get("error"))
+        self.assertEqual(out["steps"][0]["chosen_method"], "input")
+        self.assertEqual(out["steps"][0]["uia"]["name_matched"], "hit")
+        self.assertEqual(out["steps"][0]["uia"]["reason"], "uia_no_pattern")
+        self.assertNotIn("uia_reason", out["steps"][0])
+        self.assertEqual(out["planned_foreground_click_count"], 1)
+        out, _click, _inv = self._run("uia", True, specs=specs, frame=frame)
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["reason"], "uia_no_pattern")
+        self.assertIn("hint", out)
+        self.assertEqual(out.get("planned_foreground_click_count", 0), 0)
+
+    def test_uia_error_with_expectation_refused(self):
+        err = uia_mod.UiaError("ControlFromPoint(766,842) failed: boom")
+        _patch_hits(self, *[err] * 3)
+        for method, dry in (("uia", True), ("auto", True), ("auto", False)):
+            with self.subTest(method=method, dry=dry):
+                out, click, inv = self._run(method, dry)
+                self._assert_refused(out, click, inv, "probe_failed")
+                self.assertIn("boom", out["error"])
+                if method == "auto":
+                    self.assertEqual(out["steps"][0]["uia_probe_attempts"], 1)
+
+    def test_plain_norm_auto_unchanged(self):
+        _patch_hit(self, _root_doc())
+        out, _click, _inv = self._run("auto", True, specs=parse_steps(norm="582,767"))
+        self.assertTrue(out["ok"], out.get("error"))
+        self.assertEqual(out["steps"][0]["chosen_method"], "input")
+        self.assertNotIn("uia_reason", out["steps"][0])
+        self.assertEqual(out["planned_foreground_click_count"], 1)
+        self.assertEqual(out["steps"][0]["uia"]["reason"], "uia_no_pattern")
+        self.assertNotIn("uia_unverified", out["steps"][0]["uia"])
+        out, _click, _inv = self._run("uia", True, specs=parse_steps(norm="582,767"))
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["reason"], "uia_no_pattern")
+
+    def test_reprobe_root_then_login_refused(self):
+        login = FakeCtrl("登录", "ButtonControl", (700, 825, 830, 860), ["Invoke"])
+        _patch_hits(self, _root_doc(), login)
+        out, _click, _inv = self._run("auto", True)
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["reason"], "uia_target_mismatch")
+        self.assertEqual(out["resolved_uia"]["name"], "登录")
+        self.assertEqual(out["steps"][0]["uia_probe_attempts"], 2)
+        self.assertEqual(out["planned_foreground_click_count"], 0)
+
+    def test_reprobe_root_then_match_chooses_uia(self):
+        _doc, _btn, text = _chromium_button()
+        _patch_hits(self, _root_doc(), text)
+        out, _click, _inv = self._run("auto", True)
+        self.assertTrue(out["ok"], out.get("error"))
+        self.assertEqual(out["steps"][0]["chosen_method"], "uia")
+        self.assertEqual(out["steps"][0]["uia_probe_attempts"], 2)
+
+    def test_live_reresolve_root_refused(self):
+        real = uia_mod.resolve_at_screen
+        calls = []
+
+        def fake(*a, **k):
+            calls.append(k)
+            if len(calls) == 1:
+                return {"ok": True, "method": "uia", "screen": [766, 842], "name": "\ue65f 新建任务",
+                        "control_type": "ButtonControl", "patterns": ["Invoke"], "preferred_action": "Invoke",
+                        "pattern": "Invoke", "top_hwnd": TOP, "ancestor_hops": 0, "name_matched": "resolved"}
+            return real(*a, **k)
+
+        _patch_hit(self, _root_doc())
+        with mock.patch("cu_perceive.uia.resolve_at_screen", side_effect=fake):
+            for method in ("auto", "uia"):
+                with self.subTest(method=method):
+                    calls.clear()
+                    out, click, inv = self._run(method, False)
+                    self.assertEqual(len(calls), 2)
+                    self._assert_refused(out, click, inv, "root_hit")
+                    self.assertFalse(out["steps"][0]["invoked"])
+                    self.assertNotIn("UIA invoke failed", out["error"])
+
+    def test_live_reresolve_uia_error_refused(self):
+        calls = []
+
+        def fake(*a, **k):
+            calls.append(k)
+            if len(calls) == 1:
+                return {"ok": True, "method": "uia", "screen": [766, 842], "name": "\ue65f 新建任务",
+                        "control_type": "ButtonControl", "patterns": ["Invoke"], "preferred_action": "Invoke",
+                        "pattern": "Invoke", "top_hwnd": TOP, "ancestor_hops": 0, "name_matched": "resolved"}
+            raise uia_mod.UiaError("ControlFromPoint(766,842) failed: boom")
+
+        _patch_hit(self, _root_doc())
+        with mock.patch("cu_perceive.uia.resolve_at_screen", side_effect=fake):
+            for method in ("auto", "uia"):
+                with self.subTest(method=method):
+                    calls.clear()
+                    out, click, inv = self._run(method, False)
+                    self._assert_refused(out, click, inv, "probe_failed")
+
+    def test_hwnd_mismatch_named_refused(self):
+        hit = FakeCtrl("\ue65f 新建任务", "ButtonControl", (700, 825, 830, 860), ["Invoke"], top=999)
+        _patch_hit(self, hit)
+        info = uia_mod.resolve_at_screen(
+            766, 842, expect_hwnd=TOP, expect_name="新建任务", expect_control_type="ButtonControl"
+        )
+        self.assertEqual(info["uia_unverified"], "other_window")
+        out, click, inv = self._run("auto", True)
+        self._assert_refused(out, click, inv, "other_window")
+        self.assertEqual(out["steps"][0]["uia_probe_attempts"], 1)
+
+    def test_no_element_named_refused(self):
+        _patch_hit(self, None)
+        out, click, inv = self._run("auto", True)
+        self._assert_refused(out, click, inv, "no_element")
+
+    def test_act_guard_without_uia_reason(self):
+        BASE = {
+            "ok": False,
+            "error": "no Invoke/Toggle/ExpandCollapse/Select pattern on element",
+            "method": "uia",
+            "screen": [766, 842],
+            "name": "",
+            "control_type": "GroupControl",
+            "patterns": [],
+            "preferred_action": None,
+            "top_hwnd": TOP,
+        }
+        with mock.patch("cu_perceive.uia.probe_at_screen", side_effect=lambda *a, **k: dict(BASE)):
+            out, click, inv = self._run("auto", True, specs=parse_steps(uia_name="新建任务"))
+            self._assert_refused(out, click, inv, "unverified")
+            out, _click, _inv = self._run("auto", True, specs=parse_steps(norm="582,767"))
+            self.assertTrue(out["ok"], out.get("error"))
+            self.assertEqual(out["steps"][0]["chosen_method"], "input")
+
+    def test_resolve_expected_reraises_missing_extra(self):
+        err = uia_mod.UiaError("missing")
+        err.install = "pip ..."
+        _patch_hits(self, err)
+        with self.assertRaises(uia_mod.UiaError):
+            uia_mod.resolve_expected(1, 1, expect_name="x")
+        _patch_hits(self, uia_mod.UiaError("boom"))
+        with self.assertRaises(uia_mod.UiaError):
+            uia_mod.resolve_expected(1, 1, expect_name=None)
+
+    def test_glyph_only_name_root_hit_keeps_no_pattern(self):
+        _patch_hit(self, _root_doc())
+        info = uia_mod.resolve_at_screen(766, 842, expect_name="\ue65f ", expect_control_type="ButtonControl")
+        self.assertEqual(info["reason"], "uia_no_pattern")
+        self.assertNotIn("uia_unverified", info)
+
+
 if __name__ == "__main__":
     unittest.main()
 

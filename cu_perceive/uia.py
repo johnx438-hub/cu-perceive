@@ -1,7 +1,7 @@
 """S2 method=uia: resolve AutomationElement at a screen point, Invoke/Toggle/Expand/Select.
 
 Non-invasive: no SetCursorPos / SendInput / PostMessage. Fail-closed if no pattern.
-S3: choose_auto_method / probe_at_screen — uia iff under stamp + preferred pattern, else input; a uia_target_mismatch refuses instead of falling back to input.
+S3: choose_auto_method / probe_at_screen — uia iff under stamp + preferred pattern, else input; a uia_target_mismatch (named node: wrong control, root hit, unconfirmed no-pattern hit, or failed probe) refuses instead of falling back to input.
 Soft-miss (no preferred pattern on a real element): one same-point reprobe, then choose uia|input.
 """
 from __future__ import annotations
@@ -185,6 +185,41 @@ def normalize_uia_name(name) -> str:
     ).casefold()
 
 
+UIA_UNVERIFIED_REPROBE = frozenset({"root_hit", "no_pattern_name_mismatch"})
+
+
+def mark_target_unverified(
+    info: dict[str, Any],
+    *,
+    sx: int,
+    sy: int,
+    expect_name: str | None,
+    expect_control_type: str | None,
+    why: str,
+    detail: str,
+) -> dict[str, Any]:
+    """D5: a step planned from a named stamp node whose hit UIA could not confirm.
+
+    why: root_hit | no_pattern_name_mismatch | no_element | other_window | probe_failed | unverified.
+    Mutates and returns info: ok=False, reason=uia_target_mismatch, expected, uia_unverified,
+    preferred_action=None (nothing may be invoked or input-clicked), error.
+    """
+    planned = f"{expect_control_type or '?'!r} {expect_name!r}"
+    info["ok"] = False
+    info["reason"] = "uia_target_mismatch"
+    info["uia_unverified"] = why
+    info["expected"] = {"name": expect_name, "control_type": expect_control_type}
+    info["preferred_action"] = None
+    info.setdefault("screen", [int(sx), int(sy)])
+    info.setdefault("method", "uia")
+    info.setdefault("patterns", [])
+    info["error"] = (
+        f"UIA could not confirm the planned {planned} at ({int(sx)},{int(sy)}): {detail}; "
+        "nothing invoked or clicked (the view may have changed: re-perceive with uia=true)"
+    )
+    return info
+
+
 def _invokable_ancestor(ctrl, hit: dict[str, Any], sx: int, sy: int, max_hops: int):
     """(control, info, hops) of the nearest ancestor with a preferred pattern, or None.
 
@@ -243,16 +278,36 @@ def resolve_at_screen(
     hit) the hit's name matches; type is checked on the node that matched by name;
     unnamed planned node = type check on the resolved control only. Else ok=False
     with reason=uia_target_mismatch.
+    D5: for a named expectation, a root hit, a no-pattern hit whose own name/type do
+    not match, no element, or an hwnd mismatch is reason=uia_target_mismatch with uia_unverified; a no-pattern
+    hit otherwise has reason=uia_no_pattern.
     """
     sx, sy = int(sx), int(sy)
+    want = normalize_uia_name(expect_name) if expect_name is not None else ""
+    if want == "":
+        expect_name = None
+    named = expect_name is not None
+
+    def type_ok(node: dict[str, Any]) -> bool:
+        return not expect_control_type or (
+            _ctype_base(str(node.get("control_type") or "")).lower()
+            == _ctype_base(str(expect_control_type)).lower()
+        )
+
     ctrl = element_from_screen_point(sx, sy)
     if ctrl is None:
-        return {
+        miss = {
             "ok": False,
             "error": f"no AutomationElement at screen=({sx},{sy})",
             "screen": [sx, sy],
             "method": "uia",
         }
+        if named:
+            return mark_target_unverified(
+                miss, sx=sx, sy=sy, expect_name=expect_name, expect_control_type=expect_control_type,
+                why="no_element", detail=miss["error"],
+            )
+        return miss
     info = describe_control(ctrl)
     hit_ctrl = ctrl
     info["ok"] = True
@@ -267,6 +322,11 @@ def resolve_at_screen(
                 f"UIA hit top_hwnd={top} != stamp hwnd={expect_hwnd} "
                 f"(element may be covered / wrong window)"
             )
+            if named:
+                return mark_target_unverified(
+                    info, sx=sx, sy=sy, expect_name=expect_name, expect_control_type=expect_control_type,
+                    why="other_window", detail=info["error"],
+                )
             return info
     hit = {"name": info.get("name"), "control_type": info.get("control_type")}
     info["ancestor_hops"] = 0
@@ -283,22 +343,37 @@ def resolve_at_screen(
                 info["error"] += (
                     "; the hit element's top-level window could not be read, so no ancestor was used"
                 )
+            info["reason"] = "uia_no_pattern"          # P3-1
+            if named:
+                hctype = str(info.get("control_type") or "")
+                if _is_root_type(hctype):
+                    return mark_target_unverified(
+                        info, sx=sx, sy=sy, expect_name=expect_name, expect_control_type=expect_control_type,
+                        why="root_hit",
+                        detail=f"the point hit the window/document root {hctype!r} {info.get('name')!r}",
+                    )
+                if normalize_uia_name(info.get("name")) == want and type_ok(info):
+                    info["name_matched"] = "hit"       # own name: auto may still input-click (today's fallback)
+                    return info
+                return mark_target_unverified(
+                    info, sx=sx, sy=sy, expect_name=expect_name, expect_control_type=expect_control_type,
+                    why="no_pattern_name_mismatch",
+                    detail=(f"the hit {hctype!r} {info.get('name')!r} has no Invoke/Toggle/ExpandCollapse/Select "
+                            f"pattern (nor an ancestor within {int(max_hops)} levels) and its own name is not the planned name"),
+                )
             return info
         anc, ainfo, hops = found
         info = {**ainfo, "ok": True, "screen": [sx, sy], "method": "uia", "_control": anc,
                 "ancestor_hops": hops, "hit": hit}
     info["pattern"] = info.get("preferred_action")
-    want = normalize_uia_name(expect_name) if expect_name is not None else ""
-    if want == "":
-        expect_name = None
+    if named and not info.get("ancestor_hops") and _is_root_type(str(info.get("control_type") or "")):
+        return mark_target_unverified(
+            info, sx=sx, sy=sy, expect_name=expect_name, expect_control_type=expect_control_type,
+            why="root_hit",
+            detail=f"the point hit the window/document root {info.get('control_type')!r} {info.get('name')!r}",
+        )
     if expect_name is None and not expect_control_type:
         return info
-
-    def type_ok(node: dict[str, Any]) -> bool:
-        return not expect_control_type or (
-            _ctype_base(str(node.get("control_type") or "")).lower()
-            == _ctype_base(str(expect_control_type)).lower()
-        )
 
     candidates: list[tuple[str, dict[str, Any]]] = [("resolved", info)]
     if info.get("ancestor_hops"):
@@ -341,6 +416,29 @@ def resolve_at_screen(
     return info
 
 
+def resolve_expected(
+    sx: int,
+    sy: int,
+    *,
+    expect_hwnd: int | None = None,
+    expect_name: str | None = None,
+    expect_control_type: str | None = None,
+    max_hops: int = UIA_ANCESTOR_MAX_HOPS,
+) -> dict[str, Any]:
+    """resolve_at_screen; for a named expectation a UiaError from the hit-test becomes
+    uia_target_mismatch (uia_unverified=probe_failed) instead of raising (D5).
+    A missing-extra UiaError (has .install) and unnamed steps still raise."""
+    try:
+        return resolve_at_screen(sx, sy, expect_hwnd=expect_hwnd, expect_name=expect_name,
+                                 expect_control_type=expect_control_type, max_hops=max_hops)
+    except UiaError as e:
+        if getattr(e, "install", None) or not normalize_uia_name(expect_name):
+            raise
+        return mark_target_unverified({}, sx=sx, sy=sy, expect_name=expect_name,
+                                      expect_control_type=expect_control_type,
+                                      why="probe_failed", detail=f"UIA hit-test failed: {e}")
+
+
 def probe_at_screen(
     sx: int,
     sy: int,
@@ -353,14 +451,15 @@ def probe_at_screen(
     expect: expect_name / expect_control_type for resolve_at_screen. A target mismatch
     clears preferred_action so method=auto never invokes the other control; act.py
     refuses the act on that reason (no input fallback).
+    D5: for a named expectation any probe failure is uia_target_mismatch (uia_unverified).
     """
     try:
-        info = resolve_at_screen(sx, sy, expect_hwnd=expect_hwnd, **expect)
+        info = resolve_expected(sx, sy, expect_hwnd=expect_hwnd, **expect)
         if info.get("reason") == "uia_target_mismatch":
             info["preferred_action"] = None
         return info
     except UiaError as e:
-        return {
+        miss = {
             "ok": False,
             "error": str(e),
             "screen": [int(sx), int(sy)],
@@ -368,8 +467,18 @@ def probe_at_screen(
             "preferred_action": None,
             "patterns": [],
         }
+        if normalize_uia_name(expect.get("expect_name")):
+            miss = mark_target_unverified(
+                miss, sx=sx, sy=sy,
+                expect_name=expect.get("expect_name"),
+                expect_control_type=expect.get("expect_control_type"),
+                why="probe_failed", detail=miss["error"],
+            )
+        if getattr(e, "install", None):
+            miss["install"] = e.install
+        return miss
     except Exception as e:
-        return {
+        miss = {
             "ok": False,
             "error": f"UIA probe failed: {e}",
             "screen": [int(sx), int(sy)],
@@ -377,6 +486,14 @@ def probe_at_screen(
             "preferred_action": None,
             "patterns": [],
         }
+        if normalize_uia_name(expect.get("expect_name")):
+            miss = mark_target_unverified(
+                miss, sx=sx, sy=sy,
+                expect_name=expect.get("expect_name"),
+                expect_control_type=expect.get("expect_control_type"),
+                why="probe_failed", detail=miss["error"],
+            )
+        return miss
 
 
 
@@ -393,6 +510,8 @@ def is_soft_uia_miss(info: dict[str, Any]) -> bool:
     # Do not reprobe on hwnd mismatch (resolve returns early with this error).
     if "stamp hwnd" in err and "top_hwnd=" in err:
         return False
+    if info.get("uia_unverified") in UIA_UNVERIFIED_REPROBE:
+        return True   # Chromium hit-tests flake to the Document root: reprobe once, result is re-checked
     if info.get("reason") == "uia_target_mismatch":
         return False
     if info.get("_control") is not None:
