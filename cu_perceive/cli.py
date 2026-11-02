@@ -38,6 +38,7 @@ def _slim_win(w: dict) -> dict:
         "ctime": w.get("ctime"),
         "rect": w.get("rect"),
         "minimized": w.get("minimized"),
+        **({"overlay": w["overlay"]} if w.get("overlay") else {}),
     }
 
 
@@ -365,7 +366,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         return 0
     if args.cmd == "windows":
-        from .windows import PICK_RULE, find_windows, list_windows, windows_map
+        from .windows import PICK_RULE, find_windows, list_windows, pick_info, windows_map
         if args.hwnd or args.title or args.exe:
             rows = find_windows(title=args.title or "", exe=args.exe or "", hwnd=args.hwnd)
             slim = [_slim_win(w) for w in rows if w]
@@ -375,6 +376,8 @@ def main(argv: list[str] | None = None) -> int:
                 "count": len(slim),
                 "pick_rule": PICK_RULE,
             }
+            if not args.hwnd:
+                out.update(pick_info([w for w in rows if w]))
             _emit(out, args)
             return 0 if slim else 1
         if args.no_map:

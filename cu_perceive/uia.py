@@ -159,28 +159,93 @@ def element_from_screen_point(sx: int, sy: int):
     return ctrl
 
 
+# Chromium/Electron: ControlFromPoint returns the label TextControl inside a ButtonControl.
+UIA_ANCESTOR_MAX_HOPS = 4
+# Never resolve a click to a whole document / pane / window.
+_UIA_ROOT_TYPES = frozenset({"document", "pane", "window"})
+
+
+def _is_root_type(ctype: str) -> bool:
+    return _ctype_base(ctype).lower() in _UIA_ROOT_TYPES
+
+
+def _bbox_contains(bbox: dict | None, sx: int, sy: int) -> bool:
+    if not isinstance(bbox, dict):
+        return False
+    try:
+        return int(bbox["left"]) <= sx < int(bbox["right"]) and int(bbox["top"]) <= sy < int(bbox["bottom"])
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def normalize_uia_name(name) -> str:
+    """Name for target matching: no private-use icon glyphs (U+E000-U+F8FF), no whitespace, casefolded."""
+    return "".join(
+        ch for ch in str(name or "") if not ("\ue000" <= ch <= "\uf8ff") and not ch.isspace()
+    ).casefold()
+
+
+def _invokable_ancestor(ctrl, hit: dict[str, Any], sx: int, sy: int, max_hops: int):
+    """(control, info, hops) of the nearest ancestor with a preferred pattern, or None.
+
+    The ancestor must share the hit element's top-level window and contain the point.
+    The walk stops at Document/Pane/Window (never resolves to them) and after max_hops.
+    """
+    if _is_root_type(str(hit.get("control_type") or "")):
+        return None
+    cur = ctrl
+    for hop in range(1, int(max_hops) + 1):
+        try:
+            parent = cur.GetParentControl()
+        except Exception:
+            return None
+        if parent is None:
+            return None
+        pinfo = describe_control(parent)
+        if _is_root_type(str(pinfo.get("control_type") or "")):
+            return None
+        if pinfo.get("top_hwnd") != hit.get("top_hwnd"):
+            return None
+        if not _bbox_contains(pinfo.get("bbox"), sx, sy):
+            return None
+        if pinfo.get("preferred_action"):
+            return parent, pinfo, hop
+        cur = parent
+    return None
+
+
 def resolve_at_screen(
     sx: int,
     sy: int,
     *,
     expect_hwnd: int | None = None,
+    expect_name: str | None = None,
+    expect_control_type: str | None = None,
+    max_hops: int = UIA_ANCESTOR_MAX_HOPS,
 ) -> dict[str, Any]:
     """Resolve element at screen point; return describe dict + ok flag.
 
     If expect_hwnd is set and element's top-level hwnd differs, ok=False.
+    If the hit element has no preferred pattern, walk up to max_hops ancestors
+    (same top-level window, rect containing the point, never Document/Pane/Window)
+    to the nearest one that has one; ``ancestor_hops`` and ``hit`` report it.
     If no preferred pattern, ok=False (caller must not fall back).
+    expect_name / expect_control_type (the stamp node a step was planned from): the
+    resolved control must have that name (glyphs and whitespace ignored) and type,
+    else ok=False with reason=uia_target_mismatch.
     """
+    sx, sy = int(sx), int(sy)
     ctrl = element_from_screen_point(sx, sy)
     if ctrl is None:
         return {
             "ok": False,
             "error": f"no AutomationElement at screen=({sx},{sy})",
-            "screen": [int(sx), int(sy)],
+            "screen": [sx, sy],
             "method": "uia",
         }
     info = describe_control(ctrl)
     info["ok"] = True
-    info["screen"] = [int(sx), int(sy)]
+    info["screen"] = [sx, sy]
     info["method"] = "uia"
     info["_control"] = ctrl  # live handle; strip before JSON if needed
     if expect_hwnd:
@@ -192,12 +257,42 @@ def resolve_at_screen(
                 f"(element may be covered / wrong window)"
             )
             return info
+    hit = {"name": info.get("name"), "control_type": info.get("control_type")}
+    info["ancestor_hops"] = 0
     if not info.get("preferred_action"):
-        info["ok"] = False
-        info["error"] = (
-            "no Invoke/Toggle/ExpandCollapse/Select pattern on element "
-            f"{info.get('control_type')!r} name={info.get('name')!r}"
+        found = _invokable_ancestor(ctrl, info, sx, sy, max_hops)
+        if found is None:
+            info["ok"] = False
+            info["error"] = (
+                "no Invoke/Toggle/ExpandCollapse/Select pattern on element "
+                f"{info.get('control_type')!r} name={info.get('name')!r} "
+                f"or on an ancestor within {int(max_hops)} levels"
+            )
+            return info
+        anc, ainfo, hops = found
+        info = {**ainfo, "ok": True, "screen": [sx, sy], "method": "uia", "_control": anc,
+                "ancestor_hops": hops, "hit": hit}
+    info["pattern"] = info.get("preferred_action")
+    if expect_name is not None or expect_control_type:
+        name_ok = expect_name is None or normalize_uia_name(info.get("name")) == normalize_uia_name(expect_name)
+        type_ok = not expect_control_type or (
+            _ctype_base(str(info.get("control_type") or "")).lower()
+            == _ctype_base(str(expect_control_type)).lower()
         )
+        if not (name_ok and type_ok):
+            info["ok"] = False
+            info["reason"] = "uia_target_mismatch"
+            info["expected"] = {"name": expect_name, "control_type": expect_control_type}
+            via = ""
+            if info.get("ancestor_hops"):
+                h = info.get("hit") or {}
+                via = (f" (ancestor {info['ancestor_hops']} level(s) above the hit "
+                       f"{h.get('control_type')!r} {h.get('name')!r})")
+            info["error"] = (
+                f"UIA element at ({sx},{sy}) is {info.get('control_type')!r} {info.get('name')!r}{via}, "
+                f"not the planned {expect_control_type or '?'!r} {expect_name!r}; nothing invoked "
+                "(the view may have changed: re-perceive with uia=true)"
+            )
     return info
 
 
@@ -206,10 +301,18 @@ def probe_at_screen(
     sy: int,
     *,
     expect_hwnd: int | None = None,
+    **expect,
 ) -> dict[str, Any]:
-    """Soft UIA hit-test for method=auto. Never raises; ok reflects uia-worthiness."""
+    """Soft UIA hit-test for method=auto. Never raises; ok reflects uia-worthiness.
+
+    expect: expect_name / expect_control_type for resolve_at_screen. A target mismatch
+    clears preferred_action so method=auto never invokes the other control.
+    """
     try:
-        return resolve_at_screen(sx, sy, expect_hwnd=expect_hwnd)
+        info = resolve_at_screen(sx, sy, expect_hwnd=expect_hwnd, **expect)
+        if info.get("reason") == "uia_target_mismatch":
+            info["preferred_action"] = None
+        return info
     except UiaError as e:
         return {
             "ok": False,
@@ -244,6 +347,8 @@ def is_soft_uia_miss(info: dict[str, Any]) -> bool:
     # Do not reprobe on hwnd mismatch (resolve returns early with this error).
     if "stamp hwnd" in err and "top_hwnd=" in err:
         return False
+    if info.get("reason") == "uia_target_mismatch":
+        return False
     if info.get("_control") is not None:
         return True
     if info.get("control_type"):
@@ -260,6 +365,7 @@ def probe_at_screen_with_reprobe(
     *,
     expect_hwnd: int | None = None,
     sleep_ms: int = 50,
+    **expect,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Probe once; on soft miss, sleep briefly and re-probe the same screen point once.
 
@@ -269,7 +375,7 @@ def probe_at_screen_with_reprobe(
     """
     import time
 
-    first = probe_at_screen(sx, sy, expect_hwnd=expect_hwnd)
+    first = probe_at_screen(sx, sy, expect_hwnd=expect_hwnd, **expect)
     meta: dict[str, Any] = {"reprobed": False}
     if not is_soft_uia_miss(first):
         return first, meta
@@ -279,7 +385,7 @@ def probe_at_screen_with_reprobe(
     meta["first_error"] = first.get("error")
     if sleep_ms and int(sleep_ms) > 0:
         time.sleep(int(sleep_ms) / 1000.0)
-    second = probe_at_screen(sx, sy, expect_hwnd=expect_hwnd)
+    second = probe_at_screen(sx, sy, expect_hwnd=expect_hwnd, **expect)
     return second, meta
 
 

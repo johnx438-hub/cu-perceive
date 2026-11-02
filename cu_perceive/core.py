@@ -491,11 +491,16 @@ def perceive(
     identity = None
     capture_meta = None
     warnings: list[str] = []
+    pick_meta: dict = {}
     if src is None and hwnd is None and (title or exe):
-        from .windows import find_window
-        win = find_window(title=title or "", exe=exe or "")
+        from .windows import find_windows, pick_info
+        ranked = find_windows(title=title or "", exe=exe or "")
+        win = ranked[0] if ranked else None
         if win is None:
             raise RuntimeError(f"no window title={title!r} exe={exe!r}")
+        pick_meta = pick_info(ranked)
+        if pick_meta.get("pick_hint"):
+            warnings.append(pick_meta["pick_hint"])
         hwnd = int(win["hwnd"])
     elif hwnd is not None:
         from .windows import find_window
@@ -655,6 +660,7 @@ def perceive(
             payload["focused"] = bool(focus) and pin_extra.get("foreground_ok") is not False
         if warnings:
             payload["warnings"] = warnings
+        payload.update(pick_meta)
         if verify_light:
             payload["roi"] = list(roi_px)
             payload["full_width"] = full_w
@@ -668,6 +674,15 @@ def perceive(
             payload["uia_count"] = len(uia_nodes)
             payload.update(uia_meta)
             payload["ok"] = bool(uia_ok)
+            win_cls = str((identity or {}).get("class") or (win or {}).get("class") or "")
+            if uia_ok and not uia_nodes and not uia_meta.get("uia_all_occluded") \
+                    and win_cls.startswith("Chrome_WidgetWin_"):
+                # Chromium/Electron windows (dialogs in particular) often expose no a11y tree.
+                payload["uia_fallback"] = "no_accessibility_tree"
+                payload["uia_fallback_hint"] = (
+                    "this Chromium/Electron window exposes no UIA nodes; click by norm from the grid "
+                    "map, or perceive with ocr=true and click item ids"
+                )
             if uia_error:
                 payload["error"] = uia_error
         attach_wsl(payload, 'png', 'map', 'grid', 'anno', 'json')

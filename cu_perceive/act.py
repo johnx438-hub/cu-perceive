@@ -1069,6 +1069,42 @@ def enrich_post_steps(frame: dict, steps: list[dict], *, double: bool = False) -
     return steps
 
 
+def uia_step_expectation(frame: dict, step: dict) -> dict:
+    """expect_name / expect_control_type of the stamp node a step was planned from
+    (uia_name / uia:#N / a UIA id), {} for plain coordinate steps."""
+    node_id = step.get("uia_node_id")
+    if node_id is None and step.get("uia_name") is None:
+        return {}
+    node = None
+    if node_id is not None:
+        for n in (frame or {}).get("uia_nodes") or []:
+            try:
+                if int(n.get("id")) == int(node_id):
+                    node = n
+                    break
+            except (TypeError, ValueError):
+                continue
+    name = (node or {}).get("name")
+    if name in (None, ""):
+        name = step.get("uia_name")
+    out = {"expect_name": None if name is None else str(name)}
+    ctype = (node or {}).get("control_type")
+    if ctype:
+        out["expect_control_type"] = str(ctype)
+    return out
+
+
+def _note_uia_mismatch(out: dict, step: dict) -> None:
+    """Copy a uia_target_mismatch from a step onto the act result (both names)."""
+    info = step.get("uia") or {}
+    if info.get("reason") != "uia_target_mismatch":
+        return
+    out["reason"] = "uia_target_mismatch"
+    out["expected_uia"] = info.get("expected")
+    out["resolved_uia"] = {"name": info.get("name"), "control_type": info.get("control_type")}
+    out["hint"] = "re-perceive with uia=true and pick the target from the new uia_nodes; nothing was invoked"
+
+
 def enrich_uia_steps(frame: dict, steps: list[dict], *, double: bool = False) -> list[dict]:
     """Resolve UIA element at each planned screen point (dry-run / live). No invoke."""
     from .uia import public_element_info, resolve_at_screen
@@ -1089,7 +1125,7 @@ def enrich_uia_steps(frame: dict, steps: list[dict], *, double: bool = False) ->
                 f"method=uia is left-click only in S2 (got button={btn!r})"
             )
         sx, sy = int(step["screen"][0]), int(step["screen"][1])
-        info = resolve_at_screen(sx, sy, expect_hwnd=expect)
+        info = resolve_at_screen(sx, sy, expect_hwnd=expect, **uia_step_expectation(frame, step))
         step["method"] = "uia"
         step["uia"] = public_element_info(info, frame)
         # keep live control for --go path
@@ -1132,7 +1168,9 @@ def enrich_auto_steps(frame: dict, steps: list[dict], *, double: bool = False) -
                 f"method=auto is left-click only in S3 (got button={btn!r})"
             )
         sx, sy = int(step["screen"][0]), int(step["screen"][1])
-        info, meta = probe_at_screen_with_reprobe(sx, sy, expect_hwnd=expect)
+        info, meta = probe_at_screen_with_reprobe(
+            sx, sy, expect_hwnd=expect, **uia_step_expectation(frame, step)
+        )
         chosen = choose_auto_method(
             preferred_action=info.get("preferred_action"),
             top_hwnd=info.get("top_hwnd"),
@@ -1542,7 +1580,7 @@ def _set_refusal(out: dict, reason: str, hint: str, window: int | dict | None = 
     out["hint"] = hint
     if isinstance(window, dict):
         out["blocking_window"] = {"hwnd": window.get("hwnd"), "title": window.get("title")}
-        for extra in ("class", "focus_hwnd"):
+        for extra in ("class", "focus_hwnd", "pid"):
             if window.get(extra) is not None:
                 out["blocking_window"][extra] = window.get(extra)
     elif window:
@@ -1551,6 +1589,10 @@ def _set_refusal(out: dict, reason: str, hint: str, window: int | dict | None = 
 
 HINT_FOCUS = "retry with focus=true (CLI --focus) to bring the stamp window to the front"
 HINT_REPERCEIVE = "re-perceive the window and act on the new stamp"
+POINT_OFF_TARGET_HINT = (
+    "the click would land on another app or on nothing (point outside the stamp window, or a transparent "
+    "overlay window): pin the app's main window (windows(exe=...) suggested_hwnd) and perceive again"
+)
 
 
 def _identity_abort(out: dict, frame: dict, steps: list[dict], n: int) -> bool:
@@ -1972,9 +2014,9 @@ def _point_target_error(frame: dict, step: dict, *, focus: bool, out: dict) -> t
     if not _has_window(frame):
         return None, None
     hwnd = int(frame["hwnd"])
-    from .windows import point_owner
+    from .windows import point_off_target, point_owner
 
-    def check() -> tuple[str | None, dict | None, bool]:
+    def check() -> tuple[str | None, dict | None, str | None]:
         points = step_points(step)
         if step.get("via") == "scroll" and not points:
             from . import _win32
@@ -1982,14 +2024,22 @@ def _point_target_error(frame: dict, step: dict, *, focus: bool, out: dict) -> t
             points = [("scroll (cursor)", list(_win32.cursor_pos()))]
         for label, (x, y) in points:
             ok, info = point_owner(hwnd, int(x), int(y))
+            off = point_off_target(hwnd, int(x), int(y), (info or {}).get("hwnd"), ok)
+            if off:
+                return (
+                    f"{label} point ({int(x)},{int(y)}) does not reach stamp window {hwnd} "
+                    f"({off['why']}): it lands on hwnd {off.get('hwnd')} {off.get('title')!r} pid {off.get('pid')}",
+                    {**info, **off, "point": [int(x), int(y)], "what": label},
+                    "off_target",
+                )
             if not ok:
                 return (
                     f"{label} point ({int(x)},{int(y)}) is covered by hwnd {info.get('hwnd')} "
                     f"{info.get('title')!r}, not stamp window {hwnd}",
                     {**info, "point": [int(x), int(y)], "what": label},
-                    True,
+                    "covered",
                 )
-        return None, None, False
+        return None, None, None
 
     try:
         err, info, covered = check()
@@ -1998,6 +2048,10 @@ def _point_target_error(frame: dict, step: dict, *, focus: bool, out: dict) -> t
         return f"could not check which window is under the target point ({e})", None
     if not covered:
         return None, None
+    if covered == "off_target":
+        # Raising the window does not help here, so focus is not tried.
+        _set_refusal(out, "point_not_on_target", POINT_OFF_TARGET_HINT, info)
+        return err, info
     if not focus:
         _set_refusal(out, "point_covered", HINT_FOCUS + ", or pick a point that is not covered"
                      + _blocking_hint((info or {}).get("hwnd"), (info or {}).get("title")), info)
@@ -2012,6 +2066,9 @@ def _point_target_error(frame: dict, step: dict, *, focus: bool, out: dict) -> t
     except Exception as e:
         _set_refusal(out, "point_unreadable", "retry; if it keeps failing, re-perceive")
         return f"could not check which window is under the target point after --focus ({e})", None
+    if covered == "off_target":
+        _set_refusal(out, "point_not_on_target", POINT_OFF_TARGET_HINT, info2)
+        return err2, info2
     if covered:
         _set_refusal(
             out, "point_covered_after_focus",
@@ -2055,7 +2112,7 @@ def occluded_points(frame: dict, steps: list[dict], *, method: str) -> list[dict
     frame = frame or {}
     if not _has_window(frame) or method in ("post", "uia"):
         return None
-    from .windows import point_owner
+    from .windows import point_off_target, point_owner
 
     found: list[dict] = []
     try:
@@ -2064,7 +2121,11 @@ def occluded_points(frame: dict, steps: list[dict], *, method: str) -> list[dict
                 continue
             for label, (x, y) in step_points(step):
                 ok, info = point_owner(int(frame["hwnd"]), int(x), int(y))
-                if not ok:
+                off = point_off_target(int(frame["hwnd"]), int(x), int(y), (info or {}).get("hwnd"), ok)
+                if off:
+                    found.append({"step": n, "what": label, "point": [int(x), int(y)], **info, **off,
+                                  "not_on_target": True})
+                elif not ok:
                     found.append({"step": n, "what": label, "point": [int(x), int(y)], **info})
     except Exception:
         return None
@@ -2634,6 +2695,7 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
         if bad:
             out["ok"] = False
             out["error"] = bad[0].get("uia_error") or "UIA resolve failed"
+            _note_uia_mismatch(out, bad[0])
             # strip live handles before return
             for s in steps:
                 s.pop("_uia_control", None)
@@ -2723,6 +2785,19 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                     "window: --go will refuse; add a click on the target field"
                 )
         occluded = occluded_points(frame or {}, steps, method=method_n)
+        off_target = [o for o in occluded or [] if o.pop("not_on_target", False)]
+        if off_target:
+            occluded = [o for o in occluded if o not in off_target]
+            out["points_not_on_target"] = off_target
+            warns.append(
+                "planned point(s) do not reach the stamp window's app: "
+                + ", ".join(
+                    f"step {o['step']} {o['what']} ({o['point'][0]},{o['point'][1]}) {o['why']}, lands on hwnd "
+                    f"{o.get('hwnd')} {o.get('title')!r} pid {o.get('pid')}"
+                    for o in off_target
+                )
+                + "; --go will refuse with reason=point_not_on_target"
+            )
         if occluded is not None:
             out["occluded_points"] = occluded
         if occluded:
@@ -2806,6 +2881,7 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                             step["screen"][0],
                             step["screen"][1],
                             expect_hwnd=int((frame or {}).get("hwnd") or 0) or None,
+                            **uia_step_expectation(frame or {}, step),
                         )
                         if not info.get("ok"):
                             raise UiaError(info.get("error") or "UIA re-resolve failed")
@@ -2872,6 +2948,7 @@ def run_chain(frame: dict, specs: list[dict], *, dry_run: bool = True, double: b
                         step["screen"][0],
                         step["screen"][1],
                         expect_hwnd=int((frame or {}).get("hwnd") or 0) or None,
+                        **uia_step_expectation(frame or {}, step),
                     )
                     if not info.get("ok"):
                         raise UiaError(info.get("error") or "UIA re-resolve failed")
