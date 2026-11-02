@@ -97,6 +97,7 @@ def _declare(name: str, dll) -> None:
             "GetWindowTextW": ([HWND, wintypes.LPWSTR, ctypes.c_int], ctypes.c_int),
             "GetWindowThreadProcessId": ([HWND, ctypes.POINTER(wintypes.DWORD)], wintypes.DWORD),
             "GetWindowRect": ([HWND, ctypes.POINTER(wintypes.RECT)], wintypes.BOOL),
+            "GetWindowLongW": ([HWND, ctypes.c_int], ctypes.c_long),
             "GetClientRect": ([HWND, ctypes.POINTER(wintypes.RECT)], wintypes.BOOL),
             "GetDC": ([HWND], HDC),
             "ReleaseDC": ([HWND, HDC], ctypes.c_int),
@@ -382,6 +383,11 @@ def process_creation_time(pid: int) -> int | None:
         return value or None
     finally:
         k32.CloseHandle(handle)
+
+
+def window_exstyle(hwnd: int) -> int:
+    """GWL_EXSTYLE of hwnd (0 if the window is gone)."""
+    return int(_dll("user32").GetWindowLongW(int(hwnd), -20)) & 0xFFFFFFFF
 
 
 def window_rect(hwnd: int) -> tuple[int, int, int, int]:

@@ -28,6 +28,12 @@ def _act_type_key_order(argv: list[str] | None) -> list[dict] | None:
 
 
 
+PERCEIVE_PASSTHROUGH = (
+    "pick_reason", "deprioritized", "pick_warning", "pick_overlay", "pick_hint",
+    "suggested_hwnd", "uia_fallback", "uia_fallback_hint",
+)
+
+
 def _slim_win(w: dict) -> dict:
     return {
         "id": w.get("id"),
@@ -38,6 +44,7 @@ def _slim_win(w: dict) -> dict:
         "ctime": w.get("ctime"),
         "rect": w.get("rect"),
         "minimized": w.get("minimized"),
+        **({"overlay": w["overlay"]} if w.get("overlay") else {}),
     }
 
 
@@ -165,7 +172,7 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument(
         "--method",
         default="input",
-        help="contact method: input (SendInput, default) | post (HWND PostMessage, S1) | uia (UIA patterns, S2) | auto (S3: uia if hit+pattern else input; left click only)",
+        help="contact method: input (SendInput, default) | post (HWND PostMessage, S1) | uia (UIA patterns, S2) | auto (S3: uia if hit+pattern else input; a step from a named UIA node never falls back to an input click unless UIA matched the hit's own name, else uia_target_mismatch; left click only)",
     )
     a.add_argument("--double", action="store_true")
     a.add_argument("--type", "--text", dest="text", help="type text. Default pastes (clipboard + Ctrl+V) and restores the previous clipboard text. CLI: --type or --text; MCP field is text")
@@ -340,6 +347,9 @@ def main(argv: list[str] | None = None) -> int:
         for k in ("identity", "capture", "focused", "warnings"):
             if k in out:
                 slim[k] = out[k]
+        for k in PERCEIVE_PASSTHROUGH:
+            if k in out:
+                slim[k] = out[k]
         if out.get("verify_light"):
             slim["verify_light"] = True
             slim["roi"] = out.get("roi")
@@ -365,7 +375,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         return 0
     if args.cmd == "windows":
-        from .windows import PICK_RULE, find_windows, list_windows, windows_map
+        from .windows import PICK_RULE, find_windows, list_windows, pick_info, windows_map
         if args.hwnd or args.title or args.exe:
             rows = find_windows(title=args.title or "", exe=args.exe or "", hwnd=args.hwnd)
             slim = [_slim_win(w) for w in rows if w]
@@ -375,6 +385,8 @@ def main(argv: list[str] | None = None) -> int:
                 "count": len(slim),
                 "pick_rule": PICK_RULE,
             }
+            if not args.hwnd:
+                out.update(pick_info([w for w in rows if w]))
             _emit(out, args)
             return 0 if slim else 1
         if args.no_map:

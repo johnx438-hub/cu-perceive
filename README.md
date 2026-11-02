@@ -98,6 +98,21 @@ other tool calls either. Live `act` chains still run one at a time.
 
 ## Window capture
 
+`windows --exe X` / `--title X` (and `perceive` by exe or title) rank windows
+that look like overlays below normal ones: `WS_EX_LAYERED`,
+`WS_EX_TOOLWINDOW` or `WS_EX_NOACTIVATE`, under 120x120 px, or less than half
+on any monitor (for example Xunlei's `suspension-renderer` float ball). Such a
+row carries `overlay` with the reasons. When a normal window was picked over
+one, the result has `pick_reason: "overlay_deprioritized"` and
+`deprioritized`. When the pick is still an overlay, it has
+`pick_warning: "overlay_candidate"`, `pick_overlay`, `pick_hint` and
+`suggested_hwnd` (a normal match, or null). `--hwnd` is not affected.
+
+`perceive --uia` on a `Chrome_WidgetWin_*` window that returns no UIA nodes
+adds `uia_fallback: "no_accessibility_tree"` and `uia_fallback_hint`: click by
+`norm` from the grid map, or use `ocr=true`. Electron dialogs often have no
+accessibility tree.
+
 `perceive --hwnd N` grabs the client area without touching z-order. Backends,
 tried in order (`--capture auto`, the default):
 
@@ -281,7 +296,22 @@ every json in a large output directory.
   are covered right now in `occluded_points` and warns. This applies to
   `--method input` and to `--method auto` steps that chose input; `uia` and
   `post` don't need the point to be visible and are unchanged.
+- Each such point is also checked against the stamp window's app. The act
+  refuses with `reason: "point_not_on_target"` (before any input, and without
+  trying `--focus`, which would not help) when nothing is at the point, the
+  point is outside the stamp window's rect and not on a window it owns, the
+  window at the point belongs to another process, or the stamp window is a
+  layered (transparent) overlay that lets the click through to another app.
+  `point_window` and `blocking_window` then carry `why` (`no_window`,
+  `outside_window`, `other_process`, `transparent_overlay`), the hit `hwnd`,
+  `title` and `pid`. A dry run lists such points in `points_not_on_target`
+  and warns. A covering window inside the rect is still `point_covered`.
+  A point outside the rect is allowed only when the window there is owned by the stamp window (its
+  GW_OWNER chain reaches it, for example its dialogs and popups) or is a popup menu on its thread, and
+  belongs to the same process. Any other window outside the rect, including another top-level window of
+  the same process, is refused with `outside_window`.
 - Every refusal also carries `reason` (a stable code such as `point_covered`,
+  `point_not_on_target`, `uia_target_mismatch`, `uia_no_pattern`,
   `not_foreground`, `not_foreground_after_focus`, `point_covered_after_focus`,
   `identity_changed` or `no_window_stamp`), `hint` (what to do next, for example
   "retry with focus=true") and, when another window is in the way,
@@ -315,7 +345,37 @@ every json in a large output directory.
   not wait. `after` is the foreground window when the act returns.
 - `--method uia` without the `uia` extra exits with code 3 and prints the same
   `missing_extra` / `install` fields as `perceive --uia`. `--method auto`
-  without it falls back to input and says so in `warnings`.
+  without it falls back to input and says so in `warnings`, except for a step planned from a named UIA node,
+  which is refused (`uia_target_mismatch`, `uia_unverified: "probe_failed"`).
+- `--method uia` / `auto` hit-test the point with UIA. Chromium/Electron apps
+  return the label inside a button (a `TextControl` without patterns), so when
+  the hit element has no Invoke/Toggle/ExpandCollapse/Select pattern, `act`
+  walks up at most 4 ancestors to the nearest one that has one. The ancestor
+  must be in the same top-level window and contain the point, and the walk
+  never resolves to a Document, Pane or Window; otherwise it fails closed as
+  before. `steps[i].uia` reports the resolved `name`, `control_type`,
+  `pattern`, `ancestor_hops` (0 for a direct hit) and `hit` (the element the
+  point actually hit).
+- A step planned from a stamp node (`--uia-name`, `uia:#N`, a UIA id) must resolve to that
+  node. The name matches when the resolved control's name, or (after an ancestor walk) the name of the element
+  the point hit, equals the node's name, with private-use icon glyphs U+E000-U+F8FF and whitespace ignored (so
+  `\ue65f 新建任务` matches `新建任务`). The control type is checked on the element that matched by name. A node
+  without a name is matched by control type and containment only. Otherwise the act fails closed with
+  `reason: "uia_target_mismatch"`, `expected_uia` and `resolved_uia`, and
+  nothing is invoked or clicked. For a node that has a name, `method=uia` and `method=auto` also refuse with
+  `uia_target_mismatch` (plus `uia_unverified` saying why) when UIA cannot confirm the hit: the point hits a
+  Document, Pane or Window (`root_hit`); the hit has no Invoke/Toggle/ExpandCollapse/Select pattern, no ancestor
+  passes the walk, and the hit's own name or type is not the node's (`no_pattern_name_mismatch`); nothing is
+  found at the point (`no_element`); the hit is in another top-level window (`other_window`); or the UIA
+  hit-test fails (`probe_failed`). A root or no-pattern hit is probed once more under `auto` before it refuses.
+  `method=auto` then sends no input click: a dry run has `planned_foreground_click_count: 0` and `--go` sends
+  nothing. A no-pattern hit whose own name and type match the node is still clicked with input under `auto`;
+  `method=uia` refuses it with `reason: "uia_no_pattern"`. Steps given only by `--norm` / `--xy`, and nodes
+  without a name, keep the fallback: `auto` uses an input click when UIA finds no invokable control there.
+  `method=input` (the default) does not check the name: with `--uia-name`, `uia:#N` or a UIA id it clicks the
+  node's coordinates from the stamp, so on a stale stamp it clicks whatever is there now. For Chromium/Electron
+  apps (`Chrome_WidgetWin_*` windows, for example Xunlei), act on UIA nodes with `method=auto`, which checks the
+  name and refuses as above.
 
 ### Verification and operator stop (MCP)
 

@@ -100,6 +100,10 @@ def list_windows(include_minimized: bool = True) -> list[dict]:
                 exe_path = proc.exe()
             except (psutil.AccessDenied, psutil.NoSuchProcess):
                 exe, exe_path = "", ""
+            try:
+                exstyle = int(win32gui.GetWindowLong(hwnd, _GWL_EXSTYLE)) & 0xFFFFFFFF
+            except Exception:
+                exstyle = None
             rows.append({
                 "hwnd": int(hwnd),
                 "title": title,
@@ -110,6 +114,7 @@ def list_windows(include_minimized: bool = True) -> list[dict]:
                 "class": cls,
                 "rect": [left, top, right, bottom],
                 "minimized": iconic,
+                "exstyle": exstyle,
             })
         except Exception:
             pass
@@ -120,10 +125,97 @@ def list_windows(include_minimized: bool = True) -> list[dict]:
 
 
 PICK_RULE = (
-    "When title/exe match multiple windows: prefer non-minimized, then EnumWindows "
-    "z-order (topmost first), then larger area. Not guaranteed to be GetForegroundWindow. "
-    "Pass hwnd to pin one. Callers should use the windows[] array when several match."
+    "When title/exe match multiple windows: prefer windows that do not look like overlays "
+    "(WS_EX_LAYERED / WS_EX_TOOLWINDOW / WS_EX_NOACTIVATE, under "
+    "120x120, or under half on any monitor; see each row's overlay[]), then exact/substring "
+    "title hits, then non-minimized, then "
+    "EnumWindows z-order (topmost first), then larger area. Not guaranteed to be "
+    "GetForegroundWindow. Pass hwnd to pin one. Callers should use the windows[] array when "
+    "several match. pick_warning=overlay_candidate means the pick itself looks like an overlay."
 )
+
+_GWL_EXSTYLE = -20
+WS_EX_TOOLWINDOW = 0x00000080
+WS_EX_LAYERED = 0x00080000
+WS_EX_NOACTIVATE = 0x08000000
+OVERLAY_MIN_PX = 120
+OVERLAY_MIN_ONSCREEN = 0.5
+
+
+def monitor_rects() -> list[tuple[int, int, int, int]] | None:
+    """(left, top, right, bottom) of each monitor, None when they cannot be read."""
+    try:
+        import win32api
+
+        return [tuple(int(v) for v in m[2]) for m in win32api.EnumDisplayMonitors()]
+    except Exception:
+        return None
+
+
+def overlay_reasons(w: dict, monitors: list | None = None) -> list[str]:
+    """Why a window row looks like an overlay rather than an app window ([] = normal).
+
+    layered / toolwindow / noactivate from its extended style; tiny when either side is
+    under OVERLAY_MIN_PX; offscreen when under half of its rect is on any one monitor.
+    Geometry is not judged for minimized windows (their rect is a -32000 stub).
+    """
+    out: list[str] = []
+    ex = w.get("exstyle")
+    if isinstance(ex, int):
+        if ex & WS_EX_LAYERED:
+            out.append("layered")
+        if ex & WS_EX_TOOLWINDOW:
+            out.append("toolwindow")
+        if ex & WS_EX_NOACTIVATE:
+            out.append("noactivate")
+    if w.get("minimized"):
+        return out
+    try:
+        left, top, right, bottom = (int(v) for v in w["rect"][:4])
+    except (KeyError, TypeError, ValueError):
+        return out
+    rw, rh = right - left, bottom - top
+    if rw < OVERLAY_MIN_PX or rh < OVERLAY_MIN_PX:
+        out.append("tiny")
+    if monitors and rw > 0 and rh > 0:
+        best = 0
+        for ml, mt, mr, mb in monitors:
+            iw = max(0, min(right, mr) - max(left, ml))
+            ih = max(0, min(bottom, mb) - max(top, mt))
+            best = max(best, iw * ih)
+        if best < OVERLAY_MIN_ONSCREEN * rw * rh:
+            out.append("offscreen")
+    return out
+
+
+def pick_info(rows: list[dict]) -> dict:
+    """Extra pick output for a ranked find_windows() list (title/exe pick only).
+
+    pick_reason=overlay_deprioritized when an overlay-looking match was ranked below a
+    normal one; pick_warning=overlay_candidate (+ suggested_hwnd when a normal match
+    exists) when the pick itself looks like an overlay.
+    """
+    if not rows:
+        return {}
+    out: dict = {}
+    first = rows[0]
+    normal = [w for w in rows if not w.get("overlay")]
+    overlays = [w for w in rows if w.get("overlay")]
+    if first.get("overlay"):
+        out["pick_warning"] = "overlay_candidate"
+        out["pick_overlay"] = list(first["overlay"])
+        out["suggested_hwnd"] = int(normal[0]["hwnd"]) if normal else None
+        out["pick_hint"] = (
+            f"hwnd {first.get('hwnd')} {first.get('title')!r} looks like an overlay "
+            f"({', '.join(first['overlay'])}): clicks on its transparent parts reach other windows; "
+            + (f"pass hwnd={out['suggested_hwnd']}" if normal else "pin the app's main window by hwnd")
+        )
+    elif overlays:
+        out["pick_reason"] = "overlay_deprioritized"
+        out["deprioritized"] = [
+            {"hwnd": w.get("hwnd"), "title": w.get("title"), "overlay": list(w["overlay"])} for w in overlays
+        ]
+    return out
 
 
 def _match_windows(title: str = "", exe: str = "") -> list[dict]:
@@ -153,17 +245,26 @@ def _score_match(w: dict, title_l: str, exe_l: str, z_index: int) -> tuple:
     area = max(0, right - left) * max(0, bottom - top)
     if w.get("minimized"):
         area = 0
-    return (exact, title_hit, exe_in_title, 0 if w.get("minimized") else 1, -int(z_index), area)
+    return (-len(w.get("overlay") or ()), exact, title_hit, exe_in_title,
+            0 if w.get("minimized") else 1, -int(z_index), area)
 
 
 def find_windows(title: str = "", exe: str = "", hwnd: int | None = None) -> list[dict]:
-    """All matches for title/exe, sorted best-first by PICK_RULE. hwnd => 0 or 1 row."""
+    """All matches for title/exe, sorted best-first by PICK_RULE. hwnd => 0 or 1 row.
+
+    Overlay-looking matches carry overlay=[reasons] (see overlay_reasons).
+    """
     if hwnd is not None:
         one = find_window(hwnd=hwnd)
         return [one] if one else []
     title_l = (title or "").lower()
     exe_l = (exe or "").lower()
     matches = _match_windows(title=title, exe=exe)
+    monitors = monitor_rects() if matches else None
+    for w in matches:
+        reasons = overlay_reasons(w, monitors)
+        if reasons:
+            w["overlay"] = reasons
     ranked = sorted(
         enumerate(matches),
         key=lambda pair: _score_match(pair[1], title_l, exe_l, pair[0]),
@@ -699,6 +800,60 @@ def point_owner(hwnd: int, x: int, y: int) -> tuple[bool, dict]:
     at = window_at_point(x, y)
     info = {"hwnd": at, "title": _win32.window_title(at) if at else ""}
     return owned_by(at, hwnd), info
+
+
+def point_off_target(hwnd: int, x: int, y: int, at: int, owner_ok: bool) -> dict | None:
+    """Second check after point_owner: does a mouse event at (x, y) miss the target app?
+
+    owner_ok must be point_owner's result, i.e. the window at the point is the
+    target, a window in the target's GW_OWNER chain (owned dialog/popup), or a popup
+    menu on its thread. Only then may a point lie outside the target rect, and it is
+    still refused when that window is another process. Any other window outside the
+    rect, including another top-level window of the same process, is outside_window.
+
+    Returns None (no objection, or hwnd's pid/rect cannot be read: point_owner decides)
+    or {why, hwnd, title, pid, target_pid} with why in other_process | no_window |
+    outside_window | transparent_overlay.
+    """
+    from . import _win32
+
+    x, y, at = int(x), int(y), int(at or 0)
+    try:
+        target = int(hwnd)
+        target_pid = int(_win32.window_pid(target) or 0)
+        at_pid = int(_win32.window_pid(at) or 0) if at else 0
+    except Exception:
+        return None
+    why = None
+    if owner_ok:
+        if target_pid and at_pid and at_pid != target_pid:
+            why = "other_process"
+    else:
+        try:
+            root = int(_win32.root_window(target) or target)
+            left, top, right, bottom = _win32.window_rect(root)
+        except Exception:
+            return None
+        if right <= left or bottom <= top:
+            return None
+        if not at:
+            why = "no_window"
+        elif not (left <= x < right and top <= y < bottom):
+            why = "outside_window"
+        else:
+            try:
+                layered = bool(_win32.window_exstyle(root) & WS_EX_LAYERED)
+            except Exception:
+                layered = False
+            if layered and target_pid and at_pid and at_pid != target_pid:
+                why = "transparent_overlay"
+    if not why:
+        return None
+    try:
+        title = _win32.window_title(at) if at else ""
+    except Exception:
+        title = ""
+    return {"why": why, "hwnd": at, "title": title, "pid": at_pid or None, "target_pid": target_pid or None}
 
 
 def client_origin(hwnd: int) -> dict | None:

@@ -270,7 +270,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
     from .core import perceive
     from .extras import MissingExtraError
     from .launch import launch, list_apps
-    from .windows import PICK_RULE, find_windows, list_windows, windows_map
+    from .windows import PICK_RULE, find_windows, list_windows, pick_info, windows_map
 
     _major, _server_cls, Image = mcp_api()
 
@@ -324,6 +324,9 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         hwnd 0 / empty title+exe = all windows (+ optional map). map_inline=false = JSON only.
         title and/or exe set (no hwnd): returns windows[] of ALL matches (browser multi-window safe),
         plus window=picked by pick_rule (non-minimized, then EnumWindows z-top, then area — not guaranteed foreground).
+        Overlay-looking windows (layered/toolwindow/noactivate, tiny, mostly off-screen; listed in a row's overlay
+        field) rank below normal ones (pick_reason "overlay_deprioritized"); a pick that still is one carries
+        pick_warning "overlay_candidate" and suggested_hwnd.
         hwnd set: one row in windows[] / window. Does not click.
         query: case-insensitive substring of title OR exe (title matches first); cannot be combined with title/exe.
         profile selects a configuration profile for this call. show_config attaches the effective config."""
@@ -346,6 +349,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
                 rows = find_windows(title=title or "", exe=exe or "")
             slim = [
                 {k: w.get(k) for k in ("hwnd", "title", "exe", "pid", "ctime", "minimized", "rect", "class")}
+                | ({"overlay": w["overlay"]} if w.get("overlay") else {})
                 for w in rows
                 if w
             ]
@@ -355,6 +359,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
                 "window": picked,
                 "count": len(slim),
                 "pick_rule": PICK_RULE,
+                **({} if hwnd_n else pick_info([w for w in rows if w])),
             }
 
         if not map:
@@ -608,7 +613,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         On go it is pressed only while the stamp window (or one it owns) is in front, else hold_key_refused_step.
         method=input (default SendInput) | post (S1) | uia (S2) | auto (S3).
         post/uia/auto: single left clicks only (norm/xy/ids); reject drag/path/scroll/type/hold.
-        uia: Invoke|Toggle|Expand|Select; no silent fallback. auto: probe UIA → chosen_method=uia|input (never post); go runs chosen only.
+        uia: Invoke|Toggle|Expand|Select; no silent fallback. auto: probe UIA → chosen_method=uia|input (never post); go runs chosen only. A step from a named uia node (uia_name / uia:#N / uia id) is refused with reason=uia_target_mismatch (uia_unverified) when UIA cannot confirm it (root hit, unmatched no-pattern hit, probe failure); auto never input-clicks it.
         E3 same-stamp: multi norm with ";" or repeated clicks on one stamp; max_age_sec / strict_stamp
         pass through to stamp_check (ROI/moved stamps fail on go or when strict_stamp).
         steps=[{...}, ...] (max 20): a guarded chain, each step an object of flat act fields
