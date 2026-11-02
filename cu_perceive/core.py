@@ -540,6 +540,14 @@ def perceive(
             warnings.append(f"OCR failed, no OCR items: {e}")
         ocr_ms = int(round((_time.perf_counter() - _t_ocr) * 1000))
     if yolo:
+        from . import models
+
+        try:
+            note = models.ensure_yolo_weight()
+        except models.FetchError as e:
+            note = f"ScreenParser auto-download failed: {e}"
+        if note:
+            warnings.append(note)
         try:
             yitems = _to_items(detect_worker.yolo(bgr), w, h)
         except detect_worker.DetectWorkerError as e:

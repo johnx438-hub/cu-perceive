@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
@@ -592,6 +592,15 @@ all = [
     { name = "uiautomation" },
     { name = "ultralytics" },
 ]
+full = [
+    { name = "comtypes" },
+    { name = "onnxruntime" },
+    { name = "rapidocr-onnxruntime" },
+    { name = "torch" },
+    { name = "torchvision" },
+    { name = "uiautomation" },
+    { name = "ultralytics" },
+]
 ocr = [
     { name = "onnxruntime" },
     { name = "rapidocr-onnxruntime" },
@@ -609,22 +618,29 @@ yolo = [
 
 [package.metadata]
 requires-dist = [
+    { name = "comtypes", marker = "extra == 'full'", specifier = ">=1.4" },
     { name = "comtypes", marker = "extra == 'uia'", specifier = ">=1.4" },
     { name = "cu-perceive", extras = ["ocr", "uia", "yolo"], marker = "extra == 'all'" },
     { name = "mcp", specifier = ">=1.19.0,<3" },
     { name = "numpy", specifier = ">=2.0.0" },
+    { name = "onnxruntime", marker = "extra == 'full'", specifier = ">=1.18" },
     { name = "onnxruntime", marker = "extra == 'ocr'", specifier = ">=1.18" },
     { name = "opencv-python", specifier = ">=4.10.0" },
     { name = "pillow", specifier = ">=11.2.0" },
     { name = "psutil", marker = "sys_platform == 'win32'", specifier = ">=5.9" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8" },
     { name = "pywin32", marker = "sys_platform == 'win32'", specifier = ">=306" },
+    { name = "rapidocr-onnxruntime", marker = "extra == 'full'", specifier = ">=1.4.4" },
     { name = "rapidocr-onnxruntime", marker = "extra == 'ocr'", specifier = ">=1.4.4" },
+    { name = "torch", marker = "extra == 'full'", specifier = ">=2.2" },
+    { name = "torchvision", marker = "extra == 'full'", specifier = ">=0.17" },
+    { name = "uiautomation", marker = "extra == 'full'", specifier = ">=2.0.29" },
     { name = "uiautomation", marker = "extra == 'uia'", specifier = ">=2.0.29" },
+    { name = "ultralytics", marker = "extra == 'full'", specifier = ">=8.3" },
     { name = "ultralytics", marker = "extra == 'yolo'", specifier = ">=8.3" },
     { name = "windows-capture", marker = "platform_machine == 'AMD64' and sys_platform == 'win32'", specifier = ">=2.0.1" },
 ]
-provides-extras = ["ocr", "uia", "yolo", "all", "test"]
+provides-extras = ["ocr", "uia", "yolo", "all", "full", "test"]
 
 [[package]]
 name = "cuda-bindings"

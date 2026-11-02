@@ -1,0 +1,42 @@
+# Exact versions of the maintainer setup (Windows 11 x64, Python 3.12, CPU torch).
+# Use together with the `full` extra:
+#   python -m pip install -r requirements-full.txt
+#   python -m pip install -e ".[full]"
+# torch / torchvision come from the PyTorch CPU index; everything else from PyPI.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# core
+mcp==1.29.1
+pillow==12.1.1
+opencv-python==4.13.0.92
+numpy==2.4.3
+pywin32==311; sys_platform == "win32"
+psutil==7.2.2
+windows-capture==2.0.1; sys_platform == "win32" and platform_machine == "AMD64"
+mss==10.2.0
+uvicorn==0.52.4
+starlette==1.6.0
+sse-starlette==3.4.8
+httpx-sse==0.4.3
+
+# ocr
+rapidocr-onnxruntime==1.4.4
+onnxruntime==1.24.4
+onnx==1.23.2
+onnxslim==0.1.98
+pyclipper==1.4.0
+shapely==2.1.2
+scikit-image==0.26.0
+scipy==1.17.1
+
+# uia
+uiautomation==2.0.29
+comtypes==1.4.16
+
+# yolo (CPU build of torch, same as the maintainers; the GPU is not used)
+ultralytics==8.4.129
+torch==2.13.0+cpu
+torchvision==0.28.0+cpu
+
+# tests
+pytest==9.1.1

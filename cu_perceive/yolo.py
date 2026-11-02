@@ -24,8 +24,8 @@ def _load():
         weight = Path(config.yolo_weight())
         if not weight.exists() or weight.stat().st_size < int(_cfg("ocr.yolo_min_bytes")):
             raise FileNotFoundError(
-                f"ScreenParser weight missing: {weight}. Download best.pt (see weights/README.md) "
-                f"or set {config.ENV_YOLO_WEIGHT} to its path."
+                f"ScreenParser weight missing: {weight}. Run `python -m cu_perceive fetch-models` "
+                f"(see weights/README.md) or set {config.ENV_YOLO_WEIGHT} to its path."
             )
         _model = YOLO(str(weight))
     return _model

@@ -133,9 +133,21 @@ LGPL-2.1).
 | uiautomation | `uia` | Apache-2.0 |
 | comtypes | `uia` | MIT |
 | ultralytics (+ torch) | `yolo` | **AGPL-3.0** (torch: BSD-style) |
+| torch, torchvision | `full` | BSD-style |
 
 ultralytics is AGPL-3.0, which is compatible with this project's
-AGPL-3.0-or-later license. It is only installed with the `yolo` extra.
+AGPL-3.0-or-later license. It is only installed with the `yolo` extra (also
+part of `all` and `full`).
+
+## Model weights downloaded by `fetch-models` (not bundled)
+
+`python -m cu_perceive fetch-models` downloads these from Hugging Face into
+the user's weights dir. They are not part of this repository or its wheel.
+
+- `rapidocr/*.onnx`: ONNX exports of PaddleOCR models (PaddleOCR is
+  Apache-2.0), from the RapidOCR model repo `SWHL/RapidOCR`.
+- `screenparser/best.pt`: from `docling-project/ScreenParser`; license
+  ambiguous, see below.
 
 The ScreenParser YOLO weight (`screenparser/best.pt`) used by the `yolo`
 extra is not distributed here. Its license is ambiguous: the Hugging Face

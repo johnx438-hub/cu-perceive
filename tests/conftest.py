@@ -10,6 +10,9 @@ import os
 import sys
 import types
 
+# Never download model weights from the test suite (perceive yolo=True would auto-fetch).
+os.environ.setdefault("CU_PERCEIVE_NO_AUTO_FETCH", "1")
+
 if os.environ.get("CU_PERCEIVE_TEST_SIMULATE_WIN32") == "1" and "win32gui" not in sys.modules:
     _fake = types.ModuleType("win32gui")
     _fake.IsWindow = lambda hwnd: False

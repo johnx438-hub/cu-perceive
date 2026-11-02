@@ -266,6 +266,20 @@ def main(argv: list[str] | None = None) -> int:
     cfg = sub.add_parser("config", parents=[common], help="show, validate, or reload the effective configuration")
     cfg.add_argument("action", nargs="?", choices=("show", "validate", "reload"), default="show")
 
+    fm = sub.add_parser(
+        "fetch-models",
+        parents=[common],
+        help="download the OCR / YOLO weights into the weights dir and verify their SHA-256",
+    )
+    fm.add_argument("--only", action="append", choices=("ocr", "yolo"), default=None,
+                    help="fetch only this group (repeatable; default: all)")
+    fm.add_argument("--force", action="store_true", help="download again even when the file already verifies")
+    fm.add_argument("--check", action="store_true", help="only verify the files on disk; no network")
+
+    doc = sub.add_parser("doctor", parents=[common], help="check extras, torch, weights, and run OCR/YOLO smoke tests")
+    doc.add_argument("--json", action="store_true", help="print the report as JSON")
+    doc.add_argument("--no-smoke", dest="smoke", action="store_false", help="skip the OCR and YOLO smoke tests")
+
     m = sub.add_parser("mcp", parents=[common], help="serve streamable-http MCP on this machine")
     m.add_argument("--host", default=None, help="bind address (default 127.0.0.1; config may set another loopback name)")
     m.add_argument("--port", type=int, default=None, help="port (default 8771)")
@@ -293,6 +307,27 @@ def main(argv: list[str] | None = None) -> int:
         out = config_action(args.action, profile=args.profile)
         _emit(out, args, indent=2)
         return 0 if out.get("ok", True) else 1
+    if args.cmd == "fetch-models":
+        from .models import fetch_models
+
+        out = fetch_models(args.only, force=args.force, check_only=args.check,
+                           log=lambda m: print(m, file=sys.stderr, flush=True))
+        _emit(out, args, indent=2)
+        for f in out["files"]:
+            if f.get("action") == "failed":
+                print(f"failed: {f['path']}: {f.get('error')}", file=sys.stderr)
+            elif f["status"] != "ok":
+                print(f"not ok: {f['path']}: {f['status']} ({f['dest']})", file=sys.stderr)
+        return 0 if out["ok"] else 1
+    if args.cmd == "doctor":
+        from . import doctor
+
+        report = doctor.run(smoke=args.smoke)
+        if args.json:
+            _emit(report, args, indent=2)
+        else:
+            print(doctor.format_text(report))
+        return 0 if report["ok"] else 1
     if args.cmd == "perceive":
         from .core import perceive
         from .extras import MissingExtraError

@@ -28,11 +28,16 @@ PACKAGES: dict[str, tuple[str, ...]] = {
     "uia": ("uiautomation>=2.0.29", "comtypes>=1.4"),
     "yolo": ("ultralytics>=8.3",),
 }
+# The documented full install: every extra plus the torch packages YOLO imports.
+PACKAGES["full"] = (
+    *PACKAGES["ocr"], *PACKAGES["uia"], *PACKAGES["yolo"], "torch>=2.2", "torchvision>=0.17",
+)
 
 PURPOSE = {
     "ocr": "OCR text ids (perceive --ocr / ocr=true)",
     "uia": "UI Automation nodes and clicks (perceive --uia, act --method uia|auto, --uia-name)",
     "yolo": "ScreenParser icon boxes (perceive --yolo / yolo=true; AGPL-3.0, large download)",
+    "full": "OCR, UIA and YOLO together (the maintainer setup)",
 }
 
 

@@ -31,6 +31,13 @@ uia = ["uiautomation>=2.0.29", "comtypes>=1.4"]
 # AGPL-3.0 and several GB with torch.
 yolo = ["ultralytics>=8.3"]
 all = ["cu-perceive[ocr,uia,yolo]"]
+# Documented install path: every extra plus the torch packages the YOLO path imports.
+# For the exact maintainer versions (CPU torch) use requirements-full.txt with it.
+full = [
+  "rapidocr-onnxruntime>=1.4.4", "onnxruntime>=1.18",
+  "uiautomation>=2.0.29", "comtypes>=1.4",
+  "ultralytics>=8.3", "torch>=2.2", "torchvision>=0.17",
+]
 test = ["pytest>=8"]
 
 [project.scripts]
@@ -40,7 +47,7 @@ cu-perceive = "cu_perceive.cli:main"
 include = ["cu_perceive", "cu_perceive.*"]
 
 [tool.setuptools.package-data]
-cu_perceive = ["apps.default.json", "_vendor/enikk/LICENSE"]
+cu_perceive = ["apps.default.json", "models_manifest.json", "_vendor/enikk/LICENSE"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

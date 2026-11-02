@@ -1,6 +1,8 @@
 # Weights (not in git)
 
-Download separately. Do not commit `*.pt`, `*.onnx`, `*.onnx.bad`, or `*.bin`.
+Download with `python -m cu_perceive fetch-models` (sizes, SHA-256 and URLs are
+in `cu_perceive/models_manifest.json`; `--check` verifies what is on disk), or
+by hand. Do not commit `*.pt`, `*.onnx`, `*.onnx.bad`, or `*.bin`.
 
 Location: this folder (`<checkout>\weights`) for a source checkout or editable
 install (`pip install -e .`); `%LOCALAPPDATA%\cu-perceive\weights` (really

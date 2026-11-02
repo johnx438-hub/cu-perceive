@@ -1,0 +1,37 @@
+{
+  "_comment": "Model files fetched by `python -m cu_perceive fetch-models`. URLs are pinned to a Hugging Face commit; size and sha256 were checked against what those URLs serve (X-Linked-Size / X-Linked-ETag) on 2026-11-02.",
+  "files": [
+    {
+      "path": "screenparser/best.pt",
+      "group": "yolo",
+      "size": 153259543,
+      "sha256": "dbcb4f583ccfdb8100a68e606525c247890a2de4c1a54b14741e0ee29ce0ab88",
+      "url": "https://huggingface.co/docling-project/ScreenParser/resolve/f029e565f1206577402e43206454522075be3f72/best.pt",
+      "source": "Hugging Face docling-project/ScreenParser (YOLO11-L)"
+    },
+    {
+      "path": "rapidocr/ch_PP-OCRv4_det_infer.onnx",
+      "group": "ocr",
+      "size": 4745517,
+      "sha256": "d2a7720d45a54257208b1e13e36a8479894cb74155a5efe29462512d42f49da9",
+      "url": "https://huggingface.co/SWHL/RapidOCR/resolve/1cfba2e90fc938db55889873735088de210cc173/PP-OCRv4/ch_PP-OCRv4_det_infer.onnx",
+      "source": "RapidOCR ONNX export of PaddleOCR PP-OCRv4 (Hugging Face SWHL/RapidOCR)"
+    },
+    {
+      "path": "rapidocr/ch_PP-OCRv4_rec_infer.onnx",
+      "group": "ocr",
+      "size": 10857958,
+      "sha256": "48fc40f24f6d2a207a2b1091d3437eb3cc3eb6b676dc3ef9c37384005483683b",
+      "url": "https://huggingface.co/SWHL/RapidOCR/resolve/1cfba2e90fc938db55889873735088de210cc173/PP-OCRv4/ch_PP-OCRv4_rec_infer.onnx",
+      "source": "RapidOCR ONNX export of PaddleOCR PP-OCRv4 (Hugging Face SWHL/RapidOCR)"
+    },
+    {
+      "path": "rapidocr/ch_ppocr_mobile_v2.0_cls_infer.onnx",
+      "group": "ocr",
+      "size": 585532,
+      "sha256": "e47acedf663230f8863ff1ab0e64dd2d82b838fceb5957146dab185a89d6215c",
+      "url": "https://huggingface.co/SWHL/RapidOCR/resolve/1cfba2e90fc938db55889873735088de210cc173/PP-OCRv1/ch_ppocr_mobile_v2.0_cls_infer.onnx",
+      "source": "RapidOCR ONNX export of PaddleOCR mobile v2.0 direction classifier (Hugging Face SWHL/RapidOCR)"
+    }
+  ]
+}

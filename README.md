@@ -54,6 +54,62 @@ One core, two faces:
   are verified after.
 - An operator `abort` switch stops pending desktop acts.
 
+## Windows Quickstart (full, same as maintainers)
+
+This gives the setup the maintainers run: Python 3.12, every extra (OCR, UIA,
+YOLO), CPU torch, and all model weights. From a clean clone, in PowerShell:
+
+    git clone https://github.com/johnx438-hub/cu-perceive
+    cd cu-perceive
+
+    # Python 3.12 environment: conda ...
+    conda create -n cu-perceive python=3.12 -y
+    conda activate cu-perceive
+    # ... or a venv
+    py -3.12 -m venv .venv
+    .venv\Scripts\Activate.ps1
+
+    python -m pip install -r requirements-full.txt   # exact versions, CPU torch
+    python -m pip install -e ".[full]"
+    python -m cu_perceive fetch-models               # ~170 MB, SHA-256 checked
+    python -m cu_perceive doctor                     # exit code 0 = ready
+    python -m cu_perceive mcp --host 127.0.0.1 --port 8771
+
+`requirements-full.txt` pins the maintainer versions and pulls torch and
+torchvision from the PyTorch CPU index (`https://download.pytorch.org/whl/cpu`).
+The `full` extra is the `all` extra plus `torch` and `torchvision`.
+
+`fetch-models` downloads into the weights dir (`<checkout>\weights` for this
+editable install; `CU_PERCEIVE_WEIGHTS` or `CU_PERCEIVE_HOME` move it). It
+checks each file's size and SHA-256 against `cu_perceive/models_manifest.json`,
+skips files that already match, re-downloads ones that don't, and writes to
+`<name>.part` first, renaming only after the hash matches. `--only ocr|yolo`
+limits it to one group, `--force` re-downloads valid files, and `--check`
+verifies without the network. If `screenparser/best.pt` is still missing the
+first time `--yolo` / `yolo=true` runs, perceive downloads it once and logs a
+line to stderr; set `CU_PERCEIVE_NO_AUTO_FETCH=1` to turn that off. A path set
+with `CU_PERCEIVE_YOLO_WEIGHT` is never downloaded or replaced.
+
+`doctor` reports the Python version, each extra (with the install command when
+one is missing), the torch build (CPU or CUDA), each weight's hash status, an
+OCR smoke test on a generated image, and a YOLO load test. `--json` prints the
+report as JSON, `--no-smoke` skips the two smoke tests, and any problem gives
+exit code 1.
+
+Optional: set `CU_PERCEIVE_OUT` to keep stamps in a folder of your choice
+(default `%LOCALAPPDATA%\cu-perceive\shots\perceive`):
+
+    [Environment]::SetEnvironmentVariable("CU_PERCEIVE_OUT", "D:\cu-shots", "User")
+
+MCP client config for the streamable-HTTP server (the key names vary by
+client; some also want `"type": "http"`):
+
+    {
+      "mcpServers": {
+        "cu-perceive": { "url": "http://127.0.0.1:8771/mcp" }
+      }
+    }
+
 ## Install
 
 Core (grid map, background capture, act with `input` / `post`):
@@ -70,8 +126,10 @@ auto-installed; the error prints the exact command for your install:
 | `ocr` | `--ocr` text ids (RapidOCR) | `python -m pip install -e ".[ocr]"` |
 | `uia` | `--uia`, `act --method uia|auto`, `--uia-name` | `python -m pip install -e ".[uia]"` |
 | `yolo` | `--yolo` ScreenParser icons. **AGPL-3.0**, pulls torch (large) | `python -m pip install -e ".[yolo]"` |
+| `full` | all of the above plus `torch` / `torchvision` (the Quickstart path) | `python -m pip install -e ".[full]"` |
 
-YOLO weights are not in git; see `weights/README.md`.
+YOLO weights are not in git; `python -m cu_perceive fetch-models` downloads
+them (see the Quickstart and `weights/README.md`).
 
 OCR and YOLO run in a separate worker process, started on first use and reused
 afterwards. Loading onnxruntime into the process that captures windows makes
@@ -425,6 +483,7 @@ also attaches the values. Profiles are `default`, `demo-slow-human`, and
 | Stamp / shot dir | `<data dir>\shots\perceive` | `CU_PERCEIVE_OUT` |
 | Weights dir | `<checkout>\weights` for a source checkout / editable install (`pip install -e .`), else `<data dir>\weights` | `CU_PERCEIVE_WEIGHTS` |
 | ScreenParser weight | `<weights>\screenparser\best.pt` | `CU_PERCEIVE_YOLO_WEIGHT` |
+| Download best.pt on first `--yolo` use | on | `CU_PERCEIVE_NO_AUTO_FETCH=1` turns it off |
 | Quick-launch list | `<data dir>\apps.json`, else packaged `apps.default.json` | `CU_PERCEIVE_APPS` |
 | Extra MCP Host names (e.g. a tailnet name behind a proxy) | none | `CU_PERCEIVE_ALLOWED_HOSTS=a,b` or `mcp --allow-host a` |
 | WSL distro for UNC paths | `Ubuntu` | `CU_PERCEIVE_WSL_DISTRO` |
