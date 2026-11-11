@@ -1,4 +1,4 @@
-"""PR19 review round (DSH): abort hint on chains, TTL pinned per act, every MCP act return
+"""PR19 review round: abort hint on chains, TTL pinned per act, every MCP act return
 annotated, no focus/IME side effects while stopped, partial typing counted, abort tool edges.
 No real input: every dispatch function is mocked."""
 import os

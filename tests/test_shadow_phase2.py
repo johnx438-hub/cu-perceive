@@ -66,7 +66,7 @@ class TestDebugLoopbackOnly(FakeCase):
             self.assertEqual([a for a in tail if "address" in a], ["--remote-debugging-address=127.0.0.1"])
 
     def test_non_loopback_refused(self):
-        for addr in ("0.0.0.0", "::", "[::]", "::1", "192.168.1.5", "100.83.193.38", "archer.tailca07d9.ts.net",
+        for addr in ("0.0.0.0", "::", "[::]", "::1", "192.168.1.5", "100.64.0.1", "host.tailnet.example",
                      "127.0.0.2", "127.1", "localhost.", "", "*"):
             for flag in ("--remote-debugging-address", "-remote-debugging-address", "/Remote-Debugging-Address"):
                 with self.assertRaises(DebugAddressRefused, msg=f"{flag}={addr}"):

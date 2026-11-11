@@ -149,7 +149,7 @@ OCR / UIA / YOLO 是可选包（`[ocr]` / `[uia]` / `[yolo]`），第一次用�
 - 上限：一次调用最多 64 个操作（`if` / `repeat` 本身算一个，里面跑的另算），嵌套 4 层，`timeout_ms` 默认 120 秒，`interval_ms` 只允许 100..1000。被闸门挡下的操作也会留一行（`gated: true`、`ran: false`），所以 `stopped_at` 一定能在 `results` 里找到。真跑的 `wait` 报实际睡了多久（`waited_sec`，旁边有 `requested_sec` 和 `waited_short_by_sec` = `sec - waited_sec`）和为什么早停（`interrupted`: `aborted` / `deadline`），不会拿满额 `sec` 糊过去；`abort` 和 deadline 在 `wait` / `wait_for` 里至少每 250 ms 查一次（不管 `interval_ms` 多大），被这样打断的 `wait_for` 也报 `interrupted` 并以 `aborted` / `timeout` 停下，`wait_timeout` 只表示它自己的 `timeout_ms` 用完。64 个操作的上限在运行时只在两步之间检查，第 64 步会完整跑完；另外校验时会静态数一遍（`static_ops`：`least` = 每步都成功、`until` 一上来就满足、`if` 走短的那支时至少跑几个，`most` = 最多跑几个）：`least` 超过 64 在校验阶段就以 `bad_plan` + `over_cap: true` 拒绝（`validate_only` 也一样），除非 plan 写 `"resumable": true`；`most` 超过 64 只给一条 `warnings`。**续跑**：因 64 上限（`max_ops`）或 `timeout_ms`（`timeout`）停下的 run 会返回 `continuation = {"resume_from": "<没跑的那个操作的 path>", "stamps": {所有命名帧 + "latest"}, "resumable": true}`，把它原样合进同一份 plan 再调一次，就从那一步接着跑（在 `if` 里沿用上次选的分支，在 `repeat` 里先跑完那一轮再继续，`until` 照常检查），`frames.latest` 和命名 stamp 都带过去；途经的容器行带 `resumed: true`，结果带 `resumed_from`，`last` 条件在续跑开头是空的。被 `abort` 停下的没有 continuation。dry run 的 continuation 另带 `from_dry_run: true`（规划过 act 的再带 `speculative: true`）：只能接着 dry run，带 `go` 会以 `bad_plan` 拒绝（前面的 act 根本没发）；`speculative` 让续跑的检查照旧进 `would_fail`；断点前两支都规划的 `if` 续跑时只接断点所在那一支。dry run 会把这种 `if` 两支都规划，所以 `most` 不到 64 的 plan 在 dry run 里也可能撞上限。对老调用方的变化：`not.met` 现在是取反后的结果（内层看 `not.inner_met`）；`least` 超 64 的 plan 不再先跑 64 步，而是直接拒绝（dry run 也是）；continuation 不绑定原 steps，续跑时要用同一份 steps。结果里 `results` 每个操作一行（`path` 如 `3.then.0`），停了看 `stopped_at` / `stop_reason`；`verification` 和 `act` 一样，另有 `no_input`（真跑但没发任何输入）。前面做完的不会回滚。
 - 先 dry-run 给用户看，用户同意后同一份 plan 加 `go=true`。
 
-## WSL / Grok Build / minimal-agent-ts
+## WSL / 其他 agent 客户端
 
 从 WSL 调 Windows 上的 Python（不要用 Linux python）：
 
@@ -157,17 +157,16 @@ OCR / UIA / YOLO 是可选包（`[ocr]` / `[uia]` / `[yolo]`），第一次用�
     <checkout>/bin/cu-perceive.sh perceive --hwnd N
     <checkout>/bin/cu-perceive.sh act --stamp STAMP --drag-norm ...
 
-MCP 本机 loopback（不碰 8000 的 windows-mcp）：
+MCP 本机 loopback（别和本机其他 MCP 服务用同一端口）：
 
     http://127.0.0.1:8771/mcp
 
-Grok: ~/.grok/config.toml 里 [mcp_servers.cu-perceive]。
-minimal-agent-ts: agent.json 的 mcp_servers 里同名一项。
+MCP 客户端：在它的 MCP 配置里加一项 `cu-perceive`，指向上面的 URL。
 默认端口 8771（`--port` 可改）。
 MCP 默认带压缩图；要全分辨率走磁盘路径。CLI 仍用 map 路径。WSL 用返回的 `map_wsl` / `png_wsl`。写进 Linux workspace 用 UNC： `\\wsl.localhost\Ubuntu\home\<user>\...`（发行版名用 `CU_PERCEIVE_WSL_DISTRO` 改）。 不要传 `/home/<user>/...`，Win Python 会当相对路径写到 `C:\home\<user>`，不报错。 `/mnt/c/...` 仍映射到 NTFS。origin.left <= -10000 是最小化哨兵，丢掉 stamp 重 perceieve。
 
 
-## Agent 易踩坑（K3 / 88yr 2026-09-05）
+## Agent 易踩坑
 
 - MCP `act` 的字段是**扁平字段**（`norm`/`xy`/`ids`/`text`/`key`…）；多步用 `steps=[{...}]`，每步是同样的扁平字段（PR #9 起，最多 20 步，带守卫）。未声明的参数（`x`、`action`…）一律拒绝：调用报错，错误文本是 JSON（`reason: "unknown_args"`、`unknown_args`、`valid_args`），什么都不执行。若解析后零步骤，返回 `ok:false` + error。
 - 桌面 `act`：`dry_run=true` 优先于 `go=true`（只做 dry run，带 warning）；只传 `dry_run=false` 不会发送，要发送就传 `go=true`。
@@ -188,4 +187,4 @@ MCP 默认带压缩图；要全分辨率走磁盘路径。CLI 仍用 map 路径�
 - 用 Win11 记事本当桌面测试窗口。它把文件开成已有窗口里的标签，清空了也会问要不要保存。桌面测试用自己的程序或窗口
 - 默认开 OCR 或 YOLO
 - 给游戏挂机写方案
-- 远程 HTTPS 当已接通（Grok Bot 后端不在 tailnet；先 CLI）
+- 远程 HTTPS 当已接通（远端 agent 不一定能连到这台机器；先 CLI）

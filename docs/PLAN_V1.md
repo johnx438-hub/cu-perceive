@@ -164,7 +164,7 @@ scroll+位置仍隐含 hover（现纪律）。
 | `on_error: stop`（默认） | 中止后续步 |
 | `on_error: continue` | v1 **可解析但实现可先拒**（或 stop+warn），避免半套行为 |
 
-审计：每步结果进返回 JSON；可选落盘 `agent-bus/archive/shots/perceive/plans/<ts>-<slug>.json`（实现时加，非合同硬性）。
+审计：每步结果进返回 JSON；可选落盘 `<out_dir>/plans/<ts>-<slug>.json`（实现时加，非合同硬性）。
 
 ## 非目标（v1 明确不做）
 
@@ -172,7 +172,7 @@ scroll+位置仍隐含 hover（现纪律）。
 - 默认开 OCR/YOLO / 全页 multimodal
 - 游戏挂机、绕检测、无人值守乱点
 - 云电脑桌面
-- 与 windows-mcp 合并或改端口
+- 与本机其他桌面 MCP 服务合并或改端口
 
 ## 验收（实现后）
 

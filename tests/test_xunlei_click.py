@@ -302,7 +302,7 @@ class _OffTargetDesk(_Desk):
             "root_window": lambda h: int(h),
             "window_rect": lambda h: (300, 200, 1100, 700),
             "window_exstyle": lambda h: self.exstyle,
-            "window_title": lambda h: {COVER: "Grok Bot", POPUP: "popup"}.get(int(h), "T"),
+            "window_title": lambda h: {COVER: "Cover Window", POPUP: "popup"}.get(int(h), "T"),
         }.items():
             p = mock.patch(f"cu_perceive._win32.{target}", side_effect=fn)
             p.start()
