@@ -594,12 +594,12 @@ def main(argv: list[str] | None = None) -> int:
         _emit(out, args)
         return 0 if out.get("ok", True) else 1
     if args.cmd == "launch":
-        from .launch import ProfileRefused, launch, resolve
+        from .launch import LaunchRefused, launch, resolve
         kw = dict(app=args.app, exe=args.exe, args=args.launch_args, user_data_dir=args.user_data_dir)
         try:
             out = {"ok": True, "dry_run": True, **resolve(**kw)} if args.resolve_only else launch(**kw)
-        except ProfileRefused as e:
-            out = {"ok": False, "reason": "profile_refused", "error": str(e)}
+        except LaunchRefused as e:
+            out = {"ok": False, "reason": e.reason, "error": str(e)}
         _emit(out, args)
         return 0 if out.get("ok") else 1
     if args.cmd == "path-extract":

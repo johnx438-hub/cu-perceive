@@ -26,5 +26,17 @@
       "about:blank"
     ],
     "note": "shadow profile (CU_PERCEIVE_SHADOW_PROFILE_CHROME, default ~/.cu-perceive-trial-chrome-profile); never the main profile"
+  },
+  {
+    "name": "edge-shadow",
+    "exe": "%ProgramFiles(x86)%\\Microsoft\\Edge\\Application\\msedge.exe",
+    "args": [
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--disable-sync",
+      "--new-window",
+      "about:blank"
+    ],
+    "note": "shadow profile (CU_PERCEIVE_SHADOW_PROFILE_EDGE, default ~/.cu-perceive-trial-edge-profile); never the main profile"
   }
 ]

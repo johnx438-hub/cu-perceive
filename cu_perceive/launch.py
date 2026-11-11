@@ -13,6 +13,11 @@ profile. With no ``--user-data-dir`` the shadow profile is used
 (canonical_path): 8.3 short names, the extended-length and device prefixes, junctions and symlinks,
 ``..``, trailing dots / spaces and case all collapse first; UNC, device namespaces and paths
 that do not resolve are refused.
+
+Remote debugging (chrome / msedge): any debugging interface stays on this machine. A
+``--remote-debugging-address`` other than 127.0.0.1 / localhost is refused
+(DebugAddressRefused), and whenever ``--remote-debugging-port`` is given the argv is pinned
+with ``--remote-debugging-address=127.0.0.1``.
 """
 from __future__ import annotations
 
@@ -42,8 +47,22 @@ BROWSERS = {
 UDD = "--user-data-dir"
 
 
-class ProfileRefused(ValueError):
+class LaunchRefused(ValueError):
+    """A launch the guard will not start; ``reason`` is the machine-readable code."""
+
+    reason = "launch_refused"
+
+
+class ProfileRefused(LaunchRefused):
     """A browser launch that would use the main profile (or an ambiguous one)."""
+
+    reason = "profile_refused"
+
+
+class DebugAddressRefused(LaunchRefused):
+    """A remote-debugging interface that would listen beyond 127.0.0.1."""
+
+    reason = "debug_address_refused"
 
 
 def list_apps() -> list[dict]:
@@ -290,6 +309,61 @@ _BROWSER_TOKEN = re.compile(r"(?:^|[\\/\s\"'])(?:chrome|msedge|chrome_proxy|msed
                             re.IGNORECASE)
 
 
+# Remote debugging: the DevTools endpoint must stay on loopback.
+_DBG_ADDR = re.compile(r"^(?:--|-|/)remote-debugging-address(?:=(.*))?$", re.IGNORECASE | re.DOTALL)
+_DBG_PORT = re.compile(r"^(?:--|-|/)remote-debugging-port(?:=(.*))?$", re.IGNORECASE | re.DOTALL)
+_DBG_ANY = re.compile(r"(?:--|-|/)remote-debugging-(?:address|port)", re.IGNORECASE)
+_DBG_ADDR_ANYWHERE = re.compile(r"(?:--|-|/)remote-debugging-address(?:\s*=\s*(\"[^\"]*\"|'[^']*'|\S+))?",
+                                re.IGNORECASE)
+LOOPBACK = "127.0.0.1"
+_LOOPBACK_NAMES = {"127.0.0.1", "localhost"}
+
+
+def _loopback_or_refuse(value: str | None) -> None:
+    if value is None:
+        raise DebugAddressRefused("write --remote-debugging-address=127.0.0.1 as one arg; a bare switch is refused")
+    v = value.strip().strip('"').strip("'").strip().lower()
+    if v not in _LOOPBACK_NAMES:
+        raise DebugAddressRefused(
+            f"remote debugging may only bind to 127.0.0.1 / localhost, not {value.strip()!r}")
+
+
+def _guard_debugging(args: list[str]) -> tuple[list[str], dict]:
+    """Drop caller --remote-debugging-address args (after checking them) and pin 127.0.0.1 when a port is set."""
+    out: list[str] = []
+    ports: list[int] = []
+    after_dashdash = False
+    for a in args:
+        if a == "--":
+            after_dashdash = True
+        if after_dashdash:
+            if _DBG_ANY.search(a):
+                raise DebugAddressRefused("remote-debugging switches after '--' are refused")
+            out.append(a)
+            continue
+        st = a.strip()
+        m = _DBG_ADDR.match(st)
+        if m:
+            _loopback_or_refuse(m.group(1))
+            continue  # re-added below, pinned to 127.0.0.1
+        m = _DBG_PORT.match(st)
+        if m:
+            raw = (m.group(1) or "").strip().strip('"').strip("'")
+            if not re.fullmatch(r"[0-9]{1,5}", raw) or int(raw) > 65535:
+                raise DebugAddressRefused(f"--remote-debugging-port needs a number 0-65535, got {raw!r}")
+            ports.append(int(raw))
+            out.append(f"--remote-debugging-port={int(raw)}")
+            continue
+        out.append(a)
+    if len(set(ports)) > 1:
+        raise DebugAddressRefused("conflicting --remote-debugging-port values")
+    if not ports:
+        return out, {}
+    idx = out.index("--") if "--" in out else len(out)
+    out.insert(idx, f"--remote-debugging-address={LOOPBACK}")
+    return out, {"debug_port": ports[0], "debug_address": LOOPBACK}
+
+
 def _refuse_if_main(kind: str, path: str, mains: list[str]) -> str:
     canon = canonical_path(path)
     target = _key(canon)
@@ -339,6 +413,7 @@ def guard_browser_args(exe: str | Path, args: list[str], user_data_dir: str | No
         given.append(str(user_data_dir).strip().strip('"'))
     if any(not d for d in given):
         raise ProfileRefused(f"empty {UDD}")
+    rest, dbg = _guard_debugging(rest)
     if given:
         canon = [_refuse_if_main(kind, d, mains) for d in given]
         if len({_key(c) for c in canon}) > 1:
@@ -346,7 +421,7 @@ def guard_browser_args(exe: str | Path, args: list[str], user_data_dir: str | No
         udd, how = canon[0], "explicit"
     else:
         udd, how = _refuse_if_main(kind, str(shadow_profile(exe)), mains), "defaulted_to_shadow"
-    return [f"{UDD}={udd}"] + rest, {"browser": kind, "user_data_dir": str(udd), "profile_guard": how}
+    return [f"{UDD}={udd}"] + rest, {"browser": kind, "user_data_dir": str(udd), "profile_guard": how, **dbg}
 
 
 def _guard_other(exe: str | Path, args: list[str]) -> None:
@@ -369,6 +444,13 @@ def _guard_other(exe: str | Path, args: list[str]) -> None:
             raise ProfileRefused("empty user-data-dir inside another program's args")
         for kind_exe in ("chrome.exe", "msedge.exe"):  # fail closed: unresolvable counts as refused
             _refuse_if_main(browser_kind(kind_exe) or "browser", val, main_profile_dirs(kind_exe))
+    for a in args:  # a debugging address handed to some inner launch must still be loopback
+        whole = _DBG_ADDR.match(a.strip())
+        if whole:
+            _loopback_or_refuse(whole.group(1))
+            continue
+        for m in _DBG_ADDR_ANYWHERE.finditer(a):
+            _loopback_or_refuse(m.group(1) or None)
     joined = " ".join(args)
     if _stem(exe) in _SHELLS and _BROWSER_TOKEN.search(" " + joined + " "):
         raise ProfileRefused(

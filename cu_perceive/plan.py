@@ -157,6 +157,12 @@ class _BranchEnd(Exception):
     """Dry run only: a stop inside a branch the live run may or may not take ends that branch."""
 
 
+def _launch_refusal(e: BaseException) -> str:
+    """The guard's reason code (profile_refused, debug_address_refused, ...) or launch_failed."""
+    r = getattr(e, "reason", None)
+    return r if isinstance(r, str) and r.endswith("_refused") else "launch_failed"
+
+
 class OpError(Exception):
     """An op (or one of its conditions) that cannot run or be evaluated: fail closed."""
 
@@ -1111,22 +1117,23 @@ class _Run:
                     pl = planner(**kw)
                 except KeyError as e:
                     raise OpError("launch_failed", str(e)) from e
-                except ValueError as e:  # ProfileRefused is a ValueError: refuse in the dry run too
-                    reason = "profile_refused" if type(e).__name__ == "ProfileRefused" else "launch_failed"
+                except ValueError as e:  # LaunchRefused is a ValueError: refuse in the dry run too
+                    reason = _launch_refusal(e)
                     raise OpError(reason, str(e)) from e
                 res.update(would_args=pl.get("args"),
-                           **{k: pl[k] for k in ("browser", "user_data_dir", "profile_guard") if pl.get(k)})
+                           **{k: pl[k] for k in ("browser", "user_data_dir", "profile_guard", "debug_port", "debug_address")
+                              if pl.get(k) is not None and pl.get(k) != ""})
             return
         try:
             out = self.deps.launch(**kw)
         except (KeyError, ValueError, OSError) as e:
-            reason = "profile_refused" if type(e).__name__ == "ProfileRefused" else "launch_failed"
+            reason = _launch_refusal(e)
             raise OpError(reason, str(e)) from e
         win = out.get("window") or {}
         res.update(ok=bool(out.get("ok", True)), exe=out.get("exe"),
                    window={k: win.get(k) for k in ("hwnd", "title", "exe", "pid")} if win else None,
                    **{k: out[k] for k in ("args", "pid", "new_window", "browser", "user_data_dir", "profile_guard",
-                                          "warnings") if k in out})
+                                          "debug_port", "debug_address", "warnings") if k in out})
 
     def op_stop(self, op, path, res):
         ok = bool(op.get("ok", True))
