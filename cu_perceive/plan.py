@@ -9,14 +9,21 @@ Ops: perceive, act, wait, wait_for, assert, if, repeat, launch, stop.
 
 The live gate is on the call (``go``), never in the plan. A dry run still
 perceives and evaluates conditions (both only read), plans every act and sends
-nothing. Once an act was planned but not sent, later checks describe a screen the
-live run would have changed: they are marked ``speculative`` and a failing check
-does not stop the dry run. An ``if`` there plans both branches (``branch: "both"``,
-``branch_now`` for the branch the current screen would take); a ``stop`` inside one
-ends only that branch (``would_stop``, ``stop_ok``). The run lists what failed in
-``would_fail`` with the reason (the same value as ``would_fail_now`` on the row) and
-what would stop it in ``would_stop``, so a typoed ``ocr_text`` is not hidden behind
-``ok: true`` and a plan that ends in ``stop ok:false`` is not reported as clean.
+nothing; its ``perceive focus`` is planned rather than performed
+(``focus_planned``), and the operator abort switch stops it like a live run. Once
+an act was planned but not sent, later checks describe a screen the live run would
+have changed: they are marked ``speculative`` (row and condition) and a failing
+check does not stop the dry run. An ``if`` there plans both branches
+(``branch: "both"``, ``branch_now`` for the branch the current screen would take); a
+``stop`` inside one ends that branch only (``branch_stopped``, ``would_stop``,
+``stop_ok``) — each branch is one future of the live run. The
+run lists what failed in ``would_fail`` with the reason (the same value as
+``would_fail_now`` on the row) and what would stop it in ``would_stop``, so a typoed
+``ocr_text`` is not hidden behind ``ok: true`` and a plan that ends in
+``stop ok:false`` is not reported as clean. ``planned_acts`` counts the acts sent
+whichever branch the live run takes; when a branch is unsure, ``planned_acts_at_most``
+gives the total planned. A ``repeat`` cut by such a stop reports ``would_stop`` and
+the rounds it planned.
 
 Bounds: MAX_OPS executed ops, MAX_DEPTH nesting, MAX_REPEAT iterations, a wall
 clock ``timeout_ms`` and the operator abort switch. The op budget is checked
@@ -434,6 +441,7 @@ class _Run:
         self.stop_info: dict | None = None
         self.refreshed: set[str] = set()
         self.unsure_branches = 0  # depth of if-branches a dry run plans without knowing which one runs live
+        self.unsure_acts = 0  # of the planned acts above, the ones only one branch of those futures sends
         self.t0 = deps.clock()
         self.deadline = self.t0 + float(plan.get("timeout_ms", DEFAULT_TIMEOUT_MS)) / 1000.0
 
@@ -443,8 +451,8 @@ class _Run:
             self.stop_info = {"stopped_at": path, "stop_reason": reason, "ok": ok, "error": error}
 
     def abort_hit(self) -> tuple[str, str] | None:
-        """The operator switch alone. A dry run never reads it: it only plans and sends nothing."""
-        if self.send and self.deps.abort_state().get("abort_active"):
+        """The operator switch. A dry run reads it too: a stop holds for every op, planned or sent."""
+        if self.deps.abort_state().get("abort_active"):
             return "aborted", "aborted by operator"
         return None
 
@@ -689,6 +697,10 @@ class _Run:
                 raise OpError("cannot_refresh", "that stamp has no window; it cannot be re-perceived")
             kw = {"hwnd": int(old["hwnd"]), **{k: True for k in ("ocr", "uia", "yolo") if old.get(k)}, **kw}
             name = name or (op["from"] if op["from"] != LATEST else None)
+        if not self.send and kw.pop("focus", None):
+            # focus=true raises a real window (SetForegroundWindow + restore). A dry run only reads, so
+            # the focus is planned and reported, not done; the live run of the same plan still focuses.
+            res["focus_planned"] = True
         res.update(self.perceive(kw, name))
 
     def op_act(self, op, path, res):
@@ -713,6 +725,7 @@ class _Run:
             self.steps_sent += int((out.get("evidence") or {}).get("steps_sent") or 0)
         else:
             self.unsent += 1
+            self.unsure_acts += 1 if self.unsure_branches else 0
 
     def op_wait(self, op, path, res):
         sec = float(op["sec"])
@@ -778,7 +791,7 @@ class _Run:
         if ev["met"]:
             res["ok"] = True
         elif self.speculative:
-            res.update(ok=None, would_fail_now="assert_failed")
+            res.update(ok=None, speculative=True, would_fail_now="assert_failed")
         else:
             res.update(ok=False, reason="assert_failed", error=op.get("message") or "assert: condition not met")
 
@@ -793,7 +806,8 @@ class _Run:
         # A dry run past its first planned act reads a screen the live run would have changed, so
         # this condition does not say which branch runs live. Plan both instead of following one
         # (the wrong one would hide the other's acts, or end the dry run on a stop that never fires).
-        res.update(ok=True, cond=ev, branch="both", branch_now=branch)
+        res.update(ok=True, cond=ev, branch="both", branch_now=branch, speculative=True)
+        stopped_in: list[str] = []
         for name in ("then", "else"):
             if not op.get(name) or self.stop_info is not None:
                 continue
@@ -801,7 +815,9 @@ class _Run:
             try:
                 self.run_ops(op[name], f"{path}.{name}.")
             except _BranchEnd:
-                pass
+                # Each branch is one future of the live run: a stop ends that future only, so the rest of
+                # this branch is unreachable while the other branch (and what follows it) still is.
+                res["branch_stopped"] = stopped_in = [*stopped_in, name]
             finally:
                 self.unsure_branches -= 1
 
@@ -814,7 +830,13 @@ class _Run:
                 ev = res["until"] = self.checked(until, fresh=True)
                 if met := ev["met"]:
                     break
-            if not self.run_ops(op["steps"], f"{path}.{n}."):
+            try:
+                done = self.run_ops(op["steps"], f"{path}.{n}.")
+            except _BranchEnd:
+                # a would-stop inside the body of a branch-planned repeat: the round did not finish
+                res.update(ok=None, would_stop=True, iterations=n)
+                raise
+            if not done:
                 return
             n += 1
             res["iterations"] = n
@@ -836,6 +858,7 @@ class _Run:
     def op_launch(self, op, path, res):
         if not self.send:
             self.unsent += 1
+            self.unsure_acts += 1 if self.unsure_branches else 0
             res.update(ok=True, would_launch=op.get("app") or op.get("exe"))
             return
         try:
@@ -880,8 +903,12 @@ class _Run:
                 out.update(aborted=True, reason="aborted")
         if not self.send:
             out["verification"] = None
-            if self.unsent:
-                out["planned_acts"] = self.unsent
+            certain = self.unsent - self.unsure_acts
+            if certain:
+                out["planned_acts"] = certain
+            if self.unsure_acts:
+                # acts planned inside an if whose branch the live run may not take: an upper bound
+                out["planned_acts_at_most"] = self.unsent
             would = [{"path": r["path"], "op": r["op"], "reason": r.get("would_fail_now") or r.get("reason"),
                       "error": r.get("error")} for r in self.results
                      if r.get("ran", True) and r.get("ok") is None and (r.get("would_fail_now") or r.get("reason"))]
@@ -894,7 +921,7 @@ class _Run:
                     f"{len(would)} op(s) fail on the screen as it is now ("
                     + ", ".join(f"{w['path']} {w['reason']}" for w in would[:5])
                     + "); a dry run cannot tell whether the planned acts before them would change that"]
-            wstops = [{"path": r["path"], "stop_ok": bool(r.get("stop_ok")), "message": r.get("message")}
+            wstops = [{"path": r["path"], "stop_ok": r.get("stop_ok"), "message": r.get("message")}
                       for r in self.results if r.get("would_stop")]
             if wstops:
                 # A stop inside a branch one of the two futures takes would end the live run; the dry

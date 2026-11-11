@@ -222,6 +222,62 @@ class TestDryRun(unittest.TestCase):
         self.assertEqual((out["ok"], out["stop_reason"], out["results"][1]["branch"]), (True, "stop_op", "then"))
         self.assertEqual(deps.acts, [])
 
+    def test_a_dry_run_plans_focus_instead_of_raising_the_window(self):
+        deps = FakeDeps()
+        out = run_plan([{"op": "perceive", "hwnd": 100, "focus": True, "as": "main"},
+                        {"op": "act", "stamp_ref": "main", "key": "f1"}], deps=deps)
+        self.assertTrue(out["ok"], out)
+        self.assertNotIn("focus", deps.perceives[0])  # SetForegroundWindow never reached core.perceive
+        self.assertTrue(out["results"][0]["focus_planned"])
+        live = run_plan([{"op": "perceive", "hwnd": 100, "focus": True, "as": "main"}],
+                        go=True, deps=(deps := FakeDeps()))
+        self.assertTrue(deps.perceives[0]["focus"])  # the live run still focuses
+        self.assertNotIn("focus_planned", live["results"][0])
+
+    def test_planned_acts_counts_the_certain_ones_and_gives_an_upper_bound(self):
+        deps = FakeDeps(screens=[{"items": [item(1, "Old")]}])
+        out = run_plan([PERCEIVE, {"op": "act", "norm": "1,1"},
+                        {"op": "if", "cond": {"text": "Old"},
+                         "then": [{"op": "act", "key": "f1"}],
+                         "else": [{"op": "act", "key": "f2"}]}], deps=deps)
+        self.assertEqual((out["planned_acts"], out["planned_acts_at_most"]), (1, 3))
+        out = run_plan([PERCEIVE, {"op": "act", "norm": "1,1"}], deps=FakeDeps())
+        self.assertEqual(out["planned_acts"], 1)
+        self.assertNotIn("planned_acts_at_most", out)
+
+    def test_a_stop_in_a_nested_branch_ends_that_branch_only(self):
+        """Each branch is one future of the live run: the stop kills its own branch, while the inner
+        else branch (and what follows the if) are still reachable, so they are still planned."""
+        deps = FakeDeps(screens=[{"items": [item(1, "Old")]}])
+        out = run_plan([PERCEIVE, {"op": "act", "norm": "1,1"},
+                        {"op": "if", "cond": {"text": "Old"},
+                         "then": [{"op": "if", "cond": {"text": "Old"}, "then": [{"op": "stop", "message": "inner"}],
+                                   "else": [{"op": "act", "key": "f9"}]},
+                                  {"op": "act", "key": "f1"}],
+                         "else": [{"op": "act", "key": "f2"}]}], deps=deps)
+        self.assertTrue(out["ok"], out)
+        self.assertEqual([r["path"] for r in out["results"]],
+                         ["0", "1", "2", "2.then.0", "2.then.0.then.0", "2.then.0.else.0", "2.then.1", "2.else.0"])
+        self.assertEqual(out["results"][3]["branch_stopped"], ["then"])
+        self.assertEqual([w["path"] for w in out["would_stop"]], ["2.then.0.then.0"])
+        self.assertEqual(out["would_stop_count"], 1)
+        self.assertEqual([a[0] for a in deps.acts],
+                         [[{"norm": "1,1"}], [{"key": "f9"}], [{"key": "f1"}], [{"key": "f2"}]])
+        self.assertEqual(out["planned_acts"], 1)  # only the act before the if is certain
+        self.assertEqual(out["planned_acts_at_most"], 4)
+
+    def test_a_repeat_cut_by_a_branch_stop_reports_it(self):
+        out = run_plan([PERCEIVE, {"op": "act", "norm": "1,1"},
+                        {"op": "if", "cond": {"text": "Old"},
+                         "then": [{"op": "repeat", "times": 3, "steps": [{"op": "stop", "ok": False}]}],
+                         "else": [{"op": "act", "key": "f2"}]}],
+                       deps=FakeDeps(screens=[{"items": [item(1, "Old")]}]))
+        self.assertTrue(out["ok"], out)
+        rep = out["results"][3]
+        self.assertEqual((rep["op"], rep["ok"], rep["would_stop"], rep["iterations"]), ("repeat", None, True, 0))
+        self.assertEqual([w["path"] for w in out["would_stop"]], ["2.then.0", "2.then.0.0.0"])
+        self.assertTrue(any("stop op(s) inside a planned branch" in w for w in out["warnings"]))
+
     def test_repeat_plans_one_round(self):
         deps = FakeDeps()
         out = run_plan([PERCEIVE, {"op": "repeat", "times": 5, "until": {"text": "End"},
@@ -380,9 +436,17 @@ class TestLive(unittest.TestCase):
         self.assertTrue(out["aborted"])
         self.assertEqual(len(deps.acts), 1)
         self.assertIn("do not retry", out["hint"])
+
+    def test_dry_run_honours_the_abort_switch(self):
+        """A stop holds for every op, planned or sent: a refused dry run cannot raise a window."""
         deps = FakeDeps()
         deps.abort = True
-        self.assertTrue(run_plan([PERCEIVE, {"op": "act", "norm": "1,1"}], deps=deps)["ok"])  # dry runs still plan
+        out = run_plan([PERCEIVE, {"op": "act", "norm": "1,1"}], deps=deps)
+        self.assertEqual((out["ok"], out["stopped_at"], out["stop_reason"], out["aborted"]),
+                         (False, "0", "aborted", True))
+        self.assertEqual(out["results"][0]["gated"], True)
+        self.assertEqual(deps.acts, [])
+        self.assertIn("do not retry", out["hint"])
 
     def test_gated_op_gets_a_result_row(self):
         """A refused op leaves a row, so stopped_at always names an entry in results."""

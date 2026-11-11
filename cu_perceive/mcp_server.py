@@ -778,11 +778,12 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
           {"all":[...]}  {"any":[...]}  {"not":{...}}
         text / uia read a stamp, so that stamp needs "ocr": true or "uia": true on its perceive. Inside wait_for and repeat.until they
         re-perceive the window on every check (fresh); elsewhere pass "fresh":true or they read the old stamp.
-        Dry run: perceives and evaluates conditions (read-only), plans every act, waits for nothing. After the
-        first planned act, checks are speculative (the live run would have changed the screen): they are
-        marked and a failing one does not stop the dry run (see would_fail); an if then plans both branches
-        (branch "both", branch_now = what the screen says now) and a stop inside one only ends that branch
-        (would_stop).
+        Dry run: perceives and evaluates conditions (read-only), plans every act, waits for nothing. Its
+        perceive focus is planned, not performed (focus_planned), and the abort switch stops it like a live
+        run. After the first planned act, checks are speculative (the live run would have changed the
+        screen): they are marked and a failing one does not stop the dry run (see would_fail); an if then
+        plans both branches (branch "both", branch_now = what the screen says now) and a stop inside one
+        ends that branch only (branch_stopped, would_stop; listed in the run's would_stop).
         Limits: 64 ops per run, nesting 4, repeat 20, wait 30 s, wait_for 60 s, interval_ms 100..1000,
         timeout_ms up to 600000. The 64-op cap is checked between ops, so the op that reaches it runs to its
         end; abort and the plan deadline are also read inside a running wait / wait_for (at least every
@@ -790,8 +791,9 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         wait_for that spends its own timeout_ms stops with wait_timeout. Result: ok, results[] (one row per
         op with path such as "3.then.0"), stopped / stopped_at / stop_reason, frames, verification
         (observed | sent | no_input | partial | refused | aborted | null for a dry run), evidence.steps_sent;
-        a dry run adds planned_acts, would_fail and would_stop (a stop inside a planned branch only ends
-        that branch, so it is listed here instead of stopping the run).
+        a dry run adds planned_acts (planned_acts_at_most when a branch is unsure), would_fail and would_stop
+        (a stop inside a planned branch only ends that branch, so it is listed here instead of stopping the
+        run).
         validate_only=true checks the plan and runs nothing."""
         _ = (profile, show_config)  # applied by the MCP wrapper before this body, and stamped on the result
         from .plan import run_plan, validate_plan

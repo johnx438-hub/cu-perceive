@@ -472,8 +472,10 @@ no such stamp) fails the op; it is never treated as false.
 
 The live gate is `--go` / `go=true` on the call. A plan that contains `go` is refused. A dry
 run perceives and evaluates conditions, which only read, plans every act and waits for
-nothing. After the first planned act, later checks describe a screen the live run would have
-changed: they are marked `speculative`, and a failing one reports `ok: null` plus its
+nothing; its `perceive` `focus: true` is planned rather than performed (`focus_planned`), and
+the operator `abort` switch stops it like a live run. After the first planned act, later
+checks describe a screen the live run would have changed: they are marked `speculative` (on
+the row and inside `cond`), and a failing one reports `ok: null` plus its
 `reason` / `would_fail_now` instead of stopping the dry run. Those rows are also collected in
 `would_fail` (`[{path, op, reason, error}]` with `would_fail_count` and a `warnings` line), so
 a typoed `ocr_text` or a stale `stamp_ref` cannot hide behind a green `ok: true`. The list says
@@ -481,9 +483,12 @@ what fails on the screen as it is now, not what the live run will do: a target t
 appears after an earlier act is listed as well, and telling the two apart is the reader's job.
 For the same reason an `if` after the first planned act plans both branches (`branch: "both"`,
 with `branch_now` for what the screen says now), and a `stop` inside one only ends that branch
-(`would_stop`, `stop_ok`) instead of ending the dry run; those rows are collected in `would_stop`
-(`[{path, stop_ok, message}]` with `would_stop_count`), and a `stop_ok: false` among them also
-adds a `warnings` line, because live it would end the run with `ok: false`. A live plan
+(`branch_stopped`, `would_stop`, `stop_ok`) instead of ending the dry run — each branch is one
+future of the live run, so the other branch and the ops after the `if` are still planned. Those
+rows are collected in `would_stop` (`[{path, stop_ok, message}]` with `would_stop_count`), and a
+`stop_ok: false` among them also adds a `warnings` line, because live it would end the run with
+`ok: false`. `planned_acts` counts the acts the run sends whichever branch it takes;
+`planned_acts_at_most` is added when a branch is unsure. A live plan
 only acts on window stamps (`no_window_stamp` otherwise).
 
 A plan is validated in full before anything runs (`reason: "bad_plan"`, `path` of the op).
