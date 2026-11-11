@@ -120,6 +120,7 @@ OCR / UIA / YOLO 是可选包（`[ocr]` / `[uia]` / `[yolo]`），第一次用�
 | 出图目录 | `--out` | `out_dir`。写进 WSL workspace 用 UNC `\\wsl.localhost\Ubuntu\home\<user>\...`，不要 `/home/<user>`（会落到 `C:\home\<user>`）。`/mnt/c/...` 仍可用。另有 `map_wsl` |
 | 拉前台再抓 | `--focus` | `focus=true`（默认 false，不抢前台） |
 | 采集后端 | `--capture auto|wgc|printwindow|screen|dwm` | `capture`（`screen` 需 focus；`dwm` 实验性） |
+| 跨帧脚本 | `plan FILE [--go]` | `plan`（`go` 只在调用上；见下） |
 | 操作员停止 | —（只有 MCP） | `abort`（默认拉起停止；`status=true` 只读；`clear=true` 解除——那是操作员的事） |
 
 `launch` / `launch_app` 会真启动，没有 dry-run。
@@ -130,6 +131,17 @@ OCR / UIA / YOLO 是可选包（`[ocr]` / `[uia]` / `[yolo]`），第一次用�
 - `verification`：`observed`（有改动被测到）/ `sent`（发出了，没确认落地）/ `partial`（发了一部分后失败，含逐字打字中途失败）/ `refused`（什么都没发）/ `aborted`（操作员停止）/ `null`（dry run）。
 - `partial` 时先 perceive 看现场再决定，不要整段重发（可能重复输入）。
 - **硬规则**：看到 `verification="aborted"` 或 `abort_active=true` → 停手，向人汇报；不要重试，不要自己调 `abort(clear=true)`。停止只管桌面 `act`，不管 `browser_act`。
+
+### 跨帧脚本：`plan`
+
+单帧里的多步用 `act` 的 `steps=[...]`。要跨帧（点了以后等结果、看情况再点）用 `plan`：一次调用里 perceive → act → 等条件 → 分支 → 再 perceive。CLI `cu-perceive plan plan.json [--go] [--validate]`（`-` 读 stdin），MCP `plan(plan=..., go=false)`。
+
+- 操作：`perceive`（`as` 起名，`from` 按原来的检测器重看同一个窗）、`act`（`stamp_ref` 指名字；字段同 `act`，可带 `steps`）、`wait`、`wait_for`、`assert`、`if`/`then`/`else`、`repeat`（`times` ≤ 20，可带 `until`）、`launch`、`stop`。每个操作可带 `on_fail: "continue"`。plan 之前已有的 stamp 用 `stamps: {"main": "<stamp>"}` 起名。
+- 条件只有这几种，不能写代码：`window`、`foreground`、`text`、`uia`、`last`（上一步结果的字段，如 `{"last": {"ok": false}}`），用 `all` / `any` / `not` 组合。`text` / `uia` 读的是 stamp，那个 stamp 要带 OCR 或 UIA；在 `wait_for` 和 `repeat.until` 里每次检查都会重新 perceive，别处要写 `"fresh": true`。条件算不出来（没有文字来源、没有这个 stamp）算失败，不当成 false。
+- act 的步可以写 `"ocr_text": "保存"`，在这一步用的 stamp 上按文字找 OCR 项：先精确（不分大小写）再包含，不是恰好一个就拒绝（`target_not_found` / `ambiguous_target`，带 `candidates`）。
+- `go` 只能在调用上给，plan 里写了 `go` 直接拒绝。dry-run 会真的 perceive 和检查条件（只读），act 只规划，不等待。第一个 act 之后的检查看到的不是真跑时的画面，标 `speculative`，不通过也只是 `ok: null` + `would_fail_now`，不会停。真跑只对窗口 stamp 动手（否则 `no_window_stamp`）。
+- 上限：一次最多 64 个操作，嵌套 4 层，`timeout_ms` 默认 120 秒。每个操作前都查 `abort`。结果里 `results` 每个操作一行（`path` 如 `3.then.0`），停了看 `stopped_at` / `stop_reason`；`verification` 和 `act` 一样，另有 `no_input`（真跑但没发任何输入）。前面做完的不会回滚。
+- 先 dry-run 给用户看，用户同意后同一份 plan 加 `go=true`。
 
 ## WSL / Grok Build / minimal-agent-ts
 

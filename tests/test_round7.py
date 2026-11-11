@@ -489,7 +489,7 @@ class TestToolsRunOffTheEventLoop(unittest.TestCase):
             mcp_server.serve()
         self.assertEqual(set(app.registered), {
             "windows", "perceive_window", "act", "launch_app", "apps", "config",
-            "browser_status", "browser_session", "browser_observe", "browser_tabs", "browser_act", "abort",
+            "browser_status", "browser_session", "browser_observe", "browser_tabs", "browser_act", "abort", "plan",
         })
         for name, fn in app.registered.items():
             self.assertTrue(asyncio.iscoroutinefunction(fn), name)

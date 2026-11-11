@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "goal": "click Export, wait for the result, branch on an error dialog",
+  "steps": [
+    {"op": "perceive", "exe": "myapp", "ocr": true, "as": "main"},
+    {"op": "assert", "cond": {"text": "Export", "stamp_ref": "main"}, "message": "not on the export page"},
+    {"op": "act", "stamp_ref": "main", "ocr_text": "Export", "focus": true},
+    {"op": "wait_for", "timeout_ms": 20000,
+     "cond": {"any": [{"text": "Done", "stamp_ref": "main"}, {"window": {"title": "Error"}}]}},
+    {"op": "if", "cond": {"window": {"title": "Error"}},
+     "then": [{"op": "stop", "ok": false, "message": "export failed: an Error window is open"}],
+     "else": [{"op": "act", "stamp_ref": "main", "ocr_text": "Open folder"}]}
+  ]
+}

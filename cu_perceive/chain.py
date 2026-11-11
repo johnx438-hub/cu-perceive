@@ -235,3 +235,138 @@ def run_steps(
         out["planned_steps"] = [d.get("steps") for d in done]
     out["foreground_click_count"] = sum(int(d.get("foreground_click_count") or 0) for d in done)
     return out
+
+
+def _nz_int(v: int):
+    return v if v else None
+
+
+def _nz_scroll(v):
+    """MCP scroll: int or string; 0 / "" = no scroll."""
+    if isinstance(v, bool) or v in (None, "", 0):
+        return None
+    return str(v).strip() or None
+
+
+def _nz_str(v: str):
+    return v if v else None
+
+
+def _wait_s(ms):
+    """new_window_wait_ms -> seconds (None = default)."""
+    if ms is None or ms == "":
+        return None
+    try:
+        return max(0.0, float(ms)) / 1000.0
+    except (TypeError, ValueError):
+        return None
+
+
+def _chain_step_s() -> float:
+    from .settings import get as _cfg
+
+    return float(_cfg("popup.chain_step_s"))
+
+
+def _chain_step_wait(ms, step: dict, i: int, n: int):
+    """Chains wait long only on the last / expect_change step; field clicks keep 250 ms.
+
+    Returns the explicit wait (seconds) when the caller passed new_window_wait_ms, else None.
+    """
+    full = _wait_s(ms)
+    if full is None or i == n - 1 or step.get("expect_change"):
+        return full
+    return min(_chain_step_s(), full)
+
+
+def _chain_step_cap(ms, step: dict, i: int, n: int):
+    """Without an explicit wait, non-final steps cap the default wait at 250 ms (reason chain_step)."""
+    if _wait_s(ms) is not None or i == n - 1 or step.get("expect_change"):
+        return None
+    return _chain_step_s()
+
+
+def flat_specs(f: dict):
+    """One chain step (flat act fields) -> run_chain specs."""
+    from .act import coerce_ids, parse_steps
+    from .settings import get as _cfg
+
+    return parse_steps(
+        ids=coerce_ids(f.get("ids", "")), xy=_nz_str(f.get("xy", "")), norm=_nz_str(f.get("norm", "")),
+        text=_nz_str(f.get("text", "")), key=_nz_str(f.get("key", "")), drag=_nz_str(f.get("drag", "")),
+        drag_norm=_nz_str(f.get("drag_norm", "")), scroll=_nz_scroll(f.get("scroll", "")),
+        button=f.get("button") or "left", hover=bool(f.get("hover", False)),
+        step_px=int(_cfg("drag.step_px") if f.get("step_px") in (None, "") else (f.get("step_px") or _cfg("drag.step_px"))),
+        hold=float(_cfg("timing.click_hold_s") if f.get("hold") in (None, "") else (f.get("hold") or 0)),
+        uia_name=_nz_str(f.get("uia_name", "")) or None, replace=bool(f.get("replace", False)),
+        input_via=_nz_str(f.get("via", "")),
+    )
+
+
+def act_chain(steps, call: dict) -> dict:
+    """Run ``steps`` (MCP act steps=[...]) with the chain-level fields in ``call``
+    (stamp hwnd go dry_run focus ime method hold_key max_age_sec strict_stamp new_window_wait_ms)."""
+    import json
+
+    from .act import StampWindowMismatch, load_frame, run_chain
+
+    send = bool(call.get("go")) and not call.get("dry_run")
+    mixed = [k for k in ACTION_FIELDS if call.get(k) not in (None, "", [], 0)]
+    if mixed:
+        return {"ok": False, "reason": "bad_args", "dry_run": not send,
+                "error": f"steps cannot be combined with top-level action field(s) {', '.join(mixed)}",
+                "hint": "put every action inside steps=[...], or drop steps for a flat single-step act"}
+    norm_steps, err = validate_steps(steps)
+    if err:
+        err["dry_run"] = not send  # a live call with bad steps is refused, not a dry run
+        return err
+    try:
+        frame, path = load_frame(stamp=_nz_str(call.get("stamp", "")), hwnd=_nz_int(call.get("hwnd", 0)))
+    except StampWindowMismatch as e:
+        return {"ok": False, "error": str(e), "dry_run": not send, "reason": "hwnd_mismatch",
+                "hint": "perceive_window(hwnd=...) and pass that stamp, or drop hwnd"}
+    except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError) as e:
+        return {"ok": False, "error": str(e), "dry_run": not send}
+    stamp_source = ("explicit" if _nz_str(call.get("stamp", "")) else "latest") if path else None
+
+    def run_one(step: dict, send_flag: bool, i: int) -> dict:
+        try:
+            specs = flat_specs(step)
+        except ValueError as e:
+            return {"ok": False, "error": str(e), "dry_run": not send_flag, "reason": "bad_args",
+                    "hint": 'points are norm="x,y" / xy="x,y" (or [x,y]); scroll="down:3" / "up:3"'}
+        return run_chain(
+            frame, specs, dry_run=not send_flag,
+            hold_key=_nz_str(step.get("hold_key", "")) or _nz_str(call.get("hold_key", "")),
+            method=_nz_str(step.get("method", "")) or _nz_str(call.get("method", "")) or "input",
+            max_age_sec=call.get("max_age_sec"), strict_stamp=bool(call.get("strict_stamp")),
+            stamp_json_path=str(path) if path else None,
+            focus=bool(call.get("focus")) and i == 0,
+            stamp_source=stamp_source, ime=_nz_str(call.get("ime", "")),
+            new_window_wait_s=_chain_step_wait(call.get("new_window_wait_ms"), step, i, len(norm_steps)),
+            new_window_wait_cap_s=_chain_step_cap(call.get("new_window_wait_ms"), step, i, len(norm_steps)),
+        )
+
+    stamp_hwnd = int((frame or {}).get("hwnd") or 0)
+
+    def title_now():
+        if not stamp_hwnd:
+            return None
+        from ._win32 import window_title
+
+        return window_title(stamp_hwnd)
+
+    if send:
+        # One abort epoch for the whole chain: a stop on at chain start stays on for every step.
+        from .act import abort_epoch
+
+        with abort_epoch():
+            out = run_steps(norm_steps, run_one, send=send, stamp_hwnd=stamp_hwnd, title_now=title_now)
+    else:
+        out = run_steps(norm_steps, run_one, send=send, stamp_hwnd=stamp_hwnd, title_now=title_now)
+    out["stamp"] = (frame or {}).get("stamp")
+    out["hwnd"] = stamp_hwnd or None
+    out["json"] = str(path) if path else None
+    if call.get("go") and call.get("dry_run"):
+        out["warnings"] = ["dry_run=true overrides go=true: this was a dry run, nothing was sent"] + (out.get("warnings") or [])
+    return out

@@ -15,7 +15,7 @@ inside Chrome/Edge (see Browser). bsk is not bundled.
 
 One core, two faces:
 
-- CLI: `cu-perceive perceive|windows|act` (or `python -m cu_perceive ...`)
+- CLI: `cu-perceive perceive|windows|act|plan` (or `python -m cu_perceive ...`)
 - MCP: `cu-perceive mcp` -> http://127.0.0.1:8771/mcp (loopback only; do not bind 0.0.0.0)
 
 ## Contract
@@ -412,6 +412,78 @@ whole act, however long its steps take. An agent that sees `aborted` should stop
 and report to the operator rather than clear the flag itself. Every act
 result, dry runs included, reports `abort_active` and, while it is on,
 `abort_remaining_s`.
+
+### Plans: several frames in one call
+
+`act` (flat or `steps=[...]`) works on one stamp and stops when the screen changes. A plan
+is a small JSON script that carries on across frames without a round trip to the agent for
+each one: perceive, act, wait for a condition, branch, re-perceive, act again.
+
+    cu-perceive plan plan.json            # dry run
+    cu-perceive plan plan.json --go       # live
+    cu-perceive plan - --validate < plan.json
+    # MCP: plan(plan={...} | "<json>" | "<path>", go=false, validate_only=false)
+
+```json
+{"goal": "export and open the folder", "steps": [
+  {"op": "perceive", "exe": "myapp", "ocr": true, "as": "main"},
+  {"op": "act", "stamp_ref": "main", "ocr_text": "Export", "focus": true},
+  {"op": "wait_for", "cond": {"any": [{"text": "Done"}, {"window": {"title": "Error"}}]}, "timeout_ms": 20000},
+  {"op": "if", "cond": {"window": {"title": "Error"}},
+   "then": [{"op": "stop", "ok": false, "message": "export failed"}],
+   "else": [{"op": "act", "stamp_ref": "main", "ocr_text": "Open folder"}]}
+]}
+```
+
+| Op | Fields |
+|---|---|
+| `perceive` | `hwnd` / `title` / `exe`, or `from` (re-perceive that stamp's window with the same detectors); `ocr` `uia` `yolo` `focus` `capture`; `as` names the stamp |
+| `act` | `stamp_ref` (a name) or `stamp`; without either, the plan's latest perceive. The flat `act` fields, or `steps=[...]` for a guarded chain; `focus` `ime` `method` `check_change` |
+| `wait` | `sec` (at most 30) |
+| `wait_for` | `cond`, `timeout_ms` (default 5000, at most 60000), `interval_ms` (default 300) |
+| `assert` | `cond`, `message` |
+| `if` | `cond`, `then`, `else` |
+| `repeat` | `times` (1-20), `steps`, optional `until` (checked before each round and after the last) |
+| `launch` | `app` or `exe` |
+| `stop` | `ok` (default true), `message` |
+
+Every op takes `on_fail: "continue"` (the default is `"stop"`) and `note`. An act step can
+name its target by OCR text, `"ocr_text": "Save"`, resolved on the stamp the act runs on:
+an exact match (case-insensitive) wins over a substring match, and anything but one match
+fails closed (`target_not_found`, `ambiguous_target` with `candidates`). `uia_name` works as
+in `act`. `plan.stamps` (`{"main": "<stamp>"}`) names stamps taken before the plan.
+
+Conditions are data, not code. Each has exactly one kind:
+
+| Condition | True when |
+|---|---|
+| `{"window": {"title", "exe", "minimized"}}` | a matching top-level window exists |
+| `{"foreground": {...}}` with one of `title`, `hwnd`, `stamp_ref` | the foreground window matches |
+| `{"text": "Done", "stamp_ref", "source", "match", "fresh"}` | an OCR item or UIA name/value on that stamp has the text (`source`: `any`, `ocr`, `uia`; `match`: `contains`, `exact`) |
+| `{"uia": {"name", "control_type", "value"}, "stamp_ref", "match", "fresh"}` | a UIA node matches every given field |
+| `{"last": {"ok": false, "reason": "point_covered"}}` | the previous op's result has these fields (a boolean compares truthiness; dotted keys reach into objects) |
+| `{"all": [...]}`, `{"any": [...]}`, `{"not": {...}}` | as named, evaluated left to right |
+
+`text` and `uia` read a stamp, so that stamp needs OCR or UIA. In `wait_for` and
+`repeat.until` they re-perceive the window on every check and the stamp's name then points
+at the new frame, so an act after the wait runs on what the wait saw. Elsewhere they read the
+stamp as it is unless `"fresh": true`. A condition that cannot be evaluated (no text source,
+no such stamp) fails the op; it is never treated as false.
+
+The live gate is `--go` / `go=true` on the call. A plan that contains `go` is refused. A dry
+run perceives and evaluates conditions, which only read, plans every act and waits for
+nothing. After the first planned act, later checks describe a screen the live run would have
+changed: they are marked `speculative`, and a failing one reports `ok: null` and
+`would_fail_now` instead of stopping the dry run. A live plan only acts on window stamps
+(`no_window_stamp` otherwise).
+
+A plan is validated in full before anything runs (`reason: "bad_plan"`, `path` of the op).
+One run executes at most 64 ops, nests `if` / `repeat` 4 deep, and stops at `timeout_ms`
+(default 120000, at most 600000). The operator `abort` switch is checked before every op.
+The result has one row per op in `results` (`path` such as `3.then.0`), `stopped`,
+`stopped_at`, `stop_reason`, `frames`, and the same `verification` / `evidence.steps_sent`
+as `act`, plus `no_input` for a live plan that sent nothing. Ops are not undone when a later
+one fails. Examples: `docs/examples/plan-wait-and-branch.json`, `plan-scroll-until.json`.
 
 CLI output is always UTF-8 (window titles can contain any script), whatever the
 console code page is. Decode it as UTF-8. PowerShell decodes captured output

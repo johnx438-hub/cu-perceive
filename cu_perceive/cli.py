@@ -270,6 +270,15 @@ def main(argv: list[str] | None = None) -> int:
         help="optional canvas ROI L,T,W,H in image pixels (top-left=0,0); norm relative to ROI",
     )
 
+    pl = sub.add_parser(
+        "plan",
+        parents=[common],
+        help="run a multi-frame JSON plan: perceive / act / wait_for / assert / if / repeat (dry-run unless --go)",
+    )
+    pl.add_argument("file", help="plan JSON file, or - to read the plan from stdin")
+    pl.add_argument("--go", action="store_true", help="actually send input; default plans every act and sends nothing")
+    pl.add_argument("--validate", action="store_true", help="check the plan and run nothing")
+
     cfg = sub.add_parser("config", parents=[common], help="show, validate, or reload the effective configuration")
     cfg.add_argument("action", nargs="?", choices=("show", "validate", "reload"), default="show")
 
@@ -300,6 +309,19 @@ def main(argv: list[str] | None = None) -> int:
         out = config_action(args.action, profile=args.profile)
         _emit(out, args, indent=2)
         return 0 if out.get("ok", True) else 1
+    if args.cmd == "plan":
+        from .plan import run_plan, validate_plan
+
+        src = sys.stdin.read() if args.file == "-" else args.file
+        if args.validate:
+            _, err = validate_plan(src)
+            out = err or {"ok": True, "plan": True, "validated": True}
+        else:
+            out = run_plan(src, go=bool(args.go))
+        _emit(out, args)
+        if not out.get("ok"):
+            print(out.get("error") or "plan failed", file=sys.stderr)
+        return 0 if out.get("ok") else 1
     if args.cmd == "perceive":
         from .core import perceive
         from .extras import MissingExtraError

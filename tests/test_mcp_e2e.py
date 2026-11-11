@@ -227,6 +227,33 @@ class TestMcpServerE2E(unittest.TestCase):
         self.assertIn("dry_run", err["valid_args"])
         self.assertFalse(err["ok"])
 
+    def test_plan_tool_dry_run_and_refusals(self):
+        payload = json.loads(self._call("perceive_window", {"image": str(self.png), "map_inline": False})[0]["text"])
+        steps = [{"op": "act", "stamp_ref": "img", "steps": [{"norm": "500,500", "text": "hi"}, {"key": "enter"}]},
+                 {"op": "if", "cond": {"last": {"ok": True}}, "then": [{"op": "wait", "sec": 1}]}]
+        out = json.loads(self._call("plan", {"plan": {"stamps": {"img": payload["stamp"]}, "steps": steps}})[0]["text"])
+        self.assertTrue(out["ok"], out)
+        self.assertTrue(out["dry_run"])
+        self.assertIsNone(out["verification"])
+        self.assertEqual([r["path"] for r in out["results"]], ["0", "1", "1.then.0"])
+        self.assertEqual(out["results"][0]["step_count"], 2)
+        self.assertIn("config_rev", out)
+
+        # go=true on an image stamp: a live plan only acts on window stamps, so nothing reaches act.
+        # Keys only all the same: on a screen-space stamp a pointer step with go=true really clicks the desktop.
+        keys = [{"op": "act", "stamp_ref": "img", "text": "hi"}, {"op": "wait", "sec": 1}]
+        live = json.loads(self._call("plan", {"plan": {"stamps": {"img": payload["stamp"]}, "steps": keys},
+                                              "go": True})[0]["text"])
+        self.assertFalse(live["ok"], live)
+        self.assertEqual((live["stopped_at"], live["stop_reason"], live["verification"]),
+                         ("0", "no_window_stamp", "refused"))
+        self.assertEqual(live["evidence"]["steps_sent"], 0)
+
+        bad = json.loads(self._call("plan", {"plan": {"go": True, "steps": steps}, "go": True})[0]["text"])
+        self.assertEqual(bad["reason"], "bad_plan")
+        ok = json.loads(self._call("plan", {"plan": json.dumps(steps[1:]), "validate_only": True})[0]["text"])
+        self.assertTrue(ok["validated"])
+
     def test_rejects_foreign_host_header(self):
         body = {"jsonrpc": "2.0", "id": 999, "method": "tools/list", "params": {}}
         with self.assertRaises(urllib.error.HTTPError) as cm:
