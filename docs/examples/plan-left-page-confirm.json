@@ -1,16 +1,17 @@
 {
   "version": 1,
-  "goal": "open the top story's comments, then wait until the front page is gone",
+  "goal": "open Hacker News 'past', then wait until the front page is gone",
   "steps": [
     {"op": "perceive", "title": "Hacker News", "ocr": true, "as": "hn",
-     "note": "the front page title is exactly 'Hacker News'; an article page is '... | Hacker News'"},
-    {"op": "wait_until_stable", "stamp_ref": "hn", "stable_ms": 800},
-    {"op": "act", "stamp_ref": "hn", "ocr_text": "comments", "confirm_frames": 2, "focus": true,
-     "note": "OCR item sets flicker on a busy page: act only if the match holds on the next frame too"},
+     "note": "the browser window: its title is 'Hacker News - Google Chrome' (Edge: '... - Microsoft Edge')"},
+    {"op": "wait_until_stable", "stamp_ref": "hn", "stable_ms": 800, "timeout_ms": 15000},
+    {"op": "act", "stamp_ref": "hn", "ocr_text": "past", "confirm_frames": 2, "focus": true,
+     "note": "the top-bar link; an exact OCR item wins over story titles that contain the word. confirm_frames: act only if the match holds on the next frame too. If OCR reads the top bar as one item, this stops as ambiguous_target / target_not_found with candidates: switch to norm"},
     {"op": "wait_for", "timeout_ms": 15000,
-     "cond": {"not": {"window": {"title": "Hacker News", "match": "exact"}}},
-     "note": "contains would also match the comments page title, so this never became true"},
-    {"op": "perceive", "exe": "chrome", "ocr": true, "as": "page"},
-    {"op": "assert", "cond": {"text": "comments", "stamp_ref": "page", "confirm_frames": 2}}
+     "cond": {"not": {"window": {"title": "^Hacker News( - |$)", "match": "regex"}}},
+     "note": "the front page title starts with 'Hacker News'; other pages are '<page> | Hacker News - ...'. contains would match those too and never become true"},
+    {"op": "perceive", "from": "hn", "ocr": true, "as": "page"},
+    {"op": "assert", "cond": {"text": "Stories from", "stamp_ref": "page", "confirm_frames": 2},
+     "message": "the 'past' page lists 'Stories from <date>'"}
   ]
 }

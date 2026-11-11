@@ -767,6 +767,8 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
            candidates[]; both carry stamp, match_count, ocr_items). "confirm_frames":2 (1..3, default 1 = off)
            re-perceives the window and acts only if each ocr_text match keeps its text and stays within 20
            (0-1000) on the next frame; the act then runs on that newer stamp (else unstable_target, frames[]).
+           The act's highest confirm_frames applies to every ocr_text step of it, and an act that confirms
+           refuses steps targeting by ids or uia_name "#N" (those number the first frame's items).
           {"op":"wait", "sec":0.5}
           {"op":"wait_for", "cond":{...}, "timeout_ms":5000, "interval_ms":300}
           {"op":"assert", "cond":{...}, "message":"..."}
@@ -777,11 +779,16 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
           {"window":{"title","exe","class","minimized","match"}}  a matching top-level window exists. match:
             "contains" (default, substring, as before) | "exact" (whole title / class) | "regex" (re.search,
             case-insensitive) applies to title and class; exe stays a substring. match may also sit beside
-            the body: {"window":{...},"match":"exact"}. Only exact/regex can say "left this page":
-            {"not":{"window":{"title":"Hacker News","match":"exact"}}} (contains also matches "... | Hacker News").
+            the body: {"window":{...},"match":"exact"}. Browser titles carry a suffix ("Hacker News - Google
+            Chrome"), so "left this page" is an anchored regex: {"not":{"window":{"title":"^Hacker News( - |$)",
+            "match":"regex"}}} (contains also matches "... | Hacker News - Google Chrome"; exact on the bare
+            page name never matches, so its not holds at once). regex reads the first 512 characters. exact,
+            regex and class filter windows in z-order (first is not ranked the way the windows tool ranks a title
+            lookup), and untitled windows are not listed.
           {"foreground":{"title"|"hwnd"|"stamp_ref"}}
           {"text":"Done", "stamp_ref":"main", "source":"any|ocr|uia", "match":"contains|exact", "fresh":true,
-           "confirm_frames":2}  confirm_frames (1..3, default 1): met only if the next frame(s) match too
+           "confirm_frames":2}  confirm_frames (1..3, default 1): met only if the next frame(s) match too;
+           a match that does not hold is unstable: true, and a not over it is unmet as well (undetermined)
           {"uia":{"name","control_type","value"}, "stamp_ref", "match", "fresh"}
           {"challenge":true, "stamp_ref", "fresh"}  a human-verification / interstitial page is on screen
           {"last":{"ok":false}}  fields of the previous op's result (dotted keys ok: "evidence.steps_sent")
@@ -817,7 +824,11 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         "resumable": true}. Merge it into the same plan and call again: it runs from that op (inside an if
         it keeps the branch, inside a repeat it finishes that round and goes on), with frames.latest and the
         named stamps carried; the rows of containers on the way carry resumed: true, the result has
-        resumed_from, and a last condition starts empty. An aborted run has no continuation.
+        resumed_from, and a last condition starts empty. An aborted run has no continuation. A dry run's
+        continuation adds from_dry_run: true (and speculative: true once it had planned an act): it resumes a
+        dry run only (refused with go, since its earlier acts were never sent), speculative keeps later checks
+        in would_fail, and an if both-planned before the cut resumes only the branch it was cut in. A dry run
+        plans both branches of such an if, so it can reach the cap where a live run would not.
         validate_only=true checks the plan and runs nothing; it returns static_ops {least, most, cap}."""
         _ = (profile, show_config)  # applied by the MCP wrapper before this body, and stamped on the result
         from .plan import run_plan, validate_report

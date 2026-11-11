@@ -106,9 +106,11 @@ MAX_CONFIRM_FRAMES = 3  # confirm_frames: how many consecutive frames must agree
 CONFIRM_TOLERANCE_NORM = 20  # how far (0-1000) a confirmed ocr_text match may move between frames
 WINDOW_MATCH = ("contains", "exact", "regex")
 MAX_PATTERN_LEN = 256
+MAX_REGEX_HAY = 512  # regex mode reads the first 512 characters of a title / class
 RESUME_REASONS = ("max_ops", "timeout")  # stops a continuation can pick up from
 
 PLAN_FIELDS = frozenset({"version", "goal", "stamps", "timeout_ms", "stop_on_challenge", "steps", "resumable",
+                         "from_dry_run", "speculative",
                          "resume_from"})
 COMMON_FIELDS = frozenset({"op", "on_fail", "note"})
 PERCEIVE_FLAGS = ("ocr", "uia", "yolo", "focus")
@@ -370,6 +372,17 @@ def _validate_act(op: dict, path: str, names: set) -> None:
                 raise PlanError(f"{path}.steps.{i}", f"ocr_text cannot be combined with {', '.join(clash)}")
             s = {k: v for k, v in s.items() if k not in PLAN_STEP_FIELDS} | {"ids": "1"}
         probe.append(s)
+    if any(isinstance(s, dict) and _is_num(s.get("confirm_frames")) and s["confirm_frames"] > 1 for s in steps):
+        for i, s in enumerate(steps):
+            if not isinstance(s, dict):
+                continue
+            byid = [k for k in ("ids",) if s.get(k)] + (
+                ["uia_name"] if isinstance(s.get("uia_name"), str) and s["uia_name"].lstrip().startswith("#") else [])
+            if byid:
+                raise PlanError(f"{path}.steps.{i}",
+                                f"confirm_frames acts on a newer frame, where {byid[0]} numbers other items",
+                                "target the other steps by ocr_text, norm, xy or a uia_name by name, "
+                                "or confirm in a step of its own act")
     _, err = validate_steps(probe)
     if err:
         raise PlanError(path, err.get("error") or "bad act steps", err.get("hint") or "")
@@ -560,6 +573,9 @@ def static_ops(plan: dict) -> dict:
     return {"least": least, "most": most, "cap": MAX_OPS}
 
 
+_DIGITS = re.compile(r"[0-9]+")  # str.isdigit() also takes digits int() refuses
+
+
 def _validate_resume(plan: dict) -> None:
     rf = plan["resume_from"]
     if not isinstance(rf, str) or not rf:
@@ -569,14 +585,14 @@ def _validate_resume(plan: dict) -> None:
     ops, where = plan["steps"], ""
     while True:
         head = parts.pop(0)
-        if not head.isdigit() or int(head) >= len(ops):
+        if not _DIGITS.fullmatch(head) or int(head) >= len(ops):
             raise PlanError("resume_from", f"resume_from {rf!r}: no op {where}{head}")
         op, where = ops[int(head)], f"{where}{head}."
         if not parts:
             return
         if op["op"] == "if" and parts[0] in ("then", "else") and op.get(parts[0]):
             ops, where = op[parts[0]], f"{where}{parts.pop(0)}."
-        elif op["op"] == "repeat" and parts[0].isdigit() and int(parts[0]) < int(op["times"]):
+        elif op["op"] == "repeat" and _DIGITS.fullmatch(parts[0]) and int(parts[0]) < int(op["times"]):
             ops, where = op["steps"], f"{where}{parts.pop(0)}."
         else:
             raise PlanError("resume_from", f"resume_from {rf!r}: {where.rstrip('.')} has no {parts[0]!r}",
@@ -606,6 +622,13 @@ def validate_plan(src: Any) -> tuple[dict | None, dict | None]:
                             f"{LATEST!r} seeds the latest frame (a continuation carries it)")
         if "resumable" in plan and not isinstance(plan["resumable"], bool):
             raise PlanError("resumable", "resumable must be true or false")
+        for key in ("from_dry_run", "speculative"):
+            if key in plan and not isinstance(plan[key], bool):
+                raise PlanError(key, f"{key} must be true or false")
+        if (plan.get("from_dry_run") or plan.get("speculative")) and "resume_from" not in plan:
+            raise PlanError("from_dry_run", "from_dry_run / speculative only come with a continuation (resume_from)")
+        if plan.get("speculative") and not plan.get("from_dry_run"):
+            raise PlanError("speculative", "speculative comes from a dry run's continuation (from_dry_run: true)")
         t = plan.get("timeout_ms", DEFAULT_TIMEOUT_MS)
         if not _is_num(t) or not 0 < t <= MAX_TIMEOUT_MS:
             raise PlanError("timeout_ms", f"timeout_ms must be in (0, {MAX_TIMEOUT_MS}]")
@@ -771,7 +794,8 @@ def _matches(hay, needle: str, mode: str) -> bool:
     if hay is None:
         return False
     if mode == "regex":
-        return re.search(needle, str(hay), re.IGNORECASE) is not None
+        # a caller's pattern against page-made titles: bound the haystack so backtracking stays short
+        return re.search(needle, str(hay)[:MAX_REGEX_HAY], re.IGNORECASE) is not None
     return _cf(hay) == _cf(needle) if mode == "exact" else _cf(needle) in _cf(hay)
 
 
@@ -800,16 +824,20 @@ class _Run:
     def __init__(self, plan: dict, send: bool, deps: Deps):
         self.plan, self.send, self.deps = plan, send, deps
         self.frames: dict[str, dict] = {}
-        by_json: dict[str, dict] = {}
-        for n, s in (plan.get("stamps") or {}).items():
-            # names that carried the same stamp (a continuation's "latest" and "main") stay one frame, so a
-            # refresh through either name moves both, as it did before the cut
-            self.frames[n] = by_json.setdefault(s, {"json": s, "data": None})
+        stamps = plan.get("stamps") or {}
+        latest = {"json": stamps[LATEST], "data": None} if LATEST in stamps else None
+        for n, s in stamps.items():
+            # a name that carried the latest frame (a continuation's "latest" and "main") stays that one
+            # frame, so a refresh through either moves both, as before the cut; other names that share a
+            # json stay apart (a caller's "baseline" and "main" are two frames)
+            self.frames[n] = latest if latest is not None and s == latest["json"] else {"json": s, "data": None}
         self.resume: dict[str, list[str]] = {}  # container path -> where inside it a resumed run starts
         self.results: list[dict] = []
         self.last: dict = {}
         self.ops_run = 0
-        self.unsent = 0  # acts / launches planned in a dry run: the screen a live run would see differs
+        # acts / launches planned in a dry run: the screen a live run would see differs. A dry run that
+        # resumes a speculative dry run starts speculative too.
+        self.unsent = 1 if (plan.get("speculative") and not send) else 0
         self.steps_sent = 0
         self.stop_info: dict | None = None
         self.refreshed: set[str] = set()
@@ -957,9 +985,13 @@ class _Run:
             # "not" holds the inner evidence with inner_met = the inner condition and met = the negation,
             # so not.met always agrees with the outer met (it used to be the inner one).
             inner = self.eval(body, fresh)
-            met = not inner["met"]
-            return {"met": met, "not": {"inner_met": inner["met"], "met": met,
-                                        **{k: v for k, v in inner.items() if k != "met"}}}
+            # an inner text check that did not hold across frames proves neither side: not is unmet too
+            met = not inner["met"] and not inner.get("unstable")
+            out = {"met": met, "not": {"inner_met": inner["met"], "met": met,
+                                       **{k: v for k, v in inner.items() if k != "met"}}}
+            if inner.get("unstable"):
+                out["not"]["undetermined"] = True
+            return out
         if kind == "window":
             mode = body.get("match", cond.get("match", "contains"))
             title, exe, cls = body.get("title") or "", body.get("exe") or "", body.get("class") or ""
@@ -1090,7 +1122,8 @@ class _Run:
                 i = moved[0]
                 raise OpError("unstable_target",
                               f"ocr_text {want[i]!r} did not hold between frames {n - 1} and {n}",
-                              hint="the page is still changing: wait_until_stable first, or target by ids / norm",
+                              hint="the page is still changing: wait_until_stable first, or target by norm; the act's "
+                                   "highest confirm_frames applies to every ocr_text step of it",
                               step=i, frames=[{"stamp": seen[-2]["stamp"], **_brief_item(prev[i])},
                                               {"stamp": seen[-1]["stamp"], **_brief_item(cur[i])}])
             prev = cur
@@ -1485,6 +1518,11 @@ class _Run:
                 "stamps": {n: e["json"] for n, e in self.frames.items() if e.get("json")},
                 "resumable": True,
             }
+            if not self.send:
+                # a dry run's continuation resumes a dry run only (its earlier acts were never sent)
+                out["continuation"]["from_dry_run"] = True
+                if self.unsent:
+                    out["continuation"]["speculative"] = True
         out["elapsed_ms"] = round((self.deps.clock() - self.t0) * 1000)
         out.update(self.deps.abort_state())
         aborted = bool(info and info["stop_reason"] == "aborted")
@@ -1493,8 +1531,8 @@ class _Run:
 
             out["hint"] = ABORT_HINT if aborted else STOP_HINT
             if info and info["stop_reason"] in RESUME_REASONS:
-                out["hint"] = (CONTINUE_HINT + ("; this was a dry run, and a dry run's continuation is a dry run "
-                                                "too" if not self.send else ""))
+                out["hint"] = (CONTINUE_HINT + ("; this was a dry run: its continuation (from_dry_run) resumes "
+                                                "a dry run only and is refused with go" if not self.send else ""))
             if aborted:
                 out.update(aborted=True, reason="aborted")
         if not self.send:
@@ -1550,6 +1588,10 @@ class _Run:
 def run_plan(src: Any, *, go: bool = False, deps: Deps | None = None) -> dict:
     """Validate, then run. ``go`` false (default) is a dry run: perceives and checks, sends nothing."""
     plan, err = validate_plan(src)
+    if not err and go and plan.get("from_dry_run"):
+        err = PlanError("from_dry_run", "this continuation came from a dry run: its earlier acts were never sent",
+                        "run the whole plan live from the start (without resume_from), or resume it as a dry "
+                        "run").payload()
     if err:
         err["dry_run"] = not go
         return err

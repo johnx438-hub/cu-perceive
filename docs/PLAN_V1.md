@@ -215,4 +215,4 @@ scroll+位置仍隐含 hover（现纪律）。
 
 ## 后续语义（feat/plan-semantics）
 
-本文是 v1 的设计稿；现行字段以 README「Plans」和 MCP `plan` 工具说明为准。此后加入：每次调用 64 个操作上限 + 校验期静态计数（`static_ops`，`least` 超上限即 `bad_plan` / `over_cap`，除非 `resumable: true`）与续跑（`continuation` → `resume_from` + `stamps`，含 `latest`）；`window` 条件的 `match: contains|exact|regex` 与 `class`；`ocr_text` / `text` 的 `confirm_frames`（`unstable_target`）；`target_not_found` 的 `similar`；`not` 结果改为 `{"inner_met", "met"}`。
+本文是 v1 的设计稿；现行字段以 README「Plans」和 MCP `plan` 工具说明为准。此后加入：每次调用 64 个操作上限 + 校验期静态计数（`static_ops`，`least` 超上限即 `bad_plan` / `over_cap`，除非 `resumable: true`）与续跑（`continuation` → `resume_from` + `stamps`，含 `latest`）；`window` 条件的 `match: contains|exact|regex` 与 `class`；`ocr_text` / `text` 的 `confirm_frames`（`unstable_target`）；`target_not_found` 的 `similar`；`not` 结果改为 `{"inner_met", "met"}`（内层 `unstable` 时 `not` 也不满足，`undetermined: true`）。评审 r1 之后：确认的 act 不再接受按 `ids` / `uia_name "#N"` 指目标的步；dry run 的 continuation 带 `from_dry_run`（+ `speculative`），带 `go` 续跑会被拒；只有承接 `latest` 的名字共用一帧；`resume_from` 只认 ASCII 数字；`regex` 只读标题前 512 字符。

@@ -8,7 +8,7 @@ from __future__ import annotations
 import unittest
 
 from cu_perceive import plan as plan_mod
-from cu_perceive.plan import run_plan, static_ops, validate_plan, validate_report
+from cu_perceive.plan import _Run, run_plan, static_ops, validate_plan, validate_report
 
 from test_plan import PERCEIVE, FakeDeps, item
 
@@ -184,7 +184,52 @@ class TestContinuation(unittest.TestCase):
         out = run_plan({"resumable": True, "steps": [PERCEIVE] + [ACT] * 69}, deps=FakeDeps())
         self.assertEqual(out["stop_reason"], "max_ops")
         self.assertIn("dry run", out["hint"])
-        self.assertEqual(set(out["continuation"]), {"resume_from", "stamps", "resumable"})
+        cont = out["continuation"]
+        self.assertEqual((cont["from_dry_run"], cont["speculative"]), (True, True))
+        live = run_plan({"resumable": True, "steps": [PERCEIVE] + [ACT] * 69}, go=True, deps=FakeDeps())
+        self.assertEqual(set(live["continuation"]), {"resume_from", "stamps", "resumable"})
+
+    def test_a_dry_run_continuation_is_refused_live(self):
+        steps = [PERCEIVE] + [ACT] * 69
+        first = run_plan({"resumable": True, "steps": steps}, deps=FakeDeps())
+        deps = FakeDeps()
+        out = run_plan({"steps": steps, **first["continuation"]}, go=True, deps=deps)
+        self.assertEqual(out["reason"], "bad_plan")
+        self.assertIn("dry run", out["error"])
+        self.assertEqual((deps.acts, deps.perceives), ([], []))
+        again = run_plan({"steps": steps, **first["continuation"]}, deps=FakeDeps())  # resumed as a dry run
+        self.assertTrue(again["ok"], again)
+
+    def test_a_speculative_dry_run_resumes_speculative(self):
+        steps = [PERCEIVE] + [ACT] * 63 + [{"op": "assert", "cond": {"text": "Done"}}, ACT]
+        first = run_plan({"resumable": True, "steps": steps}, deps=FakeDeps())
+        self.assertTrue(first["continuation"]["speculative"])
+        out = run_plan({"steps": steps, **first["continuation"]}, deps=FakeDeps())
+        self.assertTrue(out["ok"], out)  # the failing check is listed, not a stop
+        self.assertEqual(out["would_fail"][0]["path"], "64")
+        plain = run_plan({"steps": steps, **{k: v for k, v in first["continuation"].items() if k != "speculative"}},
+                         deps=FakeDeps())
+        self.assertFalse(plain["ok"])  # not speculative: the same check stops the dry run
+
+    def test_dry_run_markers_are_checked(self):
+        for extra, needle in (({"from_dry_run": "yes", "resume_from": "0"}, "true or false"),
+                              ({"from_dry_run": True}, "only come with a continuation"),
+                              ({"speculative": True, "resume_from": "0"}, "from_dry_run: true")):
+            _, err = validate_plan({"steps": [PERCEIVE], **extra})
+            self.assertIn(needle, err["error"], extra)
+
+    def test_resume_from_takes_ascii_digits_only(self):
+        for rf in ("\u0663", "\u00b2", "0.then.\u0661"):
+            _, err = validate_plan({"resume_from": rf, "steps": [PERCEIVE]})
+            self.assertEqual(err["reason"], "bad_plan", rf)
+
+    def test_caller_stamps_that_share_a_json_stay_apart(self):
+        run = _Run({"stamps": {"baseline": "a.json", "main": "a.json"}, "steps": []}, False, FakeDeps())
+        self.assertIsNot(run.frames["baseline"], run.frames["main"])
+        run = _Run({"stamps": {"latest": "a.json", "main": "a.json", "other": "b.json"}, "steps": []}, False,
+                   FakeDeps())
+        self.assertIs(run.frames["latest"], run.frames["main"])
+        self.assertIsNot(run.frames["other"], run.frames["main"])
 
     def test_a_last_condition_starts_empty_after_resume(self):
         out = run_plan({"resume_from": "1", "stamps": {"latest": "a.json"}, "steps": [
@@ -193,8 +238,10 @@ class TestContinuation(unittest.TestCase):
 
 
 class TestWindowMatch(unittest.TestCase):
-    WINS = [{"hwnd": 1, "title": "Hacker News", "exe": "chrome.exe", "class": "Chrome_WidgetWin_1"},
-            {"hwnd": 2, "title": "Show HN: a thing | Hacker News", "exe": "chrome.exe", "class": "Chrome_WidgetWin_1"},
+    # real browser titles carry the browser's suffix
+    WINS = [{"hwnd": 1, "title": "Hacker News - Google Chrome", "exe": "chrome.exe", "class": "Chrome_WidgetWin_1"},
+            {"hwnd": 2, "title": "Show HN: a thing | Hacker News - Google Chrome", "exe": "chrome.exe",
+             "class": "Chrome_WidgetWin_1"},
             {"hwnd": 3, "title": "Notepad", "exe": "notepad.exe", "class": "Notepad"}]
 
     def check(self, cond, wins=None):
@@ -207,28 +254,47 @@ class TestWindowMatch(unittest.TestCase):
         self.assertEqual((ev["met"], ev["count"], ev["match"]), (True, 2, "contains"))
         self.assertEqual(deps.lookups, ["find_windows"])  # same lookup as before
 
+    LEFT = r"^Hacker News( - |$)"  # the front page, with or without the browser suffix
+
     def test_exact_and_left_this_page(self):
-        ev, _ = self.check({"window": {"title": "hacker news", "match": "exact"}})
+        ev, _ = self.check({"window": {"title": "hacker news - google chrome", "match": "exact"}})
         self.assertEqual((ev["met"], ev["count"], ev["first"]["hwnd"]), (True, 1, 1))
-        # "left the front page" while only the article is open: contains says no forever, exact says yes
+        # exact on the bare page name never matches a browser window: "not" of it holds on the front page
+        ev, _ = self.check({"not": {"window": {"title": "Hacker News", "match": "exact"}}})
+        self.assertTrue(ev["met"])
+        front = [w for w in self.WINS if w["hwnd"] != 2]
         article = [w for w in self.WINS if w["hwnd"] != 1]
+        # "left the front page": contains says no forever, the anchored regex tells the two apart
         ev, _ = self.check({"not": {"window": {"title": "Hacker News"}}}, article)
         self.assertFalse(ev["met"])
-        ev, _ = self.check({"not": {"window": {"title": "Hacker News", "match": "exact"}}}, article)
+        ev, _ = self.check({"not": {"window": {"title": self.LEFT, "match": "regex"}}}, front)
+        self.assertFalse(ev["met"])
+        ev, _ = self.check({"not": {"window": {"title": self.LEFT, "match": "regex"}}}, article)
         self.assertTrue(ev["met"])
-        ev, _ = self.check({"not": {"window": {"title": "Hacker News"}, "match": "exact"}}, article)
+        ev, _ = self.check({"not": {"window": {"title": self.LEFT}, "match": "regex"}}, article)
         self.assertTrue(ev["met"])  # match beside the window body works the same
+        edge = [{"hwnd": 9, "title": "Hacker News - Personal - Microsoft Edge", "exe": "msedge.exe",
+                 "class": "Chrome_WidgetWin_1"}]
+        ev, _ = self.check({"window": {"title": self.LEFT, "match": "regex"}}, edge)
+        self.assertTrue(ev["met"])
+
+    def test_regex_reads_a_bounded_title(self):
+        long_title = [{"hwnd": 5, "title": "x" * 600 + "END", "exe": "chrome.exe", "class": "C"}]
+        ev, _ = self.check({"window": {"title": "END", "match": "regex"}}, long_title)
+        self.assertFalse(ev["met"])  # past the first 512 characters
+        ev, _ = self.check({"window": {"title": "END"}}, long_title)
+        self.assertTrue(ev["met"])  # contains is not bounded
 
     def test_regex_and_class(self):
-        ev, _ = self.check({"window": {"title": r"^show hn:.*\| hacker news$", "match": "regex"}})
+        ev, _ = self.check({"window": {"title": r"^show hn:.*\| hacker news( - |$)", "match": "regex"}})
         self.assertEqual((ev["met"], ev["first"]["hwnd"]), (True, 2))
         ev, _ = self.check({"window": {"class": "notepad", "match": "exact"}})
         self.assertEqual((ev["count"], ev["first"]["class"]), (1, "Notepad"))
         ev, deps = self.check({"window": {"class": "WidgetWin"}})
         self.assertEqual((ev["count"], deps.lookups), (2, ["top_windows"]))
-        ev, _ = self.check({"window": {"exe": "chrome", "title": "Hacker News", "match": "exact"}})
+        ev, _ = self.check({"window": {"exe": "chrome", "title": "Hacker News - Google Chrome", "match": "exact"}})
         self.assertEqual(ev["count"], 1)
-        ev, _ = self.check({"window": {"exe": "notepad", "title": "Hacker News", "match": "exact"}})
+        ev, _ = self.check({"window": {"exe": "notepad", "title": "Hacker News - Google Chrome", "match": "exact"}})
         self.assertFalse(ev["met"])
 
     def test_refusals(self):
@@ -330,7 +396,41 @@ class TestOcrConfirm(unittest.TestCase):
         self.assertEqual(out["results"][1]["polls"], 2)
 
 
+class TestConfirmWithIds(unittest.TestCase):
+    """confirm_frames acts on a newer frame: ids read off the first frame would name other items there."""
+
+    def test_ids_beside_a_confirm_are_refused(self):
+        deps = FakeDeps(screens=[{"items": [item_at(1, "Ad", 500, 50), item_at(2, "Save", 300, 200),
+                                            item_at(3, "Delete", 300, 400)]},
+                                 {"items": [item_at(1, "Save", 300, 200), item_at(2, "Delete", 300, 400)]}])
+        out = run_plan([PERCEIVE, {"op": "act", "steps": [{"ocr_text": "Save", "confirm_frames": 2}, {"ids": "2"}]}],
+                       go=True, deps=deps)
+        self.assertEqual(out["reason"], "bad_plan")
+        self.assertIn("1.steps.1", out["error"])
+        self.assertEqual(deps.acts, [])
+        _, err = validate_plan([PERCEIVE, {"op": "act", "steps": [
+            {"ocr_text": "Save", "confirm_frames": 2}, {"uia_name": "#4"}]}])
+        self.assertIsNotNone(err)
+
+    def test_window_relative_targets_are_fine(self):
+        for other in ({"norm": "500,500"}, {"uia_name": "Save@Button"}, {"key": "enter"}, {"ids": "2"}):
+            confirm = 2 if "ids" not in other else 1  # ids next to an unconfirmed ocr_text stay allowed
+            _, err = validate_plan([PERCEIVE, {"op": "act", "steps": [
+                {"ocr_text": "Save", "confirm_frames": confirm}, other]}])
+            self.assertIsNone(err, other)
+
+
 class TestNotShape(unittest.TestCase):
+    def test_not_over_an_unstable_text_is_not_met(self):
+        # present on the first frame, gone on the next: neither "present" nor "absent" is proven
+        deps = FakeDeps(screens=[{"items": [item(1, "Saved")]}, {"items": []}])
+        out = run_plan([PERCEIVE,
+                        {"op": "assert", "on_fail": "continue",
+                         "cond": {"not": {"text": "Saved", "stamp_ref": "main", "confirm_frames": 2}}}],
+                       go=True, deps=deps)
+        ev = out["results"][1]["cond"]
+        self.assertEqual((ev["met"], ev["not"]["inner_met"], ev["not"]["undetermined"]), (False, False, True))
+
     def test_not_reports_inner_met_and_the_negation(self):
         deps = FakeDeps(windows=[{"hwnd": 1, "title": "App", "exe": "app.exe"}])
         out = run_plan([{"op": "assert", "cond": {"not": {"window": {"title": "Error"}}}}], go=True, deps=deps)

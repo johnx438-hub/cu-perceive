@@ -455,8 +455,10 @@ fails closed: `target_not_found` carries `similar` (the closest OCR texts, so a 
 as `|` for `I` shows up), `ambiguous_target` carries `candidates`, and both carry `stamp`,
 `match_count` and `ocr_items`. `"confirm_frames": 2` (1..3, default 1 = off) on such a step
 re-perceives the same window with the same detectors and acts only if every `ocr_text` of
-that act keeps its text and stays within 20 (0-1000) on the next frame; the act then runs on
-that newer stamp and its ids. A match that moves or changes fails as `unstable_target`
+that act keeps its text and stays within 20 (0-1000) on the next frame (the act's highest
+`confirm_frames` applies to all of them); the act then runs on that newer stamp. Because of
+that, an act that confirms refuses steps that target by `ids` or `uia_name: "#N"` (they number
+the first frame's items); `norm`, `xy`, `key` and a `uia_name` by name are fine. A match that moves or changes fails as `unstable_target`
 (with `frames`), one that vanishes as `target_not_found` with `frame: 2`. It costs one more
 OCR pass (about 3-7 s on a busy page). `uia_name` works as
 in `act`. `plan.stamps` (`{"main": "<stamp>"}`) names stamps taken before the plan.
@@ -467,9 +469,9 @@ Conditions are data, not code. Each has exactly one kind:
 
 | Condition | True when |
 |---|---|
-| `{"window": {"title", "exe", "class", "minimized", "match"}}` | a matching top-level window exists. `match` is `contains` (default, a substring, as before), `exact` (the whole title / class, case-insensitive) or `regex` (`re.search`, case-insensitive); it applies to `title` and `class`, while `exe` stays a substring. It may also sit beside the body (`{"window": {...}, "match": "exact"}`). Only `exact` / `regex` can tell "left this page": `{"not": {"window": {"title": "Hacker News", "match": "exact"}}}`, because with `contains` the article's "… \| Hacker News" still matches |
+| `{"window": {"title", "exe", "class", "minimized", "match"}}` | a matching top-level window exists. `match` is `contains` (default, a substring, as before), `exact` (the whole title / class, case-insensitive) or `regex` (`re.search`, case-insensitive); it applies to `title` and `class`, while `exe` stays a substring. It may also sit beside the body (`{"window": {...}, "match": "exact"}`). Browser titles carry a suffix (`Hacker News - Google Chrome`, `Hacker News - Personal - Microsoft Edge`), so "left this page" is an anchored regex: `{"not": {"window": {"title": "^Hacker News( - \|$)", "match": "regex"}}}`. With `contains` the article's "… \| Hacker News - Google Chrome" still matches, and `exact` on the bare page name never matches a browser window, so its `not` holds at once. `regex` reads the first 512 characters of a title. `exact`, `regex` and `class` filter windows in z-order (`first` is not ranked the way `windows(title=)` ranks it), and untitled windows are not listed |
 | `{"foreground": {...}}` with one of `title`, `hwnd`, `stamp_ref` | the foreground window matches |
-| `{"text": "Done", "stamp_ref", "source", "match", "fresh", "confirm_frames"}` | an OCR item or UIA name/value on that stamp has the text (`source`: `any`, `ocr`, `uia`; `match`: `contains`, `exact`). With `confirm_frames` 2 or 3 the window is re-perceived right after a match and the next frame(s) must match too (`confirm_frames` lists the stamps; `unstable: true` when one did not) |
+| `{"text": "Done", "stamp_ref", "source", "match", "fresh", "confirm_frames"}` | an OCR item or UIA name/value on that stamp has the text (`source`: `any`, `ocr`, `uia`; `match`: `contains`, `exact`). With `confirm_frames` 2 or 3 the window is re-perceived right after a match and the next frame(s) must match too (`confirm_frames` lists the stamps; `unstable: true` when one did not). A `not` over an unstable match is unmet too (`not.undetermined: true`): a flicker proves neither side |
 | `{"uia": {"name", "control_type", "value"}, "stamp_ref", "match", "fresh"}` | a UIA node matches every given field |
 | `{"challenge": true, "stamp_ref", "fresh"}` | a human-verification / interstitial page is on screen (fixed token list: "just a moment", "performing security verification", "verify you are human", "checking your browser", "turnstile", "captcha", …); `false` inverts it, and the row's `hits` names what matched |
 | `{"last": {"ok": false, "reason": "point_covered"}}` | the previous op's result has these fields (a boolean compares truthiness; dotted keys reach into objects) |
@@ -551,11 +553,21 @@ frame and "latest"}, "resumable": true}`. Merge it into the same plan and call a
 goes on at that op (inside an `if` it keeps the branch chosen before, inside a `repeat` it
 finishes that round and goes on, checking `until` as usual) with `frames.latest` and the named
 stamps carried across. The containers on the way get rows with `resumed: true`, the result
-has `resumed_from`, and a `last` condition starts empty. An aborted run has no continuation. The result also
+has `resumed_from`, and a `last` condition starts empty. An aborted run has no continuation.
+A dry run's continuation adds `from_dry_run: true` (and `speculative: true` once it had planned
+an act). It resumes a dry run only: with `go` it is refused as `bad_plan`, because the earlier
+acts were never sent. `speculative` keeps later checks in `would_fail` as before the cut; an
+`if` that was planned both ways resumes only in the branch it was cut in. A dry run plans both
+branches of such an `if`, so it can reach the cap on a plan whose `most` is under 64.
+
+Changes for clients of this branch: `not.met` is now the negated result (read `not.inner_met`
+for the inner one); a plan whose `least` is over 64 is refused before it runs (dry runs too)
+instead of running 64 ops; a continuation is not tied to the steps it came from, so resume it
+with the same steps. The result also
 carries `stopped`, `frames`, and the same `verification` / `evidence.steps_sent` as `act`,
 plus `no_input` for a live plan that sent nothing. Ops are not undone when a later one fails.
 Examples: `docs/examples/plan-wait-and-branch.json`, `plan-scroll-until.json`,
-`plan-left-page-confirm.json` (`match: exact` to wait until a page is gone, `confirm_frames`).
+`plan-left-page-confirm.json` (an anchored `regex` to wait until a page is gone, `confirm_frames`).
 
 CLI output is always UTF-8 (window titles can contain any script), whatever the
 console code page is. Decode it as UTF-8. PowerShell decodes captured output
