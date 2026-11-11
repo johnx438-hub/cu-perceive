@@ -768,7 +768,8 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
            re-perceives the window and acts only if each ocr_text match keeps its text and stays within 20
            (0-1000) on the next frame; the act then runs on that newer stamp (else unstable_target, frames[]).
            The act's highest confirm_frames applies to every ocr_text step of it, and an act that confirms
-           refuses steps targeting by ids or uia_name "#N" (those number the first frame's items).
+           refuses steps targeting by ids or a uia_name naming a node id ("#N", "uia:#N", "N"): those
+           number the first frame's items.
           {"op":"wait", "sec":0.5}
           {"op":"wait_for", "cond":{...}, "timeout_ms":5000, "interval_ms":300}
           {"op":"assert", "cond":{...}, "message":"..."}
@@ -782,13 +783,15 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
             the body: {"window":{...},"match":"exact"}. Browser titles carry a suffix ("Hacker News - Google
             Chrome"), so "left this page" is an anchored regex: {"not":{"window":{"title":"^Hacker News( - |$)",
             "match":"regex"}}} (contains also matches "... | Hacker News - Google Chrome"; exact on the bare
-            page name never matches, so its not holds at once). regex reads the first 512 characters. exact,
+            page name never matches, so its not holds at once). regex reads the first 512 characters and refuses
+            a group that repeats around a repeat ((a+)*). exact,
             regex and class filter windows in z-order (first is not ranked the way the windows tool ranks a title
             lookup), and untitled windows are not listed.
           {"foreground":{"title"|"hwnd"|"stamp_ref"}}
           {"text":"Done", "stamp_ref":"main", "source":"any|ocr|uia", "match":"contains|exact", "fresh":true,
            "confirm_frames":2}  confirm_frames (1..3, default 1): met only if the next frame(s) match too;
-           a match that does not hold is unstable: true, and a not over it is unmet as well (undetermined)
+           a match that does not hold is unstable: true; unstable is undetermined, never met: a not over it
+           is unmet too, and any / all / not that rest on it carry unstable on
           {"uia":{"name","control_type","value"}, "stamp_ref", "match", "fresh"}
           {"challenge":true, "stamp_ref", "fresh"}  a human-verification / interstitial page is on screen
           {"last":{"ok":false}}  fields of the previous op's result (dotted keys ok: "evidence.steps_sent")

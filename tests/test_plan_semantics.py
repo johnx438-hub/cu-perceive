@@ -211,6 +211,14 @@ class TestContinuation(unittest.TestCase):
                          deps=FakeDeps())
         self.assertFalse(plain["ok"])  # not speculative: the same check stops the dry run
 
+    def test_a_resumed_speculative_dry_run_counts_only_its_own_acts(self):
+        steps = [PERCEIVE, ACT] + [{"op": "wait", "sec": 0.1}] * 65
+        first = run_plan({"resumable": True, "steps": steps}, deps=FakeDeps())
+        self.assertTrue(first["continuation"]["speculative"])
+        out = run_plan({"steps": steps, **first["continuation"]}, deps=FakeDeps())
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out.get("planned_acts", 0), 0)  # only waits were left (0 is left out)
+
     def test_dry_run_markers_are_checked(self):
         for extra, needle in (({"from_dry_run": "yes", "resume_from": "0"}, "true or false"),
                               ({"from_dry_run": True}, "only come with a continuation"),
@@ -305,6 +313,11 @@ class TestWindowMatch(unittest.TestCase):
         bad({"window": {"title": "a", "match": "glob"}}, "contains, exact or regex")
         bad({"window": {"title": "(", "match": "regex"}}, "not a valid regex")
         bad({"window": {"title": "a" * 300, "match": "regex"}}, "longer than")
+        for pattern in (r"^(\w+\s?)*$", r"(a+)+", r"(a*){2,}"):
+            bad({"window": {"title": pattern, "match": "regex"}}, "repeats a group")
+        for pattern in (r"(ab)+", r"(a+)?", r"^Hacker News( - |$)"):
+            _, err = validate_plan([{"op": "assert", "cond": {"window": {"title": pattern, "match": "regex"}}}])
+            self.assertIsNone(err, pattern)
         bad({"window": {"title": "a", "match": "exact"}, "match": "regex"}, "given twice")
         bad({"window": {"minimized": True}}, "title, exe and/or class")
         bad({"window": {"title": 3}}, "must be a string")
@@ -408,12 +421,17 @@ class TestConfirmWithIds(unittest.TestCase):
         self.assertEqual(out["reason"], "bad_plan")
         self.assertIn("1.steps.1", out["error"])
         self.assertEqual(deps.acts, [])
-        _, err = validate_plan([PERCEIVE, {"op": "act", "steps": [
-            {"ocr_text": "Save", "confirm_frames": 2}, {"uia_name": "#4"}]}])
-        self.assertIsNotNone(err)
+        for other in ({"uia_name": "#4"}, {"uia_name": ["#4"]}, {"uia_name": "uia:#4"}, {"uia_name": "uia:4"},
+                      {"uia_name": "4"}, {"uia_name": "Save,#4"}, {"uia_name": " #4"}, {"ids": [2]}, {"ids": 2},
+                      {"ids": "uia:4"}, {"ids": 0, "key": "enter"}):
+            _, err = validate_plan([PERCEIVE, {"op": "act", "steps": [
+                {"ocr_text": "Save", "confirm_frames": 2}, other]}])
+            self.assertIsNotNone(err, other)
+            self.assertIn("numbers other items", err["error"], other)
 
     def test_window_relative_targets_are_fine(self):
-        for other in ({"norm": "500,500"}, {"uia_name": "Save@Button"}, {"key": "enter"}, {"ids": "2"}):
+        for other in ({"norm": "500,500"}, {"uia_name": "Save@Button"}, {"uia_name": ["Save", "Open"]},
+                      {"key": "enter"}, {"ids": "2"}):
             confirm = 2 if "ids" not in other else 1  # ids next to an unconfirmed ocr_text stay allowed
             _, err = validate_plan([PERCEIVE, {"op": "act", "steps": [
                 {"ocr_text": "Save", "confirm_frames": confirm}, other]}])
@@ -430,6 +448,17 @@ class TestNotShape(unittest.TestCase):
                        go=True, deps=deps)
         ev = out["results"][1]["cond"]
         self.assertEqual((ev["met"], ev["not"]["inner_met"], ev["not"]["undetermined"]), (False, False, True))
+
+    def test_undetermined_carries_through_any_all_and_not(self):
+        t = {"text": "Error", "stamp_ref": "main", "confirm_frames": 2}
+        stable_absent = {"text": "Nothing", "stamp_ref": "main"}
+        for cond, met in (({"not": {"any": [t]}}, False), ({"not": {"all": [t]}}, False),
+                          ({"not": {"any": [stable_absent, t]}}, False), ({"not": {"not": {"not": t}}}, False),
+                          ({"not": {"not": t}}, False), ({"any": [t, {"not": stable_absent}]}, True),
+                          ({"not": {"all": [stable_absent, t]}}, True)):
+            deps = FakeDeps(screens=[{"items": [item(1, "Error")]}, {"items": []}])
+            out = run_plan([PERCEIVE, {"op": "assert", "on_fail": "continue", "cond": cond}], go=True, deps=deps)
+            self.assertEqual(out["results"][1]["cond"]["met"], met, cond)
 
     def test_not_reports_inner_met_and_the_negation(self):
         deps = FakeDeps(windows=[{"hwnd": 1, "title": "App", "exe": "app.exe"}])

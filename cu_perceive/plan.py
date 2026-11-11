@@ -107,6 +107,8 @@ CONFIRM_TOLERANCE_NORM = 20  # how far (0-1000) a confirmed ocr_text match may m
 WINDOW_MATCH = ("contains", "exact", "regex")
 MAX_PATTERN_LEN = 256
 MAX_REGEX_HAY = 512  # regex mode reads the first 512 characters of a title / class
+# a repeated group whose body repeats too: the classic catastrophic-backtracking shape, refused at validation
+_NESTED_QUANT = re.compile(r"\((?:[^()\\]|\\.)*(?:[*+]|\{\d*,\d*\})(?:[^()\\]|\\.)*\)(?:[*+]|\{\d*,\d*\})")
 RESUME_REASONS = ("max_ops", "timeout")  # stops a continuation can pick up from
 
 PLAN_FIELDS = frozenset({"version", "goal", "stamps", "timeout_ms", "stop_on_challenge", "steps", "resumable",
@@ -307,6 +309,10 @@ def _validate_cond(cond, path: str, names: set) -> None:
                         re.compile(body[k], re.IGNORECASE)
                     except re.error as e:
                         raise PlanError(path, f"window {k} is not a valid regex: {e}") from e
+                    if _NESTED_QUANT.search(body[k]):
+                        raise PlanError(path, f"window {k} repeats a group that repeats inside ((a+)* and the like)",
+                                        "a page sets the title, and such a pattern can backtrack for minutes; "
+                                        "write it without the outer repeat")
     elif kind == "foreground":
         if not isinstance(body, dict) or len([k for k in ("title", "hwnd", "stamp_ref") if body.get(k)]) != 1:
             raise PlanError(path, "foreground needs exactly one of title, hwnd, stamp_ref")
@@ -343,6 +349,19 @@ def _split_act(op: dict) -> tuple[list[dict], dict]:
     return [step], {k: op[k] for k in ACT_CALL_FIELDS - STEP_FIELDS if k in op}
 
 
+def _names_uia_id(q) -> bool:
+    """Whether a uia_name (a string, a comma list or a list, as act parses it) names a node by its per-frame
+    id: "#4", "uia:#4", "uia:4" or a bare "4" (uia.find_uia_target reads all of these as node ids)."""
+    parts = q if isinstance(q, (list, tuple)) else str(q).split(",") if isinstance(q, (str, int)) else []
+    for part in parts:
+        t = str(part).strip()
+        if t.lower().startswith("uia:"):
+            t = t[4:].strip()
+        if t.startswith("#") or _DIGITS.fullmatch(t):
+            return True
+    return False
+
+
 def _validate_act(op: dict, path: str, names: set) -> None:
     if "stamp" in op and "stamp_ref" in op:
         raise PlanError(path, "pass stamp or stamp_ref, not both")
@@ -376,8 +395,8 @@ def _validate_act(op: dict, path: str, names: set) -> None:
         for i, s in enumerate(steps):
             if not isinstance(s, dict):
                 continue
-            byid = [k for k in ("ids",) if s.get(k)] + (
-                ["uia_name"] if isinstance(s.get("uia_name"), str) and s["uia_name"].lstrip().startswith("#") else [])
+            byid = (["ids"] if s.get("ids") not in (None, "", []) else []) + (
+                ["uia_name"] if _names_uia_id(s.get("uia_name")) else [])
             if byid:
                 raise PlanError(f"{path}.steps.{i}",
                                 f"confirm_frames acts on a newer frame, where {byid[0]} numbers other items",
@@ -794,7 +813,8 @@ def _matches(hay, needle: str, mode: str) -> bool:
     if hay is None:
         return False
     if mode == "regex":
-        # a caller's pattern against page-made titles: bound the haystack so backtracking stays short
+        # a caller's pattern against page-made titles: patterns that nest repeats are refused at validation,
+        # and only the first MAX_REGEX_HAY characters are read
         return re.search(needle, str(hay)[:MAX_REGEX_HAY], re.IGNORECASE) is not None
     return _cf(hay) == _cf(needle) if mode == "exact" else _cf(needle) in _cf(hay)
 
@@ -837,7 +857,8 @@ class _Run:
         self.ops_run = 0
         # acts / launches planned in a dry run: the screen a live run would see differs. A dry run that
         # resumes a speculative dry run starts speculative too.
-        self.unsent = 1 if (plan.get("speculative") and not send) else 0
+        self.unsent = 0
+        self.resumed_speculative = bool(plan.get("speculative")) and not send
         self.steps_sent = 0
         self.stop_info: dict | None = None
         self.refreshed: set[str] = set()
@@ -886,7 +907,7 @@ class _Run:
 
     @property
     def speculative(self) -> bool:
-        return not self.send and self.unsent > 0
+        return not self.send and (self.unsent > 0 or self.resumed_speculative)
 
     # -- frames
     def entry(self, name: str | None) -> dict:
@@ -980,7 +1001,13 @@ class _Run:
                 parts.append(self.eval(c, fresh))
                 if parts[-1]["met"] != (kind == "all"):
                     break  # short-circuit, left to right
-            return {"met": (all if kind == "all" else any)(p["met"] for p in parts), kind: parts}
+            met = (all if kind == "all" else any)(p["met"] for p in parts)
+            out = {"met": met, kind: parts}
+            # an unstable part (a match that did not hold across frames) is unmet but not proven false; when
+            # the result rests on it (any: nothing met; all: it is the part that failed) the result is unstable
+            if not met and (any(p.get("unstable") for p in parts) if kind == "any" else parts[-1].get("unstable")):
+                out["unstable"] = True
+            return out
         if kind == "not":
             # "not" holds the inner evidence with inner_met = the inner condition and met = the negation,
             # so not.met always agrees with the outer met (it used to be the inner one).
@@ -991,6 +1018,7 @@ class _Run:
                                        **{k: v for k, v in inner.items() if k != "met"}}}
             if inner.get("unstable"):
                 out["not"]["undetermined"] = True
+                out["unstable"] = True  # undetermined: an outer not / any / all reads it the same way
             return out
         if kind == "window":
             mode = body.get("match", cond.get("match", "contains"))
@@ -1521,7 +1549,7 @@ class _Run:
             if not self.send:
                 # a dry run's continuation resumes a dry run only (its earlier acts were never sent)
                 out["continuation"]["from_dry_run"] = True
-                if self.unsent:
+                if self.unsent or self.resumed_speculative:
                     out["continuation"]["speculative"] = True
         out["elapsed_ms"] = round((self.deps.clock() - self.t0) * 1000)
         out.update(self.deps.abort_state())
