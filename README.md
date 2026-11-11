@@ -622,8 +622,16 @@ uses the browser's main profile:
   warns rather than handing back an older window of the same exe.
 
 Drive the shadow window with `perceive_window` / `act` by its `hwnd`. bsk is
-optional and only reads the page there, and only if its extension is installed
-in that profile.
+optional and only reads the page there, and only if its extension is loaded in
+that profile. Branded Chrome 137+ ignores `--load-extension`, so
+`scripts/shadow_bsk_install.py` loads an unpacked copy of the bsk extension over
+CDP (`Extensions.loadUnpacked`, 127.0.0.1 only). Launch with
+`--arg=--remote-debugging-port=<port> --arg=--enable-unsafe-extension-debugging`,
+run the script, and close the window when done. The load lasts for that browser
+run only. bsk reads tabs inside its own Agent Window (`browser_session
+action=start browser=<instance>`); a tab outside it needs `tab borrow`, which
+asks the user to confirm. To read the same window you drive, drive the Agent
+Window's hwnd with `act` and read it with `browser_observe`.
 
 ## Configuration
 
