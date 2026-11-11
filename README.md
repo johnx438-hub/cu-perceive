@@ -441,6 +441,7 @@ each one: perceive, act, wait for a condition, branch, re-perceive, act again.
 | `act` | `stamp_ref` (a name) or `stamp`; without either, the plan's latest perceive. The flat `act` fields, or `steps=[...]` for a guarded chain; `focus` `ime` `method` `check_change` |
 | `wait` | `sec` (at most 30); a live run reports `waited_sec` and `interrupted` |
 | `wait_for` | `cond`, `timeout_ms` (default 5000, at most 60000), `interval_ms` (100..1000, default 300) |
+| `wait_until_stable` | `stamp_ref` / `stamp`, `stable_ms` (default 800, at most 5000), `timeout_ms` (default 8000, at most 60000), `interval_ms`, `tolerance` (mean grey difference still counted as the same screen, default 1.5); samples the window until it holds still (`never_settled` if it never does) |
 | `assert` | `cond`, `message` |
 | `if` | `cond`, `then`, `else` |
 | `repeat` | `times` (1-20), `steps`, optional `until` (checked before each round and after the last) |
@@ -452,6 +453,8 @@ name its target by OCR text, `"ocr_text": "Save"`, resolved on the stamp the act
 an exact match (case-insensitive) wins over a substring match, and anything but one match
 fails closed (`target_not_found`, `ambiguous_target` with `candidates`). `uia_name` works as
 in `act`. `plan.stamps` (`{"main": "<stamp>"}`) names stamps taken before the plan.
+`plan.stop_on_challenge` (default `true`) makes a perceive or an act that sees a
+human-verification page stop the run with `reason: "challenge"`; `false` opts out.
 
 Conditions are data, not code. Each has exactly one kind:
 
@@ -461,6 +464,7 @@ Conditions are data, not code. Each has exactly one kind:
 | `{"foreground": {...}}` with one of `title`, `hwnd`, `stamp_ref` | the foreground window matches |
 | `{"text": "Done", "stamp_ref", "source", "match", "fresh"}` | an OCR item or UIA name/value on that stamp has the text (`source`: `any`, `ocr`, `uia`; `match`: `contains`, `exact`) |
 | `{"uia": {"name", "control_type", "value"}, "stamp_ref", "match", "fresh"}` | a UIA node matches every given field |
+| `{"challenge": true, "stamp_ref", "fresh"}` | a human-verification / interstitial page is on screen (fixed token list: "just a moment", "performing security verification", "verify you are human", "checking your browser", "turnstile", "captcha", …); `false` inverts it, and the row's `hits` names what matched |
 | `{"last": {"ok": false, "reason": "point_covered"}}` | the previous op's result has these fields (a boolean compares truthiness; dotted keys reach into objects) |
 | `{"all": [...]}`, `{"any": [...]}`, `{"not": {...}}` | as named, evaluated left to right |
 
@@ -473,16 +477,28 @@ no such stamp) fails the op; it is never treated as false.
 **Text conditions on a browser read the whole window, address bar included.** A condition on
 `"claude-code"` matches the URL in the address bar before the page has loaded, so a `wait_for`
 returns at once and the next `act` types into a page that is still loading — a Cloudflare
-"Just a moment…" / "Performing security verification" page is the common case. Two rules that
-came out of a real run (`docs/examples/plan-browser-read-body.json`):
+"Just a moment…" / "Performing security verification" page is the common case
+(`docs/examples/plan-browser-challenge-trap.json` is that exact failure, kept as a counter-example).
+Three rules that came out of a real run (`docs/examples/plan-browser-read-body.json`):
 
 - read the page body only: `"roi_norm": "500,560,440"` on the `perceive` op (a crop
   keeps the address bar, tabs and bookmarks out of the OCR items; `roi` is `L,T,W,H` in client
-  pixels, `roi_norm` is `CX,CY[,HALF]` in 0-1000, and a refresh keeps the same crop);
-- wait for a value only the loaded page has, and refuse the challenge state:
-  `{"all": [{"text": "2.1.322"}, {"not": {"text": "security verification"}}]}`. Never put an
-  `act` in the branch that runs when the page has not settled: a challenge page will take the
-  keystrokes you send at it.
+  pixels, `roi_norm` is `CX,CY[,HALF]` in 0-1000, and a refresh keeps the same crop). A cropped
+  stamp is verify-only: conditions read it, `act` must use a full-window stamp
+  (`verify_only_stamp` otherwise);
+- wait for a value only the loaded page has, and let the pixels settle:
+  `{"op": "wait_until_stable", "stamp_ref": "body", "stable_ms": 800}`. Samples are 128x128 grey
+  thumbnails compared with a small tolerance, so a blinking caret is not a change while a spinner
+  is; or use the declarative form
+  `{"all": [{"text": "2.1.322"}, {"not": {"text": "security verification"}}]}`;
+- a human-verification page is a stop, not a step. `{"challenge": true}` is a condition, and
+  `plan.stop_on_challenge` (default `true`) makes a perceive or an act that sees one stop with
+  `reason: "challenge"` and the matched token, instead of sending it the keystrokes. Set it to
+  `false` only when your page really contains such text on purpose.
+
+Never put an `act` in the branch that runs when the page has not settled: a challenge page will
+take whatever you send at it. `wait_until_stable` returns `never_settled` if the window keeps
+changing (a spinner), which is the honest answer rather than a guessed "loaded".
 
 The live gate is `--go` / `go=true` on the call. A plan that contains `go` is refused. A dry
 run perceives and evaluates conditions, which only read, plans every act and waits for

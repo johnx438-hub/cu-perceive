@@ -39,10 +39,20 @@ A live ``wait`` reports the time it really slept (``waited_sec``, next to
 A ``perceive`` op may crop (``roi`` L,T,W,H in client pixels or ``roi_norm``
 CX,CY[,HALF] in 0-1000): on a browser the OCR items otherwise include the address
 bar, so a text condition can match a URL instead of the page, and an ``act`` then
-lands on a page that is still loading. A refresh keeps the stamp's crop.
+lands on a page that is still loading. A refresh keeps the stamp's crop, a cropped
+stamp is verify-only, and ``act`` refuses it in both modes.
+
+``wait_until_stable`` samples the window until its pixels hold still
+(``stable_ms``), which is the honest "loaded" signal: a spinner reports
+``never_settled`` instead of a guessed yes. Human-verification / interstitial pages
+are recognised by ``CHALLENGE_TOKENS``: ``{"challenge": true}`` is a condition, and
+``plan.stop_on_challenge`` (default true) makes a perceive or an act that sees one
+stop with ``reason: "challenge"`` and the matched token, so the plan never types at
+a challenge page.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -61,10 +71,31 @@ DEFAULT_INTERVAL_MS = 300
 MIN_INTERVAL_MS = 100
 MAX_INTERVAL_MS = 1_000  # a longer check interval would hide an operator stop for that long
 INTERRUPT_POLL_S = 0.25  # the abort switch is read at least this often inside a long sleep
+DEFAULT_STABLE_MS = 800  # how long the pixels must hold still
+MAX_STABLE_MS = 5_000
+DEFAULT_STABLE_TIMEOUT_MS = 8_000
+DEFAULT_STABLE_TOLERANCE = 1.5  # mean grey difference (0-255) still counted as the same screen
+MAX_STABLE_TIMEOUT_MS = 60_000
+# Text that only a human-verification / interstitial page shows. Deliberately narrow; the row names
+# what matched and plan.stop_on_challenge: false opts out.
+CHALLENGE_TOKENS = (
+    "just a moment",
+    "performing security verification",
+    "verify you are human",
+    "verifying you are human",
+    "checking your browser",
+    "checking if the site connection is secure",
+    "enable javascript and cookies to continue",
+    "attention required",
+    "are you a robot",
+    "i'm not a robot",
+    "turnstile",
+    "captcha",
+)
 DEFAULT_TIMEOUT_MS = 120_000
 MAX_TIMEOUT_MS = 600_000
 
-PLAN_FIELDS = frozenset({"version", "goal", "stamps", "timeout_ms", "steps"})
+PLAN_FIELDS = frozenset({"version", "goal", "stamps", "timeout_ms", "stop_on_challenge", "steps"})
 COMMON_FIELDS = frozenset({"op", "on_fail", "note"})
 PERCEIVE_FLAGS = ("ocr", "uia", "yolo", "focus")
 ACT_CALL_FIELDS = frozenset({"focus", "ime", "method", "hold_key", "max_age_sec", "strict_stamp",
@@ -76,6 +107,8 @@ OP_FIELDS: dict[str, frozenset] = {
     "act": frozenset({"stamp", "stamp_ref", "steps"}) | ACT_CALL_FIELDS | ACT_STEP_FIELDS,
     "wait": frozenset({"sec"}),
     "wait_for": frozenset({"cond", "timeout_ms", "interval_ms"}),
+    "wait_until_stable": frozenset({"stamp", "stamp_ref", "stable_ms", "timeout_ms", "interval_ms",
+                                   "tolerance"}),
     "assert": frozenset({"cond", "message"}),
     "if": frozenset({"cond", "then", "else"}),
     "repeat": frozenset({"times", "until", "steps"}),
@@ -83,12 +116,13 @@ OP_FIELDS: dict[str, frozenset] = {
     "stop": frozenset({"ok", "message"}),
 }
 # Ops whose result a later {"last": {...}} condition reads.
-LEAF_OPS = frozenset({"perceive", "act", "wait", "wait_for", "assert", "launch"})
+LEAF_OPS = frozenset({"perceive", "act", "wait", "wait_for", "wait_until_stable", "assert", "launch"})
 COND_FIELDS: dict[str, frozenset] = {
     "window": frozenset(),
     "foreground": frozenset(),
     "text": frozenset({"stamp_ref", "source", "match", "fresh"}),
     "uia": frozenset({"stamp_ref", "match", "fresh"}),
+    "challenge": frozenset({"stamp_ref", "fresh"}),
     "last": frozenset(),
     "all": frozenset(),
     "any": frozenset(),
@@ -207,6 +241,10 @@ def _validate_cond(cond, path: str, names: set) -> None:
             _validate_cond(c, f"{path}.{kind}.{i}", names)
     elif kind == "not":
         _validate_cond(body, f"{path}.not", names)
+    elif kind == "challenge":
+        if not isinstance(body, bool):
+            raise PlanError(path, "challenge takes true or false",
+                            "true: a human-verification page is on screen; false: it is not")
     elif kind == "window":
         if not isinstance(body, dict) or not (body.get("title") or body.get("exe")):
             raise PlanError(path, "window needs title and/or exe")
@@ -320,6 +358,23 @@ def _validate_ops(ops, path: str, depth: int, names: set) -> None:
             if not _is_num(iv) or not MIN_INTERVAL_MS <= iv <= MAX_INTERVAL_MS:
                 raise PlanError(p, f"interval_ms must be in {MIN_INTERVAL_MS}..{MAX_INTERVAL_MS}",
                                 "a longer check interval would hide an operator stop")
+        elif kind == "wait_until_stable":
+            if "stamp" in op and "stamp_ref" in op:
+                raise PlanError(p, "pass stamp or stamp_ref, not both")
+            if "stamp_ref" in op:
+                _check_ref(op["stamp_ref"], names, p)
+            st = op.get("stable_ms", DEFAULT_STABLE_MS)
+            if not _is_num(st) or not 0 < st <= MAX_STABLE_MS:
+                raise PlanError(p, f"stable_ms must be in (0, {MAX_STABLE_MS}]")
+            t = op.get("timeout_ms", DEFAULT_STABLE_TIMEOUT_MS)
+            if not _is_num(t) or not 0 < t <= MAX_STABLE_TIMEOUT_MS:
+                raise PlanError(p, f"timeout_ms must be in (0, {MAX_STABLE_TIMEOUT_MS}]")
+            iv = op.get("interval_ms", DEFAULT_INTERVAL_MS)
+            if not _is_num(iv) or not MIN_INTERVAL_MS <= iv <= MAX_INTERVAL_MS:
+                raise PlanError(p, f"interval_ms must be in {MIN_INTERVAL_MS}..{MAX_INTERVAL_MS}")
+            tol = op.get("tolerance", DEFAULT_STABLE_TOLERANCE)
+            if not _is_num(tol) or not 0 <= tol <= 32:
+                raise PlanError(p, "tolerance is the mean grey difference still counted as the same screen (0..32)")
         elif kind == "assert":
             _validate_cond(op.get("cond"), f"{p}.cond", names)
         elif kind == "if":
@@ -376,6 +431,9 @@ def validate_plan(src: Any) -> tuple[dict | None, dict | None]:
         t = plan.get("timeout_ms", DEFAULT_TIMEOUT_MS)
         if not _is_num(t) or not 0 < t <= MAX_TIMEOUT_MS:
             raise PlanError("timeout_ms", f"timeout_ms must be in (0, {MAX_TIMEOUT_MS}]")
+        if "stop_on_challenge" in plan and not isinstance(plan["stop_on_challenge"], bool):
+            raise PlanError("stop_on_challenge", "stop_on_challenge must be true or false",
+                            "true (default): a human-verification page stops the plan instead of taking input")
         names = set(stamps)
         _collect_names(plan.get("steps"), names)
         _validate_ops(plan.get("steps"), "", 1, names)
@@ -401,6 +459,26 @@ class Deps:
         from .act import load_frame
 
         return load_frame(stamp=stamp)[0]
+
+    def fingerprint(self, json_path: str | None) -> bytes | None:
+        """Thumbnail of the capture (128x128 grey). Pixels alone are too sensitive: a blinking caret
+        or a 1-px animation would make every window look busy forever."""
+        if not json_path:
+            return None
+        png = Path(str(json_path)).with_suffix(".png")
+        try:
+            from PIL import Image
+
+            with Image.open(png) as im:
+                return im.convert("L").resize((128, 128), Image.BILINEAR).tobytes()
+        except (OSError, ValueError):
+            return None
+
+    def images_match(self, a: bytes | None, b: bytes | None, tolerance: float = 1.5) -> bool:
+        """Same screen? Mean grey difference per thumbnail pixel at or below ``tolerance`` (0-255)."""
+        if not a or not b or len(a) != len(b):
+            return False
+        return sum(abs(x - y) for x, y in zip(a, b)) / len(a) <= tolerance
 
     def act(self, steps: list[dict], call: dict) -> dict:
         from .act import annotate_verification, load_frame
@@ -444,6 +522,34 @@ class Deps:
 
 def _cf(v) -> str:
     return str(v).strip().casefold()
+
+
+def _digest(fp) -> str:
+    raw = fp if isinstance(fp, (bytes, bytearray)) else str(fp).encode()
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def _challenge_hits(frame: dict) -> list[dict]:
+    """Every place the frame's text looks like a human-verification / interstitial page."""
+    hits: list[dict] = []
+    seen: set[tuple] = set()
+
+    def look(source: str, ident, text) -> None:
+        if not text:
+            return
+        low = _cf(text)
+        for token in CHALLENGE_TOKENS:
+            if token in low and (source, ident, token) not in seen:
+                seen.add((source, ident, token))
+                hits.append({"source": source, "id": ident, "token": token, "text": str(text)[:80]})
+                return
+
+    for it in frame.get("items") or []:
+        look("ocr", it.get("id"), it.get("text"))
+    for node in frame.get("uia_nodes") or []:
+        for key in ("name", "value"):
+            look("uia", node.get("id"), node.get(key))
+    return hits
 
 
 def _matches(hay, needle: str, mode: str) -> bool:
@@ -567,7 +673,9 @@ class _Run:
 
     def refresh(self, name: str | None) -> dict:
         """Re-perceive the window of a stamp with the detectors (and crop) that stamp was taken with."""
-        entry = self.entry(name)
+        return self.refresh_entry(self.entry(name))
+
+    def refresh_entry(self, entry: dict) -> dict:
         old = self.data(entry)
         if not old.get("hwnd"):
             raise OpError("cannot_refresh", "that stamp has no window (screen or image stamp); it cannot be re-perceived")
@@ -636,6 +744,11 @@ class _Run:
             got = {k: _dig(self.last, k) for k in body}
             met = all((bool(got[k]) == v) if isinstance(v, bool) else got[k] == v for k, v in body.items())
             return {"met": met, "last": got, "last_op": self.last.get("path")}
+        if kind == "challenge":
+            _, frame = self.rows(cond, fresh, want_uia=False)
+            hits = _challenge_hits(frame)
+            return {"met": bool(hits) == bool(body), "challenge": body, "stamp": frame.get("stamp"),
+                    "count": len(hits), "hits": hits[:5]}
         mode = cond.get("match", "contains")
         if kind == "text":
             source = cond.get("source", "any")
@@ -742,6 +855,17 @@ class _Run:
             # the focus is planned and reported, not done; the live run of the same plan still focuses.
             res["focus_planned"] = True
         res.update(self.perceive(kw, name))
+        entry = self.frames.get(name or LATEST)
+        if entry is not None and (hits := _challenge_hits(self.data(entry))):
+            # A human-verification page takes whatever the plan sends it, so the default is to stop here.
+            res["challenge"] = hits[:5]
+            if self.plan.get("stop_on_challenge", True):
+                if self.send:
+                    raise OpError("challenge", "the window is showing a human-verification page",
+                                  hint="a human has to pass it; the plan stopped instead of typing into it",
+                                  hits=hits[:5], token=hits[0]["token"])
+                res.setdefault("warnings", []).append(
+                    "a human-verification page is on screen: a live run would stop here")
 
     def op_act(self, op, path, res):
         entry = {"json": op["stamp"], "data": None} if op.get("stamp") else self.entry(op.get("stamp_ref"))
@@ -754,6 +878,9 @@ class _Run:
             raise OpError("verify_only_stamp",
                           "this stamp was taken with roi/roi_norm; a cropped stamp cannot be acted on",
                           hint="perceive the window without roi for act, and keep the cropped stamp for conditions")
+        if self.plan.get("stop_on_challenge", True) and (hits := _challenge_hits(frame)):
+            raise OpError("challenge", "refusing to act: the stamp shows a human-verification page",
+                          hint="a human has to pass it; nothing was sent", hits=hits[:5], token=hits[0]["token"])
         if self.send and not frame.get("hwnd"):
             # act allows an explicit screen stamp; an unattended script does not get to click the bare desktop
             raise OpError("no_window_stamp", "a live plan acts only on window stamps (this one has no hwnd)",
@@ -799,6 +926,53 @@ class _Run:
             self.stop(path, *blocked)
         else:
             res["ok"] = True
+
+    def op_wait_until_stable(self, op, path, res):
+        """Sample the same window until its pixels hold still for stable_ms."""
+        entry = {"json": op["stamp"], "data": None} if op.get("stamp") else self.entry(op.get("stamp_ref"))
+        stable = float(op.get("stable_ms", DEFAULT_STABLE_MS)) / 1000.0
+        timeout = float(op.get("timeout_ms", DEFAULT_STABLE_TIMEOUT_MS)) / 1000.0
+        interval = float(op.get("interval_ms", DEFAULT_INTERVAL_MS)) / 1000.0
+        tolerance = float(op.get("tolerance", DEFAULT_STABLE_TOLERANCE))
+        if not self.send:
+            res.update(ok=True, dry_run=True, would_wait_ms=round(timeout * 1000), stable=None)
+            return
+        t0 = self.deps.clock()
+        prev: bytes | None = None
+        held_from = t0
+        samples = 0
+        blocked = None
+        while True:
+            entry = self.refresh_entry(entry)
+            samples += 1
+            frame = self.data(entry)
+            fp = self.deps.fingerprint(frame.get("json"))
+            if fp is None:
+                raise OpError("no_pixels", f"stamp {frame.get('stamp')} has no captured image to compare")
+            now = self.deps.clock()
+            if self.deps.images_match(prev, fp, tolerance):
+                if now - held_from >= stable:
+                    res.update(ok=True, stable=True, samples=samples, stamp=frame.get("stamp"),
+                               settled_ms=round((now - t0) * 1000),
+                               screenshot=_digest(fp))
+                    return
+            else:
+                prev, held_from = fp, now
+            if (blocked := self.interrupt()) or now - t0 >= timeout:
+                break
+            if (blocked := self.nap(interval)):
+                break
+        res.update(samples=samples, elapsed_ms=round((self.deps.clock() - t0) * 1000),
+                   screenshot=_digest(prev) if prev else None)
+        if blocked:
+            res.update(ok=False, reason=blocked[0], error=blocked[1],
+                       interrupted="deadline" if blocked[0] == "timeout" else blocked[0])
+            self.stop(path, *blocked)
+        else:
+            res.update(ok=False, reason="never_settled",
+                       error=f"the window kept changing for {round(timeout * 1000)} ms ({samples} samples)",
+                       hint="a spinner never settles: wait longer, or read a value with wait_for instead")
+            self.stop(path, "never_settled", res["error"])
 
     def op_wait_for(self, op, path, res):
         timeout = float(op.get("timeout_ms", DEFAULT_WAIT_FOR_MS)) / 1000.0
@@ -980,6 +1154,13 @@ class _Run:
                     out.setdefault("warnings", []).append(
                         f"{len(wstops)} stop op(s) inside a planned branch; one would end the live run "
                         "with ok:false")
+            seen = [r["path"] for r in self.results if r.get("challenge")]
+            if seen:
+                out["challenge"] = [{"path": r["path"], "hits": r.get("challenge")} for r in self.results
+                                    if r.get("challenge")]
+                out.setdefault("warnings", []).append(
+                    f"a human-verification page is on screen at {', '.join(seen[:3])}: a live run would "
+                    "stop there")
         elif aborted:
             out["verification"] = "aborted"
         elif not out["ok"]:
