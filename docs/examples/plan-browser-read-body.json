@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "goal": "type in the open browser, read only the page body, and refuse to act while a challenge is up",
-  "timeout_ms": 90000,
+  "goal": "type in the open browser, read only the page body, wait for it to settle, and stop on a challenge",
+  "timeout_ms": 120000,
   "steps": [
     {"op": "perceive", "exe": "msedge.exe", "ocr": true, "as": "win",
      "note": "full-window stamp: acts run on this one (launching first races with window placement)"},
@@ -10,21 +10,15 @@
     {"op": "act", "stamp_ref": "win", "key": "enter"},
     {"op": "perceive", "from": "win", "ocr": true, "roi_norm": "500,560,440", "as": "body",
      "note": "cropped stamp: verify-only, and the address bar is not in it"},
-    {"op": "wait_for", "timeout_ms": 25000, "interval_ms": 1000,
-     "cond": {"all": [
-       {"text": "2.1.322", "stamp_ref": "body", "source": "ocr"},
-       {"not": {"text": "security verification", "stamp_ref": "body", "source": "ocr"}}
-     ]},
-     "note": "a value only the loaded page has, and not while Cloudflare asks for verification"},
-    {"op": "if", "cond": {"text": "2.1.322", "stamp_ref": "body", "source": "ocr", "fresh": true},
-     "then": [
-       {"op": "assert", "cond": {"text": "claude-code", "stamp_ref": "body", "source": "ocr"},
-        "message": "the page body is not the npm page"},
-       {"op": "stop", "ok": true, "message": "page loaded and shows the version"}
-     ],
+    {"op": "wait_until_stable", "stamp_ref": "body", "stable_ms": 800, "timeout_ms": 20000, "on_fail": "continue",
+     "note": "the pixels must hold still: a spinner never settles and this reports never_settled"},
+    {"op": "if", "cond": {"challenge": true, "stamp_ref": "body", "fresh": true},
+     "then": [{"op": "stop", "ok": false,
+               "message": "human verification is on screen: a human has to pass it, nothing was typed"}],
      "else": [
-       {"op": "stop", "ok": false,
-        "message": "page did not settle (verification or a slow load): nothing was typed into it"}
+       {"op": "assert", "cond": {"text": "2.1.322", "stamp_ref": "body", "source": "ocr"},
+        "message": "the page settled but does not show the version"},
+       {"op": "stop", "ok": true, "message": "page settled and shows the version"}
      ]}
   ]
 }

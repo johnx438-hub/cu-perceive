@@ -768,14 +768,19 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
           {"op":"if", "cond":{...}, "then":[ops], "else":[ops]}
           {"op":"repeat", "times":5, "until":{...}, "steps":[ops]}   until is checked before each round
           {"op":"launch", "app"|"exe"}      {"op":"stop", "ok":true, "message":"..."}
-        Any op may carry "on_fail":"continue" (default "stop") and "note".
-        Conditions (read-only, exactly one kind each):
+        Any op may carry "on_fail":"continue" (default "stop") and "note". Conditions (read-only, exactly one kind each):
           {"window":{"title","exe","minimized"}}  a matching top-level window exists
           {"foreground":{"title"|"hwnd"|"stamp_ref"}}
           {"text":"Done", "stamp_ref":"main", "source":"any|ocr|uia", "match":"contains|exact", "fresh":true}
           {"uia":{"name","control_type","value"}, "stamp_ref", "match", "fresh"}
+          {"challenge":true, "stamp_ref", "fresh"}  a human-verification / interstitial page is on screen
           {"last":{"ok":false}}  fields of the previous op's result (dotted keys ok: "evidence.steps_sent")
           {"all":[...]}  {"any":[...]}  {"not":{...}}
+        Ops: perceive (hwnd/title/exe/from, ocr uia yolo focus capture, roi or roi_norm), act (flat fields or
+        steps), wait, wait_for, wait_until_stable (pixels hold still for stable_ms), assert, if, repeat, launch, stop.
+        plan.stop_on_challenge (default true) stops a perceive or an act that sees a human-verification page
+        (reason "challenge", matched token in the row), so a plan never types at one. A cropped (roi) stamp is
+        verify-only: conditions read it, acts need a full-window stamp.
         text / uia read a stamp, so that stamp needs "ocr": true or "uia": true on its perceive. Inside wait_for and repeat.until they
         re-perceive the window on every check (fresh); elsewhere pass "fresh":true or they read the old stamp.
         Dry run: perceives and evaluates conditions (read-only), plans every act, waits for nothing. Its

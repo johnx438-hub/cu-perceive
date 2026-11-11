@@ -36,6 +36,16 @@ class FakeDeps(Deps):
         self.act_results: list[dict] = []
         self.abort = False
         self.on_act = None
+        self.fps: list[str] = []      # scripted pixel fingerprints; the last one repeats
+        self.frame_items = None       # items read_frame returns (default: one "Old")
+
+    def fingerprint(self, json_path):
+        if not self.fps:
+            return "fp-const"
+        return self.fps.pop(0) if len(self.fps) > 1 else self.fps[0]
+
+    def images_match(self, a, b, tolerance=1.5):
+        return a == b
 
     def clock(self):
         return self.now
@@ -58,7 +68,8 @@ class FakeDeps(Deps):
         return out
 
     def read_frame(self, stamp):
-        return {"stamp": stamp, "hwnd": 100, "ocr": True, "items": [item(1, "Old")], "uia_nodes": []}
+        items = self.frame_items if self.frame_items is not None else [item(1, "Old")]
+        return {"stamp": stamp, "hwnd": 100, "ocr": True, "items": items, "uia_nodes": []}
 
     def act(self, steps, call):
         self.acts.append((steps, call))
@@ -315,6 +326,79 @@ class TestDryRun(unittest.TestCase):
             self.assertEqual(out["stop_reason"], "verify_only_stamp", out)
             self.assertIn("without roi", out["results"][1]["hint"])
             self.assertEqual(deps.acts, [])
+
+    def test_wait_until_stable_settles_and_times_out(self):
+        """Pixels hold still for stable_ms: page loaded. A spinner never does: never_settled."""
+        deps = FakeDeps()
+        deps.fps = ["a", "a", "b", "b", "b"]
+        out = run_plan([PERCEIVE, {"op": "wait_until_stable", "stamp_ref": "main",
+                                   "stable_ms": 200, "interval_ms": 100, "timeout_ms": 3000}],
+                       go=True, deps=deps)
+        row = out["results"][1]
+        self.assertTrue(out["ok"], out)
+        self.assertIs(row["stable"], True)
+        self.assertTrue(str(row["stamp"]).startswith("s"))
+        self.assertGreaterEqual(row["samples"], 3)
+        deps = FakeDeps()
+        deps.fps = ["a", "b", "c", "d", "e", "f", "g", "h"]
+        out = run_plan([PERCEIVE, {"op": "wait_until_stable", "stamp_ref": "main",
+                                   "stable_ms": 200, "interval_ms": 100, "timeout_ms": 500}],
+                       go=True, deps=deps)
+        self.assertEqual((out["ok"], out["stop_reason"], out["results"][1]["reason"]),
+                         (False, "never_settled", "never_settled"))
+
+    def test_wait_until_stable_dry_run_does_not_wait(self):
+        out = run_plan([PERCEIVE, {"op": "wait_until_stable", "timeout_ms": 1000}], deps=(deps := FakeDeps()))
+        row = out["results"][1]
+        self.assertEqual((row["ok"], row["stable"], row["would_wait_ms"]), (True, None, 1000))
+        self.assertEqual(deps.now, 0.0)
+
+    def test_challenge_condition_and_default_stop(self):
+        """A human-verification page stops a live plan at the perceive, and no mode will act on it."""
+        challenge = [item(1, "Just a moment..."), item(2, "Performing security verification"),
+                     item(3, "Verifying...")]
+        deps = FakeDeps(screens=[{"items": challenge}])
+        out = run_plan([PERCEIVE, {"op": "act", "norm": "1,1"}], go=True, deps=deps)
+        self.assertEqual((out["ok"], out["stop_reason"], out["stopped_at"]), (False, "challenge", "0"))
+        self.assertEqual(out["results"][0]["challenge"][0]["token"], "just a moment")
+        self.assertEqual(deps.acts, [])
+        self.assertIn("human has to pass it", out["results"][0]["hint"])
+
+        deps = FakeDeps(screens=[{"items": challenge}])
+        out = run_plan({"stop_on_challenge": False,
+                        "steps": [PERCEIVE,
+                                  {"op": "assert", "cond": {"challenge": True}},
+                                  {"op": "assert", "cond": {"not": {"challenge": False}}}]},
+                       go=True, deps=deps)
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["results"][1]["cond"]["count"], 2)  # "Just a moment..." + "Performing security verification"
+        self.assertEqual(out["results"][1]["cond"]["hits"][0]["token"], "just a moment")
+
+        deps = FakeDeps(screens=[{"items": challenge}])
+        out = run_plan([PERCEIVE, {"op": "act", "norm": "1,1"}], deps=deps)  # dry run
+        self.assertEqual((out["ok"], out["stop_reason"], out["stopped_at"]), (False, "challenge", "1"))
+        self.assertEqual(out["results"][0]["challenge"][0]["token"], "just a moment")
+        self.assertEqual(out["challenge"][0]["path"], "0")
+        self.assertTrue(any("human-verification page" in w for w in out["warnings"]))
+        self.assertEqual(deps.acts, [])  # not even planned: live would refuse it too
+
+    def test_act_refuses_a_challenge_frame(self):
+        """A stamp whose text is a challenge never receives input, even via plan.stamps."""
+        deps = FakeDeps()
+        deps.frame_items = [item(7, "Verify you are human")]
+        out = run_plan({"stamps": {"old": "20260101-000000-000"},
+                        "steps": [{"op": "act", "stamp_ref": "old", "norm": "1,1"}]}, go=True, deps=deps)
+        self.assertEqual((out["stop_reason"], out["verification"]), ("challenge", "refused"))
+        self.assertEqual(deps.acts, [])
+
+    def test_stop_on_challenge_false_lets_the_plan_run(self):
+        challenge = [item(1, "Just a moment...")]
+        out = run_plan({"stop_on_challenge": False,
+                        "steps": [PERCEIVE, {"op": "act", "norm": "1,1"}]},
+                       go=True, deps=(deps := FakeDeps(screens=[{"items": challenge}])))
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(len(deps.acts), 1)
+        self.assertEqual(out["results"][0]["challenge"][0]["token"], "just a moment")
 
     def test_repeat_plans_one_round(self):
         deps = FakeDeps()

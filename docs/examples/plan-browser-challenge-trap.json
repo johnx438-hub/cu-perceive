@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "goal": "COUNTER-EXAMPLE, do not copy: this plan typed into the address bar while Cloudflare was still verifying the page. Kept as the case docs/examples/plan-browser-read-body.json fixes.",
+  "timeout_ms": 240000,
+  "steps": [
+    {"op": "perceive", "exe": "msedge.exe", "ocr": true, "as": "b",
+     "note": "WRONG: reads the whole window, so the address bar is part of every condition"},
+    {"op": "act", "stamp_ref": "b", "focus": true,
+     "steps": [{"key": "ctrl+l"}, {"text": "https://www.npmjs.com/package/@anthropic-ai/claude-code"}]},
+    {"op": "act", "stamp_ref": "b", "key": "enter"},
+    {"op": "wait_for", "timeout_ms": 30000, "interval_ms": 1000,
+     "cond": {"any": [{"text": "2.1.322", "stamp_ref": "b", "source": "ocr"},
+                      {"text": "claude-code", "stamp_ref": "b", "source": "ocr"}]},
+     "note": "WRONG: 'claude-code' also matches the URL in the address bar, so this returned at 1.4 s while the page was still Cloudflare's 'Just a moment... / Performing security verification' screen"},
+    {"op": "if", "cond": {"text": "2.1.322", "stamp_ref": "b", "source": "ocr", "fresh": true},
+     "then": [{"op": "assert", "cond": {"text": "claude-code", "stamp_ref": "b", "source": "ocr"},
+               "message": "the npm page is not on screen"}],
+     "else": [
+       {"op": "act", "stamp_ref": "b", "focus": true,
+        "steps": [{"key": "ctrl+l"}, {"text": "https://registry.npmjs.org/@anthropic-ai/claude-code/latest"}]},
+       {"op": "act", "stamp_ref": "b", "key": "enter"},
+       {"op": "wait_for", "cond": {"text": "version", "stamp_ref": "b", "source": "ocr"}, "timeout_ms": 30000}
+     ],
+     "note": "WRONG: the else branch fires whenever the version is not readable yet, and it types again — during the challenge page"}
+  ]
+}
