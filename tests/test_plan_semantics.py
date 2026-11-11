@@ -313,7 +313,7 @@ class TestWindowMatch(unittest.TestCase):
         bad({"window": {"title": "a", "match": "glob"}}, "contains, exact or regex")
         bad({"window": {"title": "(", "match": "regex"}}, "not a valid regex")
         bad({"window": {"title": "a" * 300, "match": "regex"}}, "longer than")
-        for pattern in (r"^(\w+\s?)*$", r"(a+)+", r"(a*){2,}"):
+        for pattern in (r"^(\w+\s?)*$", r"(a+)+", r"(a*){2,}", r"^(.*?,){11}P"):
             bad({"window": {"title": pattern, "match": "regex"}}, "repeats a group")
         for pattern in (r"(ab)+", r"(a+)?", r"^Hacker News( - |$)"):
             _, err = validate_plan([{"op": "assert", "cond": {"window": {"title": pattern, "match": "regex"}}}])
@@ -423,7 +423,8 @@ class TestConfirmWithIds(unittest.TestCase):
         self.assertEqual(deps.acts, [])
         for other in ({"uia_name": "#4"}, {"uia_name": ["#4"]}, {"uia_name": "uia:#4"}, {"uia_name": "uia:4"},
                       {"uia_name": "4"}, {"uia_name": "Save,#4"}, {"uia_name": " #4"}, {"ids": [2]}, {"ids": 2},
-                      {"ids": "uia:4"}, {"ids": 0, "key": "enter"}):
+                      {"ids": "uia:4"}, {"ids": 0, "key": "enter"}, {"uia_name": ["Save,#4"]},
+                      {"uia_name": "\uff14"}, {"uia_name": "\u0664"}):
             _, err = validate_plan([PERCEIVE, {"op": "act", "steps": [
                 {"ocr_text": "Save", "confirm_frames": 2}, other]}])
             self.assertIsNotNone(err, other)
@@ -455,7 +456,8 @@ class TestNotShape(unittest.TestCase):
         for cond, met in (({"not": {"any": [t]}}, False), ({"not": {"all": [t]}}, False),
                           ({"not": {"any": [stable_absent, t]}}, False), ({"not": {"not": {"not": t}}}, False),
                           ({"not": {"not": t}}, False), ({"any": [t, {"not": stable_absent}]}, True),
-                          ({"not": {"all": [stable_absent, t]}}, True)):
+                          ({"not": {"all": [stable_absent, t]}}, True), ({"not": {"all": [t, stable_absent]}}, True),
+                          ({"not": {"all": [t, {"not": stable_absent}]}}, False)):
             deps = FakeDeps(screens=[{"items": [item(1, "Error")]}, {"items": []}])
             out = run_plan([PERCEIVE, {"op": "assert", "on_fail": "continue", "cond": cond}], go=True, deps=deps)
             self.assertEqual(out["results"][1]["cond"]["met"], met, cond)

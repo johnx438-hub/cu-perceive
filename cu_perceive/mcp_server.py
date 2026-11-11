@@ -784,7 +784,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
             Chrome"), so "left this page" is an anchored regex: {"not":{"window":{"title":"^Hacker News( - |$)",
             "match":"regex"}}} (contains also matches "... | Hacker News - Google Chrome"; exact on the bare
             page name never matches, so its not holds at once). regex reads the first 512 characters and refuses
-            a group that repeats around a repeat ((a+)*). exact,
+            a group that repeats around a repeat ((a+)*), a lint only: keep patterns simple and anchored. exact,
             regex and class filter windows in z-order (first is not ranked the way the windows tool ranks a title
             lookup), and untitled windows are not listed.
           {"foreground":{"title"|"hwnd"|"stamp_ref"}}

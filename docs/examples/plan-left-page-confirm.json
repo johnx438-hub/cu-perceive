@@ -6,7 +6,7 @@
      "note": "the browser window: its title is 'Hacker News - Google Chrome' (Edge: '... - Microsoft Edge')"},
     {"op": "wait_until_stable", "stamp_ref": "hn", "stable_ms": 800, "timeout_ms": 15000},
     {"op": "act", "stamp_ref": "hn", "ocr_text": "past", "confirm_frames": 2, "focus": true,
-     "note": "the top-bar link; an exact OCR item wins over story titles that contain the word. confirm_frames: act only if the match holds on the next frame too. OCR may read the top bar as one line ('new | past | comments | ...'): then 'past' only matches that line as a substring and the act would click its centre (another link). Dry-run first and check the row's matched_by / the stamp's items; if it matched the whole bar, use norm"},
+     "note": "the top-bar link; an exact OCR item wins over story titles that contain the word. confirm_frames: act only if the match holds on the next frame too. OCR may read the top bar as one line ('new | past | comments | ...'): then 'past' only matches that line as a substring and the act would click its centre (another link). Dry-run first and look up the id in the row's confirm_frames among the stamp's items; if it is the whole bar, use norm"},
     {"op": "wait_for", "timeout_ms": 15000,
      "cond": {"not": {"window": {"title": "^Hacker News( - |$)", "match": "regex"}}},
      "note": "the front page title starts with 'Hacker News'; other pages are '<page> | Hacker News - ...'. contains would match those too and never become true"},

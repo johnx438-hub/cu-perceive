@@ -108,7 +108,8 @@ WINDOW_MATCH = ("contains", "exact", "regex")
 MAX_PATTERN_LEN = 256
 MAX_REGEX_HAY = 512  # regex mode reads the first 512 characters of a title / class
 # a repeated group whose body repeats too: the classic catastrophic-backtracking shape, refused at validation
-_NESTED_QUANT = re.compile(r"\((?:[^()\\]|\\.)*(?:[*+]|\{\d*,\d*\})(?:[^()\\]|\\.)*\)(?:[*+]|\{\d*,\d*\})")
+# (a lint for the commonest shape, not a guarantee: other patterns can still backtrack for long)
+_NESTED_QUANT = re.compile(r"\((?:[^()\\]|\\.)*(?:[*+]|\{\d*,\d*\})(?:[^()\\]|\\.)*\)(?:[*+]|\{\d*,?\d*\})")
 RESUME_REASONS = ("max_ops", "timeout")  # stops a continuation can pick up from
 
 PLAN_FIELDS = frozenset({"version", "goal", "stamps", "timeout_ms", "stop_on_challenge", "steps", "resumable",
@@ -352,12 +353,12 @@ def _split_act(op: dict) -> tuple[list[dict], dict]:
 def _names_uia_id(q) -> bool:
     """Whether a uia_name (a string, a comma list or a list, as act parses it) names a node by its per-frame
     id: "#4", "uia:#4", "uia:4" or a bare "4" (uia.find_uia_target reads all of these as node ids)."""
-    parts = q if isinstance(q, (list, tuple)) else str(q).split(",") if isinstance(q, (str, int)) else []
-    for part in parts:
-        t = str(part).strip()
+    items = q if isinstance(q, (list, tuple)) else [q] if isinstance(q, (str, int)) else []
+    for part in (p for x in items for p in str(x).split(",")):  # act splits every element on commas too
+        t = part.strip()
         if t.lower().startswith("uia:"):
             t = t[4:].strip()
-        if t.startswith("#") or _DIGITS.fullmatch(t):
+        if t.startswith("#") or t.isdigit():  # isdigit, as uia.py reads it (full-width digits too)
             return True
     return False
 
@@ -999,13 +1000,14 @@ class _Run:
             parts = []
             for c in body:
                 parts.append(self.eval(c, fresh))
-                if parts[-1]["met"] != (kind == "all"):
-                    break  # short-circuit, left to right
+                if parts[-1]["met"] != (kind == "all") and not (kind == "all" and parts[-1].get("unstable")):
+                    break  # short-circuit, left to right; an unstable miss in all reads on for a stable one
             met = (all if kind == "all" else any)(p["met"] for p in parts)
             out = {"met": met, kind: parts}
             # an unstable part (a match that did not hold across frames) is unmet but not proven false; when
             # the result rests on it (any: nothing met; all: it is the part that failed) the result is unstable
-            if not met and (any(p.get("unstable") for p in parts) if kind == "any" else parts[-1].get("unstable")):
+            if not met and (any(p.get("unstable") for p in parts) if kind == "any"
+                            else all(p.get("unstable") for p in parts if not p["met"])):
                 out["unstable"] = True
             return out
         if kind == "not":
