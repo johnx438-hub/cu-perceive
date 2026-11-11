@@ -22,8 +22,8 @@ def reset_browser_state() -> None:
 
 
 def register(decorate) -> None:
-    """Register the five browser tools with the MCP server's tool decorator."""
-    for fn in (browser_status, browser_session, browser_observe, browser_tabs, browser_act):
+    """Register the six browser tools with the MCP server's tool decorator."""
+    for fn in (browser_status, browser_session, browser_observe, browser_tabs, browser_cooperate, browser_act):
         decorate(fn)
 
 
@@ -239,12 +239,15 @@ def browser_session(
     not gate the call. CU_PERCEIVE_BSK_REQUIRE_GO=1 dry-runs start/stop unless go=true
     (dry_run=true still wins). Desktop act is unchanged. Unknown arguments are refused.
     """
-    return _guard(
+    out = _guard(
         catalog.plan_session,
         catalog.Spec(verb=action, session=session, browser=browser, focus=bool(focus)),
         go=bool(go),
         dry_run=dry_run,
     )
+    if (action or "").strip().lower() == "stop" and session and out.get("ok") and not out.get("dry_run"):
+        LEDGER.clear_context(session.strip())
+    return out
 
 
 def browser_observe(
@@ -332,6 +335,8 @@ def browser_act(
     clear: bool = True,
     hard: bool = False,
     observation_id: str = "",
+    context: str = "",
+    auto_sync: bool = True,
     go: bool = False,
     dry_run: bool | None = None,
 ):
@@ -348,9 +353,17 @@ def browser_act(
     Unknown arguments are refused (reason=unknown_args) and nothing runs. bsk errors keep
     data.reason; input_outcome_unknown means do not retry blindly — observe first.
     Desktop clicks stay on act, which still dry-runs unless go=true.
+    Shared-tab control: the act carries the control context from the last browser_cooperate sync of
+    this session (or context= when given) as bsk --context. When bsk answers cooperation_sync_required
+    or control_context_invalid and auto_sync=true (default), the server runs one cooperate sync
+    (--settle), stores the new context, records the page it returns as a new observation, and replies
+    ok=false with synced, observation_id and refs: nothing was sent, so pick the ref again from those
+    refs and repeat the act (the context is then passed for you). It never repeats the input itself.
     """
-    return _guard(
-        catalog.plan_act,
+    sess = (session or "").strip()
+    ctx = (context or "").strip() or (LEDGER.context(sess) if sess else None)
+    out = _guard(
+        lambda spec: _with_context(catalog.plan_act(spec), ctx),
         catalog.Spec(
             verb=verb,
             session=session,
@@ -374,3 +387,106 @@ def browser_act(
         go=bool(go),
         dry_run=dry_run,
     )
+    return _after_act(out, sess, bool(auto_sync))
+
+
+COOP_SYNC_REASONS = frozenset({"cooperation_sync_required", "control_context_invalid"})
+
+
+def _with_context(plan: catalog.Plan, ctx: str | None) -> catalog.Plan:
+    if ctx and not plan.read and "--context" not in plan.args:
+        plan.args = list(plan.args) + ["--context", ctx]
+        plan.notes.append("passing the stored cooperate control context (--context)")
+    return plan
+
+
+def _after_act(out: dict, session: str, auto_sync: bool) -> dict:
+    """Recover from a missing / invalid control context with one sync; never re-send the input."""
+    reason = out.get("reason") if isinstance(out, dict) else None
+    if not session or reason not in COOP_SYNC_REASONS or out.get("dry_run"):
+        return out
+    LEDGER.clear_context(session)
+    if not auto_sync:
+        out["hint"] = ("call browser_cooperate action=sync for this session, observe the returned refs, "
+                       "then repeat the act (the context is passed for you)")
+        return out
+    sync = _cooperate(action="sync", session=session, policy="", settle=True, timeout_ms=0, tab_id=0,
+                      dry_run=None, go=False)
+    out["synced"] = bool(sync.get("ok"))
+    out["sync"] = {k: sync.get(k) for k in ("ok", "reason", "error", "context_stored", "observation_id")
+                   if sync.get(k) is not None}
+    if sync.get("ok"):
+        out["observation_id"] = sync.get("observation_id")
+        out["refs"] = sync.get("refs")
+        out["hint"] = ("control synced and the page re-observed; nothing was sent. Choose the target again from "
+                       "refs and repeat browser_act with this observation_id (context is passed automatically)")
+    else:
+        out["hint"] = "cooperate sync failed; a person may hold the tab. Read sync.reason; do not retry blindly"
+    return out
+
+
+def _cooperate(*, action: str, session: str, policy: str, settle: bool, timeout_ms: int, tab_id: int,
+               dry_run: bool | None, go: bool) -> dict:
+    act = (action or "").strip().lower()
+    sess = (session or "").strip()
+    if act not in {"status", "sync", "wait"}:
+        return {"ok": False, "reason": "bad_args", "error": f"unknown action {action!r}",
+                "hint": "action is status, sync or wait", "dry_run": True}
+    if not sess:
+        return {"ok": False, "reason": "bad_args", "error": "session is required",
+                "hint": "pass the session id from browser_session action=start", "dry_run": True}
+    argv = ["cooperate", act, "--session", sess, "--json"]
+    pol = (policy or "").strip().lower()
+    if pol:
+        if pol not in {"auto", "target", "strict"}:
+            return {"ok": False, "reason": "bad_args", "error": f"unknown policy {policy!r}",
+                    "hint": "policy is auto, target or strict", "dry_run": True}
+        if act != "sync":
+            return {"ok": False, "reason": "bad_args", "error": "policy applies to sync only", "dry_run": True}
+        argv += ["--policy", pol]
+    if settle and act == "sync":
+        argv.append("--settle")
+    if timeout_ms:
+        argv += ["--timeout-ms", str(min(max(int(timeout_ms), 1), 25000))]
+    if tab_id:
+        argv += ["--tab-id", str(int(tab_id))]
+    plan = catalog.Plan(verb=f"cooperate_{act}", args=argv, session=sess, ref=None, selector=None,
+                        read=(act == "status"), records=(act == "sync"), invalidates=False,
+                        timeout_ms=int(timeout_ms or 0) + (30000 if act != "status" else 0))
+    out = _execute(plan, go=go, dry_run=dry_run)
+    result = out.get("result") if isinstance(out, dict) else None
+    if out.get("ok") and not out.get("dry_run") and isinstance(result, dict):
+        ctx = result.get("context_id")
+        if not ctx and isinstance(result.get("post"), dict):
+            ctx = result["post"].get("context_id")
+        if isinstance(ctx, str) and ctx.strip():
+            LEDGER.set_context(sess, ctx.strip())
+            out["context_stored"] = True
+        elif act == "sync":
+            out["context_stored"] = False
+            out.setdefault("warnings", []).append(
+                "sync returned no context_id (a person may hold the tab); acts will need another sync")
+    return out
+
+
+def browser_cooperate(
+    action: str = "status",
+    session: str = "",
+    policy: str = "",
+    settle: bool = True,
+    timeout_ms: int = 0,
+    tab_id: int = 0,
+    go: bool = False,
+    dry_run: bool | None = None,
+):
+    """Shared-tab control for a browser session (bsk cooperate). action=status (read-only), sync, or wait.
+
+    sync takes control under the session's policy (policy=auto|target|strict; empty keeps bsk's default)
+    and, with settle=true (default), retries transient read-only refusals. Its context_id is stored for
+    the session and passed to every later browser_act as --context; the page it returns is recorded as a
+    new observation (observation_id, refs) for browser_act. wait waits for a person to hand the tab back
+    (timeout_ms up to 25000). sync and wait run unless dry_run=true; go is accepted and does not gate the
+    call. browser_act already syncs once by itself on cooperation_sync_required.
+    """
+    return _cooperate(action=action, session=session, policy=policy, settle=bool(settle),
+                      timeout_ms=timeout_ms, tab_id=tab_id, dry_run=dry_run, go=bool(go))

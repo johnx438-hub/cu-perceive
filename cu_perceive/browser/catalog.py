@@ -779,11 +779,14 @@ def allowlist() -> dict:
             "browser_observe kind=snapshot",
             "browser_session action=list",
             "browser_tabs action=list",
+            "browser_cooperate action=status",
         ],
         "act": [
             *[f"browser_act verb={name}" for name in ACT_VERBS],
             "browser_session action=start",
             "browser_session action=stop",
+            "browser_cooperate action=sync",
+            "browser_cooperate action=wait",
             *[
                 f"browser_tabs action={name}"
                 for name in ("create", "close", "select", "borrow", "return")

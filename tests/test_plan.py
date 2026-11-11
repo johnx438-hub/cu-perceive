@@ -87,8 +87,9 @@ class FakeDeps(Deps):
     def foreground(self):
         return self.fg
 
-    def launch(self, app=None, exe=None):
+    def launch(self, app=None, exe=None, args=None, user_data_dir=None):
         self.launched.append(app or exe)
+        self.launch_kw = {"args": args, "user_data_dir": user_data_dir}
         return {"ok": True, "exe": exe or app, "window": {"hwnd": 7, "title": "New"}}
 
     def abort_state(self):

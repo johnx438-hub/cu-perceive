@@ -313,7 +313,8 @@ class TestSchemaMatchesImplementation(unittest.TestCase):
         cls.tools = _collect_tools()
 
     def test_thirteen_tools(self):
-        self.assertEqual(len(self.tools), 13, sorted(self.tools))
+        # 14 since browser_cooperate (name kept for history)
+        self.assertEqual(len(self.tools), 14, sorted(self.tools))
         self.assertIn("plan", self.tools)
         self.assertIn("abort", self.tools)
         self.assertIn("config", self.tools)
@@ -358,7 +359,7 @@ class TestSchemaMatchesImplementation(unittest.TestCase):
                 mock.patch("uvicorn.Server.run", lambda self: None):
             mcp_server.serve(port=0)
         listed = asyncio.run(captured["app"].list_tools())
-        self.assertEqual(len(listed), 13)
+        self.assertEqual(len(listed), 14)
         for t in listed:
             schema = getattr(t, "inputSchema", None) or getattr(t, "input_schema", None) or {}
             props = set((schema.get("properties") or {}).keys())
