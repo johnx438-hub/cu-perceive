@@ -11,10 +11,15 @@ The live gate is on the call (``go``), never in the plan. A dry run still
 perceives and evaluates conditions (both only read), plans every act and sends
 nothing. Once an act was planned but not sent, later checks describe a screen
 the live run would have changed: they are marked ``speculative`` and a failing
-one does not stop the dry run.
+one does not stop the dry run; the run lists them in ``would_fail`` with their
+reason (the same value as ``would_fail_now`` on the row), so a typoed
+``ocr_text`` is not hidden behind ``ok: true``.
 
 Bounds: MAX_OPS executed ops, MAX_DEPTH nesting, MAX_REPEAT iterations, a wall
-clock ``timeout_ms`` and the operator abort switch, checked before every op.
+clock ``timeout_ms`` and the operator abort switch, checked before every op. An
+op the gate refuses still gets a row in ``results`` (``gated``, ``ran: false``)
+so ``stopped_at`` always names a result. A live ``wait`` reports the time it
+really slept (``waited_sec``) and why it stopped early (``interrupted``).
 """
 from __future__ import annotations
 
@@ -598,12 +603,19 @@ class _Run:
         return all(self.run_op(op, f"{path}{i}") for i, op in enumerate(ops))
 
     def run_op(self, op: dict, path: str) -> bool:
+        kind = op.get("op")
         blocked = self.gate()
         if blocked:
+            # The op never ran, but it gets a row anyway: results[] and stopped_at must name the same
+            # op, or a consumer indexing results by stopped_at finds nothing.
+            row = {"path": path, "op": kind, "ok": False, "ran": False, "gated": True,
+                   "reason": blocked[0], "error": blocked[1]}
+            if op.get("note"):
+                row["note"] = op["note"]
+            self.results.append(row)
             self.stop(path, *blocked)
             return False
         self.ops_run += 1
-        kind = op["op"]
         res: dict = {"path": path, "op": kind}
         if op.get("note"):
             res["note"] = op["note"]
@@ -612,7 +624,8 @@ class _Run:
             getattr(self, f"op_{kind}")(op, path, res)
         except OpError as e:
             if self.speculative:  # the live run would have changed the screen first
-                res.update(ok=None, speculative=True, would_fail_now=e.reason, error=str(e))
+                res.update(ok=None, speculative=True, reason=e.reason, would_fail_now=e.reason,
+                           error=str(e), **e.extra)
             else:
                 res.update(ok=False, reason=e.reason, error=str(e), **e.extra)
         if kind in LEAF_OPS:
@@ -666,10 +679,28 @@ class _Run:
         if not self.send:
             res.update(ok=True, would_wait_sec=sec)
             return
-        end = min(self.deps.clock() + sec, self.deadline)
-        while (left := end - self.deps.clock()) > 0 and not self.gate():
+        t0 = self.deps.clock()
+        end = min(t0 + sec, self.deadline)
+        blocked = None
+        while (left := end - self.deps.clock()) > 0:
+            if (blocked := self.gate()):
+                break
             self.deps.sleep(min(0.25, left))
-        res.update(ok=True, waited_sec=sec)
+        waited = max(0.0, self.deps.clock() - t0)
+        res.update(waited_sec=round(waited, 3), requested_sec=sec)
+        if blocked:
+            # an operator stop or the plan deadline landed inside the wait: say so instead of
+            # reporting the full requested sleep
+            res.update(ok=False, reason=blocked[0], error=blocked[1], interrupted=blocked[0],
+                       waited_short_by_sec=round(sec - waited, 3))
+            self.stop(path, *blocked)
+        elif waited + 0.05 < sec:
+            # the deadline clipped the sleep without the gate seeing it
+            res.update(ok=False, reason="timeout", error="the plan deadline cut this wait short",
+                       interrupted="deadline", waited_short_by_sec=round(sec - waited, 3))
+            self.stop(path, "timeout", "the plan deadline cut this wait short")
+        else:
+            res["ok"] = True
 
     def op_wait_for(self, op, path, res):
         timeout = float(op.get("timeout_ms", DEFAULT_WAIT_FOR_MS)) / 1000.0
@@ -787,6 +818,14 @@ class _Run:
             out["verification"] = None
             if self.unsent:
                 out["planned_acts"] = self.unsent
+            would = [{"path": r["path"], "op": r["op"], "reason": r.get("would_fail_now") or r.get("reason"),
+                      "error": r.get("error")} for r in self.results
+                     if r.get("ran", True) and r.get("ok") is None and (r.get("would_fail_now") or r.get("reason"))]
+            if would:  # a dry run that never stopped can still describe ops that would fail
+                out["would_fail"] = would
+                out["would_fail_count"] = len(would)
+                out["warnings"] = [f"{len(would)} op(s) would fail once the planned acts run: "
+                                   + ", ".join(f"{w['path']} {w['reason']}" for w in would[:5])]
         elif aborted:
             out["verification"] = "aborted"
         elif not out["ok"]:

@@ -346,6 +346,72 @@ class TestLive(unittest.TestCase):
         deps.abort = True
         self.assertTrue(run_plan([PERCEIVE, {"op": "act", "norm": "1,1"}], deps=deps)["ok"])  # dry runs still plan
 
+    def test_gated_op_gets_a_result_row(self):
+        """A refused op leaves a row, so stopped_at always names an entry in results."""
+        deps = FakeDeps()
+        deps.on_act = lambda d: setattr(d, "abort", True)
+        out = run_plan([PERCEIVE, {"op": "act", "norm": "1,1"}, {"op": "act", "norm": "2,2", "note": "n"}],
+                       go=True, deps=deps)
+        self.assertEqual([r["path"] for r in out["results"]], ["0", "1", "2"])
+        row = out["results"][2]
+        self.assertEqual((row["op"], row["gated"], row["ran"], row["ok"], row["reason"], row["note"]),
+                         ("act", True, False, False, "aborted", "n"))
+        self.assertEqual((out["stopped_at"], out["stop_reason"]), ("2", "aborted"))
+
+    def test_dry_run_lists_the_ops_that_would_fail(self):
+        """A typoed ocr_text (or stale stamp_ref) cannot hide behind ok: true."""
+        deps = FakeDeps(screens=[{"items": [item(1, "Save")]}])
+        out = run_plan([PERCEIVE,
+                        {"op": "act", "norm": "500,500", "text": "x"},
+                        {"op": "act", "ocr_text": "Quit", "on_fail": "continue"}], deps=deps)
+        self.assertTrue(out["ok"], out)
+        row = out["results"][2]
+        self.assertEqual((row["ok"], row["reason"], row["would_fail_now"], row["speculative"]),
+                         (None, "target_not_found", "target_not_found", True))
+        self.assertEqual(out["would_fail"], [{"path": "2", "op": "act", "reason": "target_not_found",
+                                              "error": "ocr_text 'Quit' matches 0 items on stamp s0"}])
+        self.assertEqual(out["would_fail_count"], 1)
+        self.assertIn("1 op(s) would fail", out["warnings"][0])
+
+    def test_dry_run_without_failures_has_no_would_fail_list(self):
+        out = run_plan([PERCEIVE, {"op": "act", "norm": "1,1"},
+                        {"op": "assert", "cond": {"text": "Save"}}], deps=FakeDeps(
+            screens=[{"items": [item(1, "Save")]}]))
+        self.assertNotIn("would_fail", out)
+        self.assertNotIn("warnings", out)
+
+    def test_wait_reports_what_it_slept_when_aborted(self):
+        deps = FakeDeps()
+        plain_sleep = deps.sleep
+
+        def sleep(s):
+            plain_sleep(s)
+            deps.abort = True
+
+        deps.sleep = sleep
+        out = run_plan([PERCEIVE, {"op": "wait", "sec": 2}], go=True, deps=deps)
+        row = out["results"][1]
+        self.assertEqual((row["ok"], row["reason"], row["interrupted"], row["requested_sec"]),
+                         (False, "aborted", "aborted", 2))
+        self.assertAlmostEqual(row["waited_sec"], 0.25)
+        self.assertAlmostEqual(row["waited_short_by_sec"], 1.75)
+        self.assertEqual((out["ok"], out["stop_reason"], out["verification"]), (False, "aborted", "aborted"))
+
+    def test_wait_reports_the_full_sleep_when_nothing_interrupts_it(self):
+        out = run_plan([PERCEIVE, {"op": "wait", "sec": 1}], go=True, deps=(deps := FakeDeps()))
+        row = out["results"][1]
+        self.assertEqual((row["ok"], row["waited_sec"], row["requested_sec"]), (True, 1.0, 1))
+        self.assertNotIn("interrupted", row)
+        self.assertAlmostEqual(deps.now, 1.0)
+
+    def test_wait_cut_by_the_plan_deadline(self):
+        out = run_plan({"timeout_ms": 1500, "steps": [PERCEIVE, {"op": "wait", "sec": 5}]},
+                       go=True, deps=(deps := FakeDeps()))
+        row = out["results"][1]
+        self.assertEqual((out["stop_reason"], row["ok"], row["interrupted"]), ("timeout", False, "deadline"))
+        self.assertLess(row["waited_sec"], 5)
+        self.assertLess(deps.now, 2.0)
+
     def test_op_and_time_caps(self):
         body = [{"op": "act", "norm": "1,1"}] * 4
         out = run_plan([PERCEIVE, {"op": "repeat", "times": 20, "steps": body}], go=True, deps=(deps := FakeDeps()))
