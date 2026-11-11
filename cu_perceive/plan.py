@@ -9,17 +9,25 @@ Ops: perceive, act, wait, wait_for, assert, if, repeat, launch, stop.
 
 The live gate is on the call (``go``), never in the plan. A dry run still
 perceives and evaluates conditions (both only read), plans every act and sends
-nothing. Once an act was planned but not sent, later checks describe a screen
-the live run would have changed: they are marked ``speculative`` and a failing
-one does not stop the dry run; the run lists them in ``would_fail`` with their
-reason (the same value as ``would_fail_now`` on the row), so a typoed
-``ocr_text`` is not hidden behind ``ok: true``.
+nothing. Once an act was planned but not sent, later checks describe a screen the
+live run would have changed: they are marked ``speculative`` and a failing check
+does not stop the dry run. An ``if`` there plans both branches (``branch: "both"``,
+``branch_now`` for the branch the current screen would take); a ``stop`` inside one
+ends only that branch (``would_stop``, ``stop_ok``). The run lists what failed in
+``would_fail`` with the reason (the same value as ``would_fail_now`` on the row) and
+what would stop it in ``would_stop``, so a typoed ``ocr_text`` is not hidden behind
+``ok: true`` and a plan that ends in ``stop ok:false`` is not reported as clean.
 
 Bounds: MAX_OPS executed ops, MAX_DEPTH nesting, MAX_REPEAT iterations, a wall
-clock ``timeout_ms`` and the operator abort switch, checked before every op. An
-op the gate refuses still gets a row in ``results`` (``gated``, ``ran: false``)
-so ``stopped_at`` always names a result. A live ``wait`` reports the time it
-really slept (``waited_sec``) and why it stopped early (``interrupted``).
+clock ``timeout_ms`` and the operator abort switch. The op budget is checked
+between ops, so the op that reaches the cap still runs to its end. Abort and the
+deadline are also read inside a running ``wait`` / ``wait_for`` at least every
+``INTERRUPT_POLL_S``, which then report ``interrupted`` (``aborted`` or
+``deadline``) instead of the full sleep; a ``wait_for`` that spends its own
+``timeout_ms`` reports ``wait_timeout``. An op the gate refuses still gets a row in
+``results`` (``gated``, ``ran: false``) so ``stopped_at`` always names a result.
+A live ``wait`` reports the time it really slept (``waited_sec``, next to
+``requested_sec`` and ``waited_short_by_sec``).
 """
 from __future__ import annotations
 
@@ -39,6 +47,8 @@ MAX_WAIT_FOR_MS = 60_000
 DEFAULT_WAIT_FOR_MS = 5_000
 DEFAULT_INTERVAL_MS = 300
 MIN_INTERVAL_MS = 100
+MAX_INTERVAL_MS = 1_000  # a longer check interval would hide an operator stop for that long
+INTERRUPT_POLL_S = 0.25  # the abort switch is read at least this often inside a long sleep
 DEFAULT_TIMEOUT_MS = 120_000
 MAX_TIMEOUT_MS = 600_000
 
@@ -94,6 +104,10 @@ class PlanError(Exception):
         if self.hint:
             out["hint"] = self.hint
         return out
+
+
+class _BranchEnd(Exception):
+    """Dry run only: a stop inside a branch the live run may or may not take ends that branch."""
 
 
 class OpError(Exception):
@@ -263,8 +277,9 @@ def _validate_ops(ops, path: str, depth: int, names: set) -> None:
             if not _is_num(t) or not 0 < t <= MAX_WAIT_FOR_MS:
                 raise PlanError(p, f"timeout_ms must be in (0, {MAX_WAIT_FOR_MS}]")
             iv = op.get("interval_ms", DEFAULT_INTERVAL_MS)
-            if not _is_num(iv) or iv < MIN_INTERVAL_MS:
-                raise PlanError(p, f"interval_ms must be at least {MIN_INTERVAL_MS}")
+            if not _is_num(iv) or not MIN_INTERVAL_MS <= iv <= MAX_INTERVAL_MS:
+                raise PlanError(p, f"interval_ms must be in {MIN_INTERVAL_MS}..{MAX_INTERVAL_MS}",
+                                "a longer check interval would hide an operator stop")
         elif kind == "assert":
             _validate_cond(op.get("cond"), f"{p}.cond", names)
         elif kind == "if":
@@ -418,6 +433,7 @@ class _Run:
         self.steps_sent = 0
         self.stop_info: dict | None = None
         self.refreshed: set[str] = set()
+        self.unsure_branches = 0  # depth of if-branches a dry run plans without knowing which one runs live
         self.t0 = deps.clock()
         self.deadline = self.t0 + float(plan.get("timeout_ms", DEFAULT_TIMEOUT_MS)) / 1000.0
 
@@ -426,13 +442,37 @@ class _Run:
         if self.stop_info is None:
             self.stop_info = {"stopped_at": path, "stop_reason": reason, "ok": ok, "error": error}
 
-    def gate(self) -> tuple[str, str] | None:
+    def abort_hit(self) -> tuple[str, str] | None:
+        """The operator switch alone. A dry run never reads it: it only plans and sends nothing."""
         if self.send and self.deps.abort_state().get("abort_active"):
             return "aborted", "aborted by operator"
-        if self.ops_run >= MAX_OPS:
-            return "max_ops", f"the plan ran {MAX_OPS} ops (cap); the rest was not run"
+        return None
+
+    def interrupt(self) -> tuple[str, str] | None:
+        """Operator abort or the plan deadline: the two things that may cut a running op short."""
+        if (hit := self.abort_hit()):
+            return hit
         if self.deps.clock() >= self.deadline:
             return "timeout", "plan timeout_ms ran out; the rest was not run"
+        return None
+
+    def nap(self, sec: float) -> tuple[str, str] | None:
+        """Sleep up to ``sec`` seconds, clipped by the plan deadline, reading the abort switch at least
+        every INTERRUPT_POLL_S. Returns the interrupt that cut the sleep short, or None."""
+        end = min(self.deps.clock() + max(0.0, sec), self.deadline)
+        while (left := end - self.deps.clock()) > 0:
+            self.deps.sleep(min(INTERRUPT_POLL_S, left))
+            if (hit := self.interrupt()):
+                return hit
+        return None
+
+    def gate(self) -> tuple[str, str] | None:
+        """Whether the next op may start. The op budget belongs here only: an op that already
+        started (the 64th being a wait) is not cut short by it."""
+        if (hit := self.interrupt()):
+            return hit
+        if self.ops_run >= MAX_OPS:
+            return "max_ops", f"the plan ran {MAX_OPS} ops (cap); the rest was not run"
         return None
 
     @property
@@ -680,25 +720,22 @@ class _Run:
             res.update(ok=True, would_wait_sec=sec)
             return
         t0 = self.deps.clock()
-        end = min(t0 + sec, self.deadline)
-        blocked = None
-        while (left := end - self.deps.clock()) > 0:
-            if (blocked := self.gate()):
-                break
-            self.deps.sleep(min(0.25, left))
+        blocked = self.nap(sec)
         waited = max(0.0, self.deps.clock() - t0)
         res.update(waited_sec=round(waited, 3), requested_sec=sec)
+        if not blocked and waited + 0.001 < sec:
+            # the deadline clipped the sleep without the switch reporting it (clock granularity)
+            blocked = "timeout", "the plan deadline cut this wait short"
+        if not blocked:
+            # a stop can land in the last slice, after which no op may follow to notice it
+            blocked = self.abort_hit()
         if blocked:
             # an operator stop or the plan deadline landed inside the wait: say so instead of
             # reporting the full requested sleep
-            res.update(ok=False, reason=blocked[0], error=blocked[1], interrupted=blocked[0],
+            res.update(ok=False, reason=blocked[0], error=blocked[1],
+                       interrupted="deadline" if blocked[0] == "timeout" else blocked[0],
                        waited_short_by_sec=round(sec - waited, 3))
             self.stop(path, *blocked)
-        elif waited + 0.05 < sec:
-            # the deadline clipped the sleep without the gate seeing it
-            res.update(ok=False, reason="timeout", error="the plan deadline cut this wait short",
-                       interrupted="deadline", waited_short_by_sec=round(sec - waited, 3))
-            self.stop(path, "timeout", "the plan deadline cut this wait short")
         else:
             res["ok"] = True
 
@@ -707,22 +744,30 @@ class _Run:
         interval = float(op.get("interval_ms", DEFAULT_INTERVAL_MS)) / 1000.0
         t0 = self.deps.clock()
         polls = 0
+        blocked = None
         while True:
             ev = self.checked(op["cond"], fresh=True)
             polls += 1
-            now = self.deps.clock()
-            if ev["met"] or not self.send or now - t0 >= timeout or self.gate():
+            if ev["met"] or not self.send:
                 break
-            self.deps.sleep(min(interval, max(0.0, timeout - (now - t0))))
+            # The stop and the plan deadline outrank the op's own timeout_ms: checking them first keeps
+            # an operator stop from being reported as a condition failure when both are true at once.
+            if (blocked := self.interrupt()) or self.deps.clock() - t0 >= timeout:
+                break
+            # one interval, in interrupt-sized slices: a plan may set interval_ms but not blind the switch
+            blocked = self.nap(min(interval, max(0.0, timeout - (self.deps.clock() - t0))))
+            if blocked:
+                break
         res.update(met=ev["met"], polls=polls, elapsed_ms=round((self.deps.clock() - t0) * 1000), cond=ev)
-        blocked = self.gate()
-        if not ev["met"] and blocked and blocked[0] == "aborted":
-            res.update(ok=False, reason="aborted", error=blocked[1])
-            self.stop(path, *blocked)
-        elif ev["met"]:
+        if ev["met"]:
             res["ok"] = True
         elif not self.send:
             res.update(ok=None, would_wait_ms=round(timeout * 1000))
+        elif blocked:
+            # cut short by an operator stop or the plan deadline, not by its own timeout_ms
+            res.update(ok=False, reason=blocked[0], error=blocked[1],
+                       interrupted="deadline" if blocked[0] == "timeout" else blocked[0])
+            self.stop(path, *blocked)
         else:
             res.update(ok=False, reason="wait_timeout",
                        error=f"condition not met within {round(timeout * 1000)} ms ({polls} polls)")
@@ -740,9 +785,25 @@ class _Run:
     def op_if(self, op, path, res):
         ev = self.checked(op["cond"])
         branch = "then" if ev["met"] else "else"
-        res.update(ok=True, cond=ev, branch=branch)
-        if op.get(branch):
-            self.run_ops(op[branch], f"{path}.{branch}.")
+        if not self.speculative:
+            res.update(ok=True, cond=ev, branch=branch)
+            if op.get(branch):
+                self.run_ops(op[branch], f"{path}.{branch}.")
+            return
+        # A dry run past its first planned act reads a screen the live run would have changed, so
+        # this condition does not say which branch runs live. Plan both instead of following one
+        # (the wrong one would hide the other's acts, or end the dry run on a stop that never fires).
+        res.update(ok=True, cond=ev, branch="both", branch_now=branch)
+        for name in ("then", "else"):
+            if not op.get(name) or self.stop_info is not None:
+                continue
+            self.unsure_branches += 1
+            try:
+                self.run_ops(op[name], f"{path}.{name}.")
+            except _BranchEnd:
+                pass
+            finally:
+                self.unsure_branches -= 1
 
     def op_repeat(self, op, path, res):
         until, times = op.get("until"), int(op["times"])
@@ -787,6 +848,9 @@ class _Run:
 
     def op_stop(self, op, path, res):
         ok = bool(op.get("ok", True))
+        if self.unsure_branches:
+            res.update(ok=None, speculative=True, would_stop=True, stop_ok=ok, message=op.get("message"))
+            raise _BranchEnd
         res.update(ok=ok, message=op.get("message"))
         self.stop(path, "stop_op", op.get("message"), ok=ok)
 
@@ -821,11 +885,26 @@ class _Run:
             would = [{"path": r["path"], "op": r["op"], "reason": r.get("would_fail_now") or r.get("reason"),
                       "error": r.get("error")} for r in self.results
                      if r.get("ran", True) and r.get("ok") is None and (r.get("would_fail_now") or r.get("reason"))]
-            if would:  # a dry run that never stopped can still describe ops that would fail
+            if would:
+                # Not a verdict on the live run: a target that only appears after an earlier act is
+                # listed here just like a typo. A dry run cannot tell them apart; the reader can.
                 out["would_fail"] = would
                 out["would_fail_count"] = len(would)
-                out["warnings"] = [f"{len(would)} op(s) would fail once the planned acts run: "
-                                   + ", ".join(f"{w['path']} {w['reason']}" for w in would[:5])]
+                out["warnings"] = [
+                    f"{len(would)} op(s) fail on the screen as it is now ("
+                    + ", ".join(f"{w['path']} {w['reason']}" for w in would[:5])
+                    + "); a dry run cannot tell whether the planned acts before them would change that"]
+            wstops = [{"path": r["path"], "stop_ok": bool(r.get("stop_ok")), "message": r.get("message")}
+                      for r in self.results if r.get("would_stop")]
+            if wstops:
+                # A stop inside a branch one of the two futures takes would end the live run; the dry
+                # run itself only ends that branch, so it has to say so here.
+                out["would_stop"] = wstops
+                out["would_stop_count"] = len(wstops)
+                if any(w["stop_ok"] is False for w in wstops):
+                    out.setdefault("warnings", []).append(
+                        f"{len(wstops)} stop op(s) inside a planned branch; one would end the live run "
+                        "with ok:false")
         elif aborted:
             out["verification"] = "aborted"
         elif not out["ok"]:

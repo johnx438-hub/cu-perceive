@@ -440,7 +440,7 @@ each one: perceive, act, wait for a condition, branch, re-perceive, act again.
 | `perceive` | `hwnd` / `title` / `exe`, or `from` (re-perceive that stamp's window with the same detectors); `ocr` `uia` `yolo` `focus` `capture`; `as` names the stamp |
 | `act` | `stamp_ref` (a name) or `stamp`; without either, the plan's latest perceive. The flat `act` fields, or `steps=[...]` for a guarded chain; `focus` `ime` `method` `check_change` |
 | `wait` | `sec` (at most 30); a live run reports `waited_sec` and `interrupted` |
-| `wait_for` | `cond`, `timeout_ms` (default 5000, at most 60000), `interval_ms` (default 300) |
+| `wait_for` | `cond`, `timeout_ms` (default 5000, at most 60000), `interval_ms` (100..1000, default 300) |
 | `assert` | `cond`, `message` |
 | `if` | `cond`, `then`, `else` |
 | `repeat` | `times` (1-20), `steps`, optional `until` (checked before each round and after the last) |
@@ -476,7 +476,14 @@ nothing. After the first planned act, later checks describe a screen the live ru
 changed: they are marked `speculative`, and a failing one reports `ok: null` plus its
 `reason` / `would_fail_now` instead of stopping the dry run. Those rows are also collected in
 `would_fail` (`[{path, op, reason, error}]` with `would_fail_count` and a `warnings` line), so
-a typoed `ocr_text` or a stale `stamp_ref` cannot hide behind a green `ok: true`. A live plan
+a typoed `ocr_text` or a stale `stamp_ref` cannot hide behind a green `ok: true`. The list says
+what fails on the screen as it is now, not what the live run will do: a target that only
+appears after an earlier act is listed as well, and telling the two apart is the reader's job.
+For the same reason an `if` after the first planned act plans both branches (`branch: "both"`,
+with `branch_now` for what the screen says now), and a `stop` inside one only ends that branch
+(`would_stop`, `stop_ok`) instead of ending the dry run; those rows are collected in `would_stop`
+(`[{path, stop_ok, message}]` with `would_stop_count`), and a `stop_ok: false` among them also
+adds a `warnings` line, because live it would end the run with `ok: false`. A live plan
 only acts on window stamps (`no_window_stamp` otherwise).
 
 A plan is validated in full before anything runs (`reason: "bad_plan"`, `path` of the op).
@@ -484,8 +491,13 @@ One run executes at most 64 ops, nests `if` / `repeat` 4 deep, and stops at `tim
 (default 120000, at most 600000). The operator `abort` switch is checked before every op; an
 op the gate refuses is still recorded, as a row with `gated: true` and `ran: false`, so
 `stopped_at` always names an entry in `results` (`path` such as `3.then.0`). A live `wait`
-reports what it really slept (`waited_sec`, next to `requested_sec`) and why it stopped early
-(`interrupted`: `aborted` or `deadline`) instead of claiming the full `sec`. The result also
+reports what it really slept (`waited_sec`, next to `requested_sec` and
+`waited_short_by_sec` = `sec - waited_sec`) and why it stopped early (`interrupted`: `aborted`
+or `deadline`) instead of claiming the full `sec`; abort and the deadline are read inside a
+running `wait` / `wait_for` at least every 250 ms, however long `interval_ms` (100..1000) is,
+and a `wait_for` cut short that way reports `interrupted` and stops with `aborted` / `timeout`,
+while `wait_timeout` only means its own `timeout_ms` ran out. The op budget is checked between
+ops, so the 64th op runs in full. The result also
 carries `stopped`, `frames`, and the same `verification` / `evidence.steps_sent` as `act`,
 plus `no_input` for a live plan that sent nothing. Ops are not undone when a later one fails.
 Examples: `docs/examples/plan-wait-and-branch.json`, `plan-scroll-until.json`.

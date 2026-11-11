@@ -780,11 +780,18 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         re-perceive the window on every check (fresh); elsewhere pass "fresh":true or they read the old stamp.
         Dry run: perceives and evaluates conditions (read-only), plans every act, waits for nothing. After the
         first planned act, checks are speculative (the live run would have changed the screen): they are
-        marked and a failing one does not stop the dry run.
-        Limits: 64 ops per run, nesting 4, repeat 20, wait 30 s, wait_for 60 s, timeout_ms up to 600000.
-        The operator abort switch is checked before every op. Result: ok, results[] (one row per op with
-        path such as "3.then.0"), stopped / stopped_at / stop_reason, frames, verification
-        (observed | sent | no_input | partial | refused | aborted | null for a dry run), evidence.steps_sent.
+        marked and a failing one does not stop the dry run (see would_fail); an if then plans both branches
+        (branch "both", branch_now = what the screen says now) and a stop inside one only ends that branch
+        (would_stop).
+        Limits: 64 ops per run, nesting 4, repeat 20, wait 30 s, wait_for 60 s, interval_ms 100..1000,
+        timeout_ms up to 600000. The 64-op cap is checked between ops, so the op that reaches it runs to its
+        end; abort and the plan deadline are also read inside a running wait / wait_for (at least every
+        250 ms), which then report interrupted ("aborted" | "deadline") and stop with that reason, while a
+        wait_for that spends its own timeout_ms stops with wait_timeout. Result: ok, results[] (one row per
+        op with path such as "3.then.0"), stopped / stopped_at / stop_reason, frames, verification
+        (observed | sent | no_input | partial | refused | aborted | null for a dry run), evidence.steps_sent;
+        a dry run adds planned_acts, would_fail and would_stop (a stop inside a planned branch only ends
+        that branch, so it is listed here instead of stopping the run).
         validate_only=true checks the plan and runs nothing."""
         _ = (profile, show_config)  # applied by the MCP wrapper before this body, and stamped on the result
         from .plan import run_plan, validate_plan
@@ -794,7 +801,8 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
             return err or {"ok": True, "plan": True, "validated": True}
         out = run_plan(plan, go=bool(go) and not dry_run)
         if go and dry_run:
-            out["warnings"] = ["dry_run=true overrides go=true: this was a dry run, nothing was sent"]
+            out["warnings"] = ["dry_run=true overrides go=true: this was a dry run, nothing was sent"] + (
+                out.get("warnings") or [])
         return out
 
     @_tool

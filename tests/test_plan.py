@@ -97,6 +97,10 @@ class TestValidate(unittest.TestCase):
         self.bad([{"op": "click"}], "each op is an object")
         self.bad([{"op": "wait", "sec": 1, "ms": 5}], "unknown wait op field")
         self.bad([{"op": "wait", "sec": 99}], "sec in")
+        self.bad([{"op": "wait_for", "cond": {"window": {"title": "a"}}, "interval_ms": 60_000}],
+                 "interval_ms must be in")
+        self.bad([{"op": "wait_for", "cond": {"window": {"title": "a"}}, "interval_ms": 10}],
+                 "interval_ms must be in")
         self.bad([{"op": "perceive"}], "needs hwnd, title, exe or from")
         self.bad([{"op": "perceive", "hwnd": 1, "as": "latest"}], "as must be")
         self.bad([{"op": "act", "stamp_ref": "nope", "norm": "1,1"}], "'nope' is not defined")
@@ -182,6 +186,40 @@ class TestDryRun(unittest.TestCase):
                         {"op": "act", "norm": "1,1"}], deps=(deps := FakeDeps()))
         self.assertFalse(out["ok"])
         self.assertEqual((out["stopped_at"], out["stop_reason"], out["error"]), ("1", "assert_failed", "wrong page"))
+        self.assertEqual(deps.acts, [])
+
+    def test_if_after_a_planned_act_plans_both_branches(self):
+        """The dry run cannot know which branch the live run takes: a stop in the branch the
+        unchanged screen selects must not end it, and the other branch's acts must be planned."""
+        deps = FakeDeps(screens=[{"items": [item(1, "Old")]}])
+        plan = [PERCEIVE, {"op": "act", "norm": "1,1"},
+                {"op": "if", "cond": {"text": "Old", "fresh": True},
+                 "then": [{"op": "stop", "ok": False, "message": "still old"}, {"op": "act", "key": "f1"}],
+                 "else": [{"op": "act", "key": "f2"}]},
+                {"op": "act", "key": "f3"}]
+        out = run_plan(plan, deps=deps)
+        self.assertTrue(out["ok"], out)
+        self.assertFalse(out["stopped"])
+        self.assertEqual([r["path"] for r in out["results"]], ["0", "1", "2", "2.then.0", "2.else.0", "3"])
+        row = out["results"][2]
+        self.assertEqual((row["branch"], row["branch_now"], row["cond"]["speculative"]), ("both", "then", True))
+        stop = out["results"][3]
+        self.assertEqual((stop["ok"], stop["would_stop"], stop["stop_ok"], stop["message"]),
+                         (None, True, False, "still old"))
+        self.assertEqual([a[0] for a in deps.acts], [[{"norm": "1,1"}], [{"key": "f2"}], [{"key": "f3"}]])
+        self.assertNotIn("would_fail", out)
+        # live: one branch, and the stop is real
+        live = run_plan(plan, go=True, deps=(deps := FakeDeps(screens=[{"items": [item(1, "Old")]}])))
+        self.assertEqual((live["ok"], live["stop_reason"], live["stopped_at"], live["results"][2]["branch"]),
+                         (False, "stop_op", "2.then.0", "then"))
+        self.assertEqual(len(deps.acts), 1)
+
+    def test_if_before_any_act_follows_the_real_branch(self):
+        out = run_plan([PERCEIVE, {"op": "if", "cond": {"text": "Old"},
+                                   "then": [{"op": "stop", "message": "nothing to do"}],
+                                   "else": [{"op": "act", "norm": "1,1"}]}],
+                       deps=(deps := FakeDeps(screens=[{"items": [item(1, "Old")]}])))
+        self.assertEqual((out["ok"], out["stop_reason"], out["results"][1]["branch"]), (True, "stop_op", "then"))
         self.assertEqual(deps.acts, [])
 
     def test_repeat_plans_one_round(self):
@@ -371,7 +409,7 @@ class TestLive(unittest.TestCase):
         self.assertEqual(out["would_fail"], [{"path": "2", "op": "act", "reason": "target_not_found",
                                               "error": "ocr_text 'Quit' matches 0 items on stamp s0"}])
         self.assertEqual(out["would_fail_count"], 1)
-        self.assertIn("1 op(s) would fail", out["warnings"][0])
+        self.assertIn("1 op(s) fail on the screen as it is now (2 target_not_found)", out["warnings"][0])
 
     def test_dry_run_without_failures_has_no_would_fail_list(self):
         out = run_plan([PERCEIVE, {"op": "act", "norm": "1,1"},
@@ -411,6 +449,121 @@ class TestLive(unittest.TestCase):
         self.assertEqual((out["stop_reason"], row["ok"], row["interrupted"]), ("timeout", False, "deadline"))
         self.assertLess(row["waited_sec"], 5)
         self.assertLess(deps.now, 2.0)
+
+    def test_op_budget_does_not_cut_the_last_op_short(self):
+        """The cap allows MAX_OPS ops: when the last one is a wait or wait_for it still runs in full."""
+        pad = [{"op": "act", "norm": "1,1"}] * (plan_mod.MAX_OPS - 2)
+        out = run_plan([PERCEIVE, *pad, {"op": "wait", "sec": 1}], go=True, deps=FakeDeps())
+        self.assertTrue(out["ok"], out["results"][-1])
+        self.assertEqual((out["ops_run"], out["results"][-1]["waited_sec"]), (plan_mod.MAX_OPS, 1.0))
+        deps = FakeDeps(screens=[{"items": []}, {"items": []}, {"items": [item(1, "Done")]}])
+        out = run_plan([PERCEIVE, *pad, {"op": "wait_for", "cond": {"text": "Done"}}], go=True, deps=deps)
+        self.assertTrue(out["ok"], out["results"][-1])
+        self.assertEqual(out["results"][-1]["polls"], 2)
+        out = run_plan([PERCEIVE, *pad, {"op": "wait", "sec": 1}, {"op": "wait", "sec": 1, "note": "n"}],
+                       go=True, deps=FakeDeps())
+        self.assertEqual((out["stop_reason"], out["stopped_at"], out["results"][-1]["gated"]),
+                         ("max_ops", str(plan_mod.MAX_OPS), True))
+
+    def test_wait_for_cut_by_the_plan_deadline_or_abort(self):
+        out = run_plan({"timeout_ms": 1000, "steps": [
+            PERCEIVE, {"op": "wait_for", "cond": {"text": "x"}, "timeout_ms": 30000}, {"op": "act", "norm": "1,1"}]},
+            go=True, deps=(deps := FakeDeps()))
+        row = out["results"][1]
+        self.assertEqual((out["stop_reason"], out["stopped_at"], row["reason"], row["interrupted"]),
+                         ("timeout", "1", "timeout", "deadline"))
+        self.assertNotIn("30000", row["error"])
+        self.assertEqual(deps.acts, [])
+        deps = FakeDeps()
+        plain_sleep = deps.sleep
+
+        def sleep(s):
+            plain_sleep(s)
+            deps.abort = True
+
+        deps.sleep = sleep
+        out = run_plan([PERCEIVE, {"op": "wait_for", "cond": {"text": "x"}}], go=True, deps=deps)
+        self.assertEqual((out["stop_reason"], out["verification"], out["results"][1]["interrupted"]),
+                         ("aborted", "aborted", "aborted"))
+        # its own timeout_ms is still a wait_timeout
+        out = run_plan([PERCEIVE, {"op": "wait_for", "cond": {"text": "x"}, "timeout_ms": 900}], go=True, deps=FakeDeps())
+        self.assertEqual(out["stop_reason"], "wait_timeout")
+        self.assertNotIn("interrupted", out["results"][1])
+
+    def test_dry_run_flags_later_targets_without_calling_them_failures(self):
+        """A correct plan whose second target only appears after the first act is listed too:
+        the warning must say what is known (not on screen now), not predict the live run."""
+        deps = FakeDeps(screens=[{"items": [item(1, "Export")]}])
+        out = run_plan([PERCEIVE, {"op": "act", "ocr_text": "Export"},
+                        {"op": "wait_for", "cond": {"text": "Done"}}, {"op": "act", "ocr_text": "Open folder"}],
+                       deps=deps)
+        self.assertTrue(out["ok"])
+        self.assertEqual([w["path"] for w in out["would_fail"]], ["3"])
+        self.assertIn("cannot tell", out["warnings"][0])
+        self.assertNotIn("would fail once", out["warnings"][0])
+
+    def test_wait_for_stop_inside_a_long_interval(self):
+        """interval_ms sets the check cadence, not how long an operator stop goes unseen."""
+        deps = FakeDeps()
+        plain_sleep = deps.sleep
+
+        def sleep(s):
+            self.assertLessEqual(s, plan_mod.INTERRUPT_POLL_S)
+            plain_sleep(s)
+            deps.abort = True
+
+        deps.sleep = sleep
+        out = run_plan([PERCEIVE, {"op": "wait_for", "cond": {"text": "x"},
+                                   "timeout_ms": 60000, "interval_ms": 1000}], go=True, deps=deps)
+        row = out["results"][1]
+        self.assertEqual((out["stop_reason"], out["verification"], row["reason"], row["interrupted"]),
+                         ("aborted", "aborted", "aborted", "aborted"))
+        self.assertLessEqual(deps.now, plan_mod.INTERRUPT_POLL_S)
+
+    def test_wait_for_prefers_a_stop_over_its_own_timeout(self):
+        """Both true at once: the stop wins, or the agent is told to keep planning."""
+        deps = FakeDeps()
+        plain_perceive = deps.perceive
+        calls = {"n": 0}
+
+        def perceive(**kw):
+            calls["n"] += 1
+            if calls["n"] > 1:  # the first call is the plan's own perceive
+                deps.now += 0.5
+                deps.abort = True
+            return plain_perceive(**kw)
+
+        deps.perceive = perceive
+        out = run_plan([PERCEIVE, {"op": "wait_for", "cond": {"text": "x"}, "timeout_ms": 300}],
+                       go=True, deps=deps)
+        row = out["results"][1]
+        self.assertEqual((out["stop_reason"], row["reason"], row["interrupted"]), ("aborted", "aborted", "aborted"))
+        self.assertIn("do not retry", out["hint"])
+
+    def test_wait_is_clipped_by_the_deadline(self):
+        """The deadline, not the poll slice, decides how long a wait may sleep."""
+        out = run_plan({"timeout_ms": 1400, "steps": [PERCEIVE, {"op": "wait", "sec": 5}]},
+                       go=True, deps=(deps := FakeDeps()))
+        row = out["results"][1]
+        self.assertEqual((out["stop_reason"], row["interrupted"], row["waited_sec"]), ("timeout", "deadline", 1.4))
+        self.assertEqual(deps.now, 1.4)
+
+    def test_would_stop_is_summarised(self):
+        """A stop inside a planned branch cannot end the dry run, so the run has to report it."""
+        deps = FakeDeps(screens=[{"items": [item(1, "Old")]}])
+        plan = [PERCEIVE, {"op": "act", "norm": "1,1"},
+                {"op": "if", "cond": {"text": "Old", "fresh": True},
+                 "then": [{"op": "stop", "ok": False, "message": "still old"}],
+                 "else": [{"op": "act", "key": "f2"}]}]
+        out = run_plan(plan, deps=deps)
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["would_stop"], [{"path": "2.then.0", "stop_ok": False, "message": "still old"}])
+        self.assertEqual(out["would_stop_count"], 1)
+        self.assertIn("stop op(s) inside a planned branch", out["warnings"][0])
+        plan[2]["then"] = [{"op": "stop", "message": "done"}]
+        out = run_plan(plan, deps=FakeDeps(screens=[{"items": [item(1, "Old")]}]))
+        self.assertEqual(out["would_stop_count"], 1)
+        self.assertNotIn("warnings", out)  # a success stop is reported, not warned about
 
     def test_op_and_time_caps(self):
         body = [{"op": "act", "norm": "1,1"}] * 4
