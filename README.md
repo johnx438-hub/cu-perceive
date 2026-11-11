@@ -625,8 +625,17 @@ uses the browser's main profile:
   guarded too. A shell (`cmd`, `powershell`, `explorer`, ...) whose args name chrome
   or msedge is refused, and a user-data-dir switch inside any other program's args is
   checked the same way.
-- The packaged `chrome-shadow` app row adds `--no-first-run
-  --no-default-browser-check --disable-sync --new-window about:blank`.
+- Remote debugging stays on this machine. A `--remote-debugging-address` (any
+  `--` / `-` / `/` spelling) other than `127.0.0.1` / `localhost` fails with
+  `reason: "debug_address_refused"`, as do a bare switch, a non-numeric or
+  out-of-range `--remote-debugging-port`, two different ports, and debugging
+  switches after `--`. Whenever a port is set the argv is pinned with
+  `--remote-debugging-address=127.0.0.1`, and the reply carries `debug_port` /
+  `debug_address`. `--remote-debugging-pipe` is left alone (it is not a socket).
+- The packaged `chrome-shadow` and `edge-shadow` app rows add `--no-first-run
+  --no-default-browser-check --disable-sync --new-window about:blank`;
+  `edge-shadow` starts `msedge.exe` on `~/.cu-perceive-trial-edge-profile`
+  and refuses Edge's main `User Data` roots (stable, Beta, Dev, Canary) the same way.
 - `launch_app(dry_run=true)` and `python -m cu_perceive launch --resolve-only`
   return the final argv without starting anything.
 - A live launch returns `pid`, `window` (the new top-level window, matched by
@@ -635,11 +644,16 @@ uses the browser's main profile:
 
 Drive the shadow window with `perceive_window` / `act` by its `hwnd`. bsk is
 optional and only reads the page there, and only if its extension is loaded in
-that profile. Branded Chrome 137+ ignores `--load-extension`, so
-`scripts/shadow_bsk_install.py` loads an unpacked copy of the bsk extension over
-CDP (`Extensions.loadUnpacked`, 127.0.0.1 only). Launch with
+that profile. Branded Chrome 137+ ignores `--load-extension`. The persistent way
+is a one-time manual load in the shadow profile: open `chrome://extensions` in a
+`chrome-shadow` window, turn on Developer mode, click Load unpacked and pick the
+unpacked bsk folder. Chrome keeps it as an unpacked extension, so it is there on
+every later start with no flags. If Chrome shows a permission, security or
+confirmation dialog, stop and let a person answer it. Fallback (a throwaway
+profile, or when the manual load is not possible): `scripts/shadow_bsk_install.py`
+loads the folder over CDP (`Extensions.loadUnpacked`, 127.0.0.1 only). Launch with
 `--arg=--remote-debugging-port=<port> --arg=--enable-unsafe-extension-debugging`,
-run the script, and close the window when done. The load lasts for that browser
+run the script, and close the window when done; that load lasts for that browser
 run only. bsk reads tabs inside its own Agent Window (`browser_session
 action=start browser=<instance>`); a tab outside it needs `tab borrow`, which
 asks the user to confirm. To read the same window you drive, drive the Agent
