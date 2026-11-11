@@ -35,6 +35,11 @@ deadline are also read inside a running ``wait`` / ``wait_for`` at least every
 ``results`` (``gated``, ``ran: false``) so ``stopped_at`` always names a result.
 A live ``wait`` reports the time it really slept (``waited_sec``, next to
 ``requested_sec`` and ``waited_short_by_sec``).
+
+A ``perceive`` op may crop (``roi`` L,T,W,H in client pixels or ``roi_norm``
+CX,CY[,HALF] in 0-1000): on a browser the OCR items otherwise include the address
+bar, so a text condition can match a URL instead of the page, and an ``act`` then
+lands on a page that is still loading. A refresh keeps the stamp's crop.
 """
 from __future__ import annotations
 
@@ -66,7 +71,8 @@ ACT_CALL_FIELDS = frozenset({"focus", "ime", "method", "hold_key", "max_age_sec"
                              "new_window_wait_ms", "check_change", "change_min_ratio"})
 ACT_STEP_FIELDS = STEP_FIELDS | {"ocr_text"}
 OP_FIELDS: dict[str, frozenset] = {
-    "perceive": frozenset({"hwnd", "title", "exe", "from", "as", "capture", *PERCEIVE_FLAGS}),
+    "perceive": frozenset({"hwnd", "title", "exe", "from", "as", "capture", "roi", "roi_norm",
+                           *PERCEIVE_FLAGS}),
     "act": frozenset({"stamp", "stamp_ref", "steps"}) | ACT_CALL_FIELDS | ACT_STEP_FIELDS,
     "wait": frozenset({"sec"}),
     "wait_for": frozenset({"cond", "timeout_ms", "interval_ms"}),
@@ -147,6 +153,26 @@ def load_plan(src: Any) -> Any:
 
 def _is_num(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+_CROP_SHAPE = {"roi": "L,T,W,H in client pixels", "roi_norm": "CX,CY[,HALF] in 0-1000"}
+
+
+def _crop_parts(v, count: int | None) -> bool:
+    """Shape check for a crop spec: a comma string or a list of numbers (``count`` numbers)."""
+    if isinstance(v, str):
+        parts = [p for p in v.replace(" ", ",").split(",") if p]
+        try:
+            nums = [float(p) for p in parts]
+        except ValueError:
+            return False
+    elif isinstance(v, (list, tuple)):
+        nums = list(v)
+        if not all(_is_num(n) for n in nums):
+            return False
+    else:
+        return False
+    return len(nums) == count if count else len(nums) in (2, 3)
 
 
 def _check_fields(obj: dict, allowed, path: str, what: str) -> None:
@@ -270,6 +296,13 @@ def _validate_ops(ops, path: str, depth: int, names: set) -> None:
                 raise PlanError(p, "perceive needs hwnd, title, exe or from", "a plan always pins a window")
             if op.get("as") == LATEST or ("as" in op and not (isinstance(op["as"], str) and op["as"])):
                 raise PlanError(p, f"as must be a non-empty name other than {LATEST!r}")
+            if "roi" in op and "roi_norm" in op:
+                raise PlanError(p, "pass roi or roi_norm, not both",
+                                "roi is L,T,W,H in client pixels; roi_norm is CX,CY[,HALF] in 0-1000")
+            for k, count in (("roi", 4), ("roi_norm", None)):
+                if k in op and not _crop_parts(op[k], count):
+                    raise PlanError(p, f"{k} must be {_CROP_SHAPE[k]}",
+                                    "a region lets a plan read the page body and ignore the browser chrome")
             for k in PERCEIVE_FLAGS:
                 if k in op and not isinstance(op[k], bool):
                     raise PlanError(p, f"{k} must be true or false")
@@ -521,6 +554,8 @@ class _Run:
                  "height": out.get("height"), "count": len(out.get("items") or [])}
         if out.get("uia"):
             brief["uia_count"] = len(out.get("uia_nodes") or [])
+        if out.get("roi"):
+            brief["roi"] = out["roi"]  # the map and the OCR ids are local to this crop
         for k in ("error", "warnings"):
             if out.get(k):
                 brief[k] = out[k]
@@ -531,12 +566,14 @@ class _Run:
         return brief
 
     def refresh(self, name: str | None) -> dict:
-        """Re-perceive the window of a stamp with the detectors that stamp was taken with."""
+        """Re-perceive the window of a stamp with the detectors (and crop) that stamp was taken with."""
         entry = self.entry(name)
         old = self.data(entry)
         if not old.get("hwnd"):
             raise OpError("cannot_refresh", "that stamp has no window (screen or image stamp); it cannot be re-perceived")
         kw = {"hwnd": int(old["hwnd"]), **{k: True for k in ("ocr", "uia", "yolo") if old.get(k)}}
+        if old.get("roi"):
+            kw["roi"] = list(old["roi"])  # a check on a cropped stamp keeps reading that region
         res = self.perceive(kw, None)
         if not res.get("stamp"):
             raise OpError(res.get("reason") or "perceive_failed", res.get("error") or "re-perceive failed")
@@ -689,13 +726,16 @@ class _Run:
         return True
 
     def op_perceive(self, op, path, res):
-        kw = {k: op[k] for k in ("hwnd", "title", "exe", "capture", *PERCEIVE_FLAGS) if k in op}
+        kw = {k: op[k] for k in ("hwnd", "title", "exe", "capture", "roi", "roi_norm", *PERCEIVE_FLAGS)
+              if k in op}
         name = op.get("as")
         if "from" in op:
             old = self.data(self.entry(op["from"]))
             if not old.get("hwnd"):
                 raise OpError("cannot_refresh", "that stamp has no window; it cannot be re-perceived")
             kw = {"hwnd": int(old["hwnd"]), **{k: True for k in ("ocr", "uia", "yolo") if old.get(k)}, **kw}
+            if old.get("roi") and "roi" not in kw and "roi_norm" not in kw:
+                kw["roi"] = list(old["roi"])  # keep reading the same region unless the op overrides it
             name = name or (op["from"] if op["from"] != LATEST else None)
         if not self.send and kw.pop("focus", None):
             # focus=true raises a real window (SetForegroundWindow + restore). A dry run only reads, so
@@ -706,7 +746,15 @@ class _Run:
     def op_act(self, op, path, res):
         entry = {"json": op["stamp"], "data": None} if op.get("stamp") else self.entry(op.get("stamp_ref"))
         steps, call = _split_act(op)
-        if self.send and not self.data(entry).get("hwnd"):
+        frame = self.data(entry)
+        if frame.get("verify_light"):
+            # A roi/roi_norm stamp is verify-only: its map is local to the crop, so a planned point
+            # would mean something else. Refuse in a dry run too, or the preview promises an act the
+            # live run refuses.
+            raise OpError("verify_only_stamp",
+                          "this stamp was taken with roi/roi_norm; a cropped stamp cannot be acted on",
+                          hint="perceive the window without roi for act, and keep the cropped stamp for conditions")
+        if self.send and not frame.get("hwnd"):
             # act allows an explicit screen stamp; an unattended script does not get to click the bare desktop
             raise OpError("no_window_stamp", "a live plan acts only on window stamps (this one has no hwnd)",
                           hint="perceive the target window in the plan and act on that stamp")

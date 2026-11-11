@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "goal": "type in the open browser, read only the page body, and refuse to act while a challenge is up",
+  "timeout_ms": 90000,
+  "steps": [
+    {"op": "perceive", "exe": "msedge.exe", "ocr": true, "as": "win",
+     "note": "full-window stamp: acts run on this one (launching first races with window placement)"},
+    {"op": "act", "stamp_ref": "win", "focus": true,
+     "steps": [{"key": "ctrl+l"}, {"text": "https://www.npmjs.com/package/@anthropic-ai/claude-code"}]},
+    {"op": "act", "stamp_ref": "win", "key": "enter"},
+    {"op": "perceive", "from": "win", "ocr": true, "roi_norm": "500,560,440", "as": "body",
+     "note": "cropped stamp: verify-only, and the address bar is not in it"},
+    {"op": "wait_for", "timeout_ms": 25000, "interval_ms": 1000,
+     "cond": {"all": [
+       {"text": "2.1.322", "stamp_ref": "body", "source": "ocr"},
+       {"not": {"text": "security verification", "stamp_ref": "body", "source": "ocr"}}
+     ]},
+     "note": "a value only the loaded page has, and not while Cloudflare asks for verification"},
+    {"op": "if", "cond": {"text": "2.1.322", "stamp_ref": "body", "source": "ocr", "fresh": true},
+     "then": [
+       {"op": "assert", "cond": {"text": "claude-code", "stamp_ref": "body", "source": "ocr"},
+        "message": "the page body is not the npm page"},
+       {"op": "stop", "ok": true, "message": "page loaded and shows the version"}
+     ],
+     "else": [
+       {"op": "stop", "ok": false,
+        "message": "page did not settle (verification or a slow load): nothing was typed into it"}
+     ]}
+  ]
+}

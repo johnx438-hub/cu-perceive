@@ -49,9 +49,13 @@ class FakeDeps(Deps):
         n = len(self.perceives)
         self.perceives.append(kw)
         screen = self.screens[min(n, len(self.screens) - 1)]
-        return {"stamp": f"s{n}", "json": f"s{n}.json", "map": f"s{n}.grid.png", "hwnd": kw.get("hwnd") or 100,
-                "width": 800, "height": 600, "ok": True, "ocr": bool(kw.get("ocr")), "uia": bool(kw.get("uia")),
-                "items": screen.get("items", []), "uia_nodes": screen.get("uia_nodes", [])}
+        out = {"stamp": f"s{n}", "json": f"s{n}.json", "map": f"s{n}.grid.png", "hwnd": kw.get("hwnd") or 100,
+               "width": 800, "height": 600, "ok": True, "ocr": bool(kw.get("ocr")), "uia": bool(kw.get("uia")),
+               "items": screen.get("items", []), "uia_nodes": screen.get("uia_nodes", [])}
+        if kw.get("roi") or kw.get("roi_norm"):
+            out["roi"] = [0, 80, 800, 480]  # what core stores after clamping a crop
+            out["verify_light"] = True       # ... and a cropped stamp is verify-only
+        return out
 
     def read_frame(self, stamp):
         return {"stamp": stamp, "hwnd": 100, "ocr": True, "items": [item(1, "Old")], "uia_nodes": []}
@@ -103,6 +107,9 @@ class TestValidate(unittest.TestCase):
                  "interval_ms must be in")
         self.bad([{"op": "perceive"}], "needs hwnd, title, exe or from")
         self.bad([{"op": "perceive", "hwnd": 1, "as": "latest"}], "as must be")
+        self.bad([{"op": "perceive", "hwnd": 1, "roi": "1,2,3"}], "roi must be")
+        self.bad([{"op": "perceive", "hwnd": 1, "roi_norm": "500"}], "roi_norm must be")
+        self.bad([{"op": "perceive", "hwnd": 1, "roi": "1,2,3,4", "roi_norm": "500,500"}], "not both")
         self.bad([{"op": "act", "stamp_ref": "nope", "norm": "1,1"}], "'nope' is not defined")
         self.bad([PERCEIVE, {"op": "act", "stamp": "x", "stamp_ref": "main", "norm": "1,1"}], "not both")
         self.bad([PERCEIVE, {"op": "act", "key": "enter", "steps": [{"norm": "1,1"}]}], "cannot be combined")
@@ -277,6 +284,37 @@ class TestDryRun(unittest.TestCase):
         self.assertEqual((rep["op"], rep["ok"], rep["would_stop"], rep["iterations"]), ("repeat", None, True, 0))
         self.assertEqual([w["path"] for w in out["would_stop"]], ["2.then.0", "2.then.0.0.0"])
         self.assertTrue(any("stop op(s) inside a planned branch" in w for w in out["warnings"]))
+
+    def test_perceive_reads_a_region_so_chrome_is_not_page_text(self):
+        """A browser's address bar is OCR text too: a crop keeps it out of the condition's way."""
+        deps = FakeDeps(screens=[{"items": [item(1, "2.1.322")]}])
+        out = run_plan([{"op": "perceive", "hwnd": 100, "ocr": True, "roi_norm": "500,560,440", "as": "page"},
+                        {"op": "assert", "cond": {"text": "2.1.322", "stamp_ref": "page", "source": "ocr",
+                                                  "fresh": True}}], deps=deps)
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(deps.perceives[0]["roi_norm"], "500,560,440")
+        self.assertEqual(out["results"][0]["roi"], [0, 80, 800, 480])
+        self.assertEqual(deps.perceives[1]["roi"], [0, 80, 800, 480])  # the fresh check keeps the crop
+        self.assertNotIn("roi_norm", deps.perceives[1])
+
+    def test_from_keeps_the_region_unless_the_op_overrides_it(self):
+        deps = FakeDeps(screens=[{"items": [item(1, "Old")]}])
+        out = run_plan([{"op": "perceive", "hwnd": 100, "ocr": True, "roi": [10, 20, 300, 200], "as": "a"},
+                        {"op": "perceive", "from": "a"},
+                        {"op": "perceive", "from": "a", "roi": [0, 0, 100, 100], "as": "b"}], deps=deps)
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(deps.perceives[1]["roi"], [0, 80, 800, 480])  # the stamp's clamped crop, reused
+        self.assertEqual(deps.perceives[2]["roi"], [0, 0, 100, 100])
+
+    def test_a_cropped_stamp_is_verify_only_for_acts_too(self):
+        """A dry run must not plan an act the live run refuses: both reject a cropped stamp."""
+        plan = [{"op": "perceive", "hwnd": 100, "ocr": True, "roi": "1,2,3,4", "as": "crop"},
+                {"op": "act", "stamp_ref": "crop", "norm": "1,1"}]
+        for go in (False, True):
+            out = run_plan(plan, go=go, deps=(deps := FakeDeps()))
+            self.assertEqual(out["stop_reason"], "verify_only_stamp", out)
+            self.assertIn("without roi", out["results"][1]["hint"])
+            self.assertEqual(deps.acts, [])
 
     def test_repeat_plans_one_round(self):
         deps = FakeDeps()

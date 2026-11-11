@@ -437,7 +437,7 @@ each one: perceive, act, wait for a condition, branch, re-perceive, act again.
 
 | Op | Fields |
 |---|---|
-| `perceive` | `hwnd` / `title` / `exe`, or `from` (re-perceive that stamp's window with the same detectors); `ocr` `uia` `yolo` `focus` `capture`; `as` names the stamp |
+| `perceive` | `hwnd` / `title` / `exe`, or `from` (re-perceive that stamp's window with the same detectors and crop); `ocr` `uia` `yolo` `focus` `capture`; `roi` / `roi_norm` (read one region); `as` names the stamp |
 | `act` | `stamp_ref` (a name) or `stamp`; without either, the plan's latest perceive. The flat `act` fields, or `steps=[...]` for a guarded chain; `focus` `ime` `method` `check_change` |
 | `wait` | `sec` (at most 30); a live run reports `waited_sec` and `interrupted` |
 | `wait_for` | `cond`, `timeout_ms` (default 5000, at most 60000), `interval_ms` (100..1000, default 300) |
@@ -469,6 +469,20 @@ Conditions are data, not code. Each has exactly one kind:
 at the new frame, so an act after the wait runs on what the wait saw. Elsewhere they read the
 stamp as it is unless `"fresh": true`. A condition that cannot be evaluated (no text source,
 no such stamp) fails the op; it is never treated as false.
+
+**Text conditions on a browser read the whole window, address bar included.** A condition on
+`"claude-code"` matches the URL in the address bar before the page has loaded, so a `wait_for`
+returns at once and the next `act` types into a page that is still loading — a Cloudflare
+"Just a moment…" / "Performing security verification" page is the common case. Two rules that
+came out of a real run (`docs/examples/plan-browser-read-body.json`):
+
+- read the page body only: `"roi_norm": "500,560,440"` on the `perceive` op (a crop
+  keeps the address bar, tabs and bookmarks out of the OCR items; `roi` is `L,T,W,H` in client
+  pixels, `roi_norm` is `CX,CY[,HALF]` in 0-1000, and a refresh keeps the same crop);
+- wait for a value only the loaded page has, and refuse the challenge state:
+  `{"all": [{"text": "2.1.322"}, {"not": {"text": "security verification"}}]}`. Never put an
+  `act` in the branch that runs when the page has not settled: a challenge page will take the
+  keystrokes you send at it.
 
 The live gate is `--go` / `go=true` on the call. A plan that contains `go` is refused. A dry
 run perceives and evaluates conditions, which only read, plans every act and waits for
