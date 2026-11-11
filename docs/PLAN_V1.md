@@ -4,6 +4,14 @@
 > 目标：从「一步一截一点」升到「感知出点位 → 规划出链 → 执行吃一条路径」  
 > 第一刀：**只加 plan 文件合同 + `act --plan` 批跑/dry-run**；不重写感知，不加挂机，不加默认 multimodal。
 
+> **状态（2026-11-11）**：已实现为 `cu_perceive/plan.py`，入口是 CLI `cu-perceive plan` 和 MCP `plan`
+> （不是下文设想的 `act --plan`）。和这份草案不同的地方：`act` 步直接用 MCP `act` 的扁平字段 / `steps`，
+> 不用 `actions[]`；`assert` 改成通用条件（`window` / `foreground` / `text` / `uia` / `last` + `all` / `any` / `not`）；
+> 新增 `wait_for`、`if`、`repeat`、`launch`、`stop` 和每步的 `on_fail`；`reperceive` 并入 `perceive` 的 `from`；
+> plan 文件里不能写 `go`；没有 `defaults`。以 README 的 “Plans” 一节为准，下文留作设计记录。
+> `docs/examples/plan-browser.json` / `plan-notepad.json` 还是本草案的写法，新写法见
+> `plan-wait-and-branch.json` / `plan-scroll-until.json`。
+
 ## 与现状的关系
 
 | 层 | 今天已有 | v1 新增 |

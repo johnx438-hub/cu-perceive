@@ -7,6 +7,9 @@ import time
 from io import BytesIO
 from pathlib import Path
 
+from .chain import (_chain_step_cap, _chain_step_s, _chain_step_wait, _nz_int, _nz_scroll,  # noqa: F401
+                    _nz_str, _wait_s, act_chain)
+
 INLINE_MAX_SIDE = 1280
 
 _PASS_THROUGH = ("ok", "error", "minimized", "identity", "capture", "focused", "warnings",
@@ -174,59 +177,10 @@ def build_server(name: str, host: str, port: int, security):
     return app, app.streamable_http_app
 
 
-def _nz_int(v: int):
-    return v if v else None
-
-
-def _nz_scroll(v):
-    """MCP scroll: int or string; 0 / "" = no scroll."""
-    if isinstance(v, bool) or v in (None, "", 0):
-        return None
-    return str(v).strip() or None
-
-
-def _nz_str(v: str):
-    return v if v else None
-
-
 def _center_norm(box):
     if isinstance(box, (list, tuple)) and len(box) == 4:
         return [int((box[0] + box[2]) // 2), int((box[1] + box[3]) // 2)]
     return None
-
-
-def _wait_s(ms):
-    """new_window_wait_ms -> seconds (None = default)."""
-    if ms is None or ms == "":
-        return None
-    try:
-        return max(0.0, float(ms)) / 1000.0
-    except (TypeError, ValueError):
-        return None
-
-
-def _chain_step_s() -> float:
-    from .settings import get as _cfg
-
-    return float(_cfg("popup.chain_step_s"))
-
-
-def _chain_step_wait(ms, step: dict, i: int, n: int):
-    """Chains wait long only on the last / expect_change step; field clicks keep 250 ms.
-
-    Returns the explicit wait (seconds) when the caller passed new_window_wait_ms, else None.
-    """
-    full = _wait_s(ms)
-    if full is None or i == n - 1 or step.get("expect_change"):
-        return full
-    return min(_chain_step_s(), full)
-
-
-def _chain_step_cap(ms, step: dict, i: int, n: int):
-    """Without an explicit wait, non-final steps cap the default wait at 250 ms (reason chain_step)."""
-    if _wait_s(ms) is not None or i == n - 1 or step.get("expect_change"):
-        return None
-    return _chain_step_s()
 
 
 def _compact_rows(payload: dict) -> None:
@@ -693,7 +647,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         ignored_min_ratio = (["change_min_ratio only applies with check_change=true; ignored"]
                              if change_min_ratio is not None else [])
         if steps is not None and steps != []:
-            out = _act_chain(steps, locals())
+            out = act_chain(steps, locals())
             if ignored_min_ratio and isinstance(out, dict):
                 out["warnings"] = ignored_min_ratio + (out.get("warnings") or [])
             return annotate_verification(out)
@@ -772,20 +726,6 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
             return {"ok": True, **abort_state()}
         return {"ok": True, **request_abort(reason or "operator")}
 
-    def _flat_specs(f: dict):
-        from .settings import get as _cfg
-
-        return parse_steps(
-            ids=coerce_ids(f.get("ids", "")), xy=_nz_str(f.get("xy", "")), norm=_nz_str(f.get("norm", "")),
-            text=_nz_str(f.get("text", "")), key=_nz_str(f.get("key", "")), drag=_nz_str(f.get("drag", "")),
-            drag_norm=_nz_str(f.get("drag_norm", "")), scroll=_nz_scroll(f.get("scroll", "")),
-            button=f.get("button") or "left", hover=bool(f.get("hover", False)),
-            step_px=int(_cfg("drag.step_px") if f.get("step_px") in (None, "") else (f.get("step_px") or _cfg("drag.step_px"))),
-            hold=float(_cfg("timing.click_hold_s") if f.get("hold") in (None, "") else (f.get("hold") or 0)),
-            uia_name=_nz_str(f.get("uia_name", "")) or None, replace=bool(f.get("replace", False)),
-            input_via=_nz_str(f.get("via", "")),
-        )
-
     def _act_with_change(kw: dict):
         from .change import run_with_change_check
 
@@ -810,68 +750,51 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         return run_with_change_check(target, lambda: act(**kw), min_ratio=None if mr in (None, "") else float(mr),
                                      before_baseline=pre)
 
-    def _act_chain(steps, call: dict):
-        from .chain import ACTION_FIELDS, run_steps, validate_steps
+    @_tool
+    def plan(plan: dict | list | str, go: bool = False, dry_run: bool | None = None, validate_only: bool = False,
+             profile: str = "", show_config: bool = False):
+        """Run a multi-frame script in one call: perceive, act, wait for a condition, branch, repeat.
+        Default is a dry run (go=true sends; dry_run=true wins). A plan cannot carry go.
 
-        send = bool(call.get("go")) and not call.get("dry_run")
-        mixed = [k for k in ACTION_FIELDS if call.get(k) not in (None, "", [], 0)]
-        if mixed:
-            return {"ok": False, "reason": "bad_args", "dry_run": not send,
-                    "error": f"steps cannot be combined with top-level action field(s) {', '.join(mixed)}",
-                    "hint": "put every action inside steps=[...], or drop steps for a flat single-step act"}
-        norm_steps, err = validate_steps(steps)
-        if err:
-            err["dry_run"] = not send  # a live call with bad steps is refused, not a dry run
-            return err
-        try:
-            frame, path = load_frame(stamp=_nz_str(call.get("stamp", "")), hwnd=_nz_int(call.get("hwnd", 0)))
-        except StampWindowMismatch as e:
-            return {"ok": False, "error": str(e), "dry_run": not send, "reason": "hwnd_mismatch",
-                    "hint": "perceive_window(hwnd=...) and pass that stamp, or drop hwnd"}
-        except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError) as e:
-            return {"ok": False, "error": str(e), "dry_run": not send}
-        stamp_source = ("explicit" if _nz_str(call.get("stamp", "")) else "latest") if path else None
+        plan = {"goal": "...", "stamps": {"main": "<stamp>"}, "timeout_ms": 120000, "steps": [op, ...]}
+        (or a bare list of ops, a JSON string, or the path of a JSON file on this machine). Ops:
+          {"op":"perceive", "hwnd"|"title"|"exe"|"from":"<name>", "ocr","uia","yolo","focus", "as":"main"}
+          {"op":"act", "stamp_ref":"main"|"stamp":"...", <flat act fields> | "steps":[{...}], "focus","ime",
+           "method","check_change"}   same fields and guards as act; no stamp = the plan's latest perceive.
+           A step may target OCR text: "ocr_text":"Save" (one match on that stamp, else ambiguous_target).
+          {"op":"wait", "sec":0.5}
+          {"op":"wait_for", "cond":{...}, "timeout_ms":5000, "interval_ms":300}
+          {"op":"assert", "cond":{...}, "message":"..."}
+          {"op":"if", "cond":{...}, "then":[ops], "else":[ops]}
+          {"op":"repeat", "times":5, "until":{...}, "steps":[ops]}   until is checked before each round
+          {"op":"launch", "app"|"exe"}      {"op":"stop", "ok":true, "message":"..."}
+        Any op may carry "on_fail":"continue" (default "stop") and "note".
+        Conditions (read-only, exactly one kind each):
+          {"window":{"title","exe","minimized"}}  a matching top-level window exists
+          {"foreground":{"title"|"hwnd"|"stamp_ref"}}
+          {"text":"Done", "stamp_ref":"main", "source":"any|ocr|uia", "match":"contains|exact", "fresh":true}
+          {"uia":{"name","control_type","value"}, "stamp_ref", "match", "fresh"}
+          {"last":{"ok":false}}  fields of the previous op's result (dotted keys ok: "evidence.steps_sent")
+          {"all":[...]}  {"any":[...]}  {"not":{...}}
+        text / uia read a stamp, so that stamp needs "ocr": true or "uia": true on its perceive. Inside wait_for and repeat.until they
+        re-perceive the window on every check (fresh); elsewhere pass "fresh":true or they read the old stamp.
+        Dry run: perceives and evaluates conditions (read-only), plans every act, waits for nothing. After the
+        first planned act, checks are speculative (the live run would have changed the screen): they are
+        marked and a failing one does not stop the dry run.
+        Limits: 64 ops per run, nesting 4, repeat 20, wait 30 s, wait_for 60 s, timeout_ms up to 600000.
+        The operator abort switch is checked before every op. Result: ok, results[] (one row per op with
+        path such as "3.then.0"), stopped / stopped_at / stop_reason, frames, verification
+        (observed | sent | no_input | partial | refused | aborted | null for a dry run), evidence.steps_sent.
+        validate_only=true checks the plan and runs nothing."""
+        _ = (profile, show_config)  # applied by the MCP wrapper before this body, and stamped on the result
+        from .plan import run_plan, validate_plan
 
-        def run_one(step: dict, send_flag: bool, i: int) -> dict:
-            try:
-                specs = _flat_specs(step)
-            except ValueError as e:
-                return {"ok": False, "error": str(e), "dry_run": not send_flag, "reason": "bad_args",
-                        "hint": 'points are norm="x,y" / xy="x,y" (or [x,y]); scroll="down:3" / "up:3"'}
-            return run_chain(
-                frame, specs, dry_run=not send_flag,
-                hold_key=_nz_str(step.get("hold_key", "")) or _nz_str(call.get("hold_key", "")),
-                method=_nz_str(step.get("method", "")) or _nz_str(call.get("method", "")) or "input",
-                max_age_sec=call.get("max_age_sec"), strict_stamp=bool(call.get("strict_stamp")),
-                stamp_json_path=str(path) if path else None,
-                focus=bool(call.get("focus")) and i == 0,
-                stamp_source=stamp_source, ime=_nz_str(call.get("ime", "")),
-                new_window_wait_s=_chain_step_wait(call.get("new_window_wait_ms"), step, i, len(norm_steps)),
-                new_window_wait_cap_s=_chain_step_cap(call.get("new_window_wait_ms"), step, i, len(norm_steps)),
-            )
-
-        stamp_hwnd = int((frame or {}).get("hwnd") or 0)
-
-        def title_now():
-            if not stamp_hwnd:
-                return None
-            from ._win32 import window_title
-
-            return window_title(stamp_hwnd)
-
-        if send:
-            # One abort epoch for the whole chain: a stop on at chain start stays on for every step.
-            from .act import abort_epoch
-
-            with abort_epoch():
-                out = run_steps(norm_steps, run_one, send=send, stamp_hwnd=stamp_hwnd, title_now=title_now)
-        else:
-            out = run_steps(norm_steps, run_one, send=send, stamp_hwnd=stamp_hwnd, title_now=title_now)
-        out["stamp"] = (frame or {}).get("stamp")
-        out["hwnd"] = stamp_hwnd or None
-        out["json"] = str(path) if path else None
-        if call.get("go") and call.get("dry_run"):
-            out["warnings"] = ["dry_run=true overrides go=true: this was a dry run, nothing was sent"] + (out.get("warnings") or [])
+        if validate_only:
+            _, err = validate_plan(plan)
+            return err or {"ok": True, "plan": True, "validated": True}
+        out = run_plan(plan, go=bool(go) and not dry_run)
+        if go and dry_run:
+            out["warnings"] = ["dry_run=true overrides go=true: this was a dry run, nothing was sent"]
         return out
 
     @_tool

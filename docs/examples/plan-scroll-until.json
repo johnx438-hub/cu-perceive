@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "goal": "scroll a list until a row shows up, then click it",
+  "steps": [
+    {"op": "perceive", "exe": "myapp", "ocr": true, "as": "list"},
+    {"op": "repeat", "times": 8, "until": {"text": "Invoice 2026-11", "stamp_ref": "list"},
+     "steps": [
+       {"op": "act", "stamp_ref": "list", "norm": "500,600", "scroll": "down:5", "focus": true},
+       {"op": "wait", "sec": 0.4}
+     ]},
+    {"op": "act", "stamp_ref": "list", "ocr_text": "Invoice 2026-11"}
+  ]
+}
