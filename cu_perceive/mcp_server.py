@@ -757,11 +757,16 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         Default is a dry run (go=true sends; dry_run=true wins). A plan cannot carry go.
 
         plan = {"goal": "...", "stamps": {"main": "<stamp>"}, "timeout_ms": 120000, "steps": [op, ...]}
-        (or a bare list of ops, a JSON string, or the path of a JSON file on this machine). Ops:
+        (or a bare list of ops, a JSON string, or the path of a JSON file on this machine); optional
+        "resumable": true and "resume_from": "<op path>" (see Continuation). Ops:
           {"op":"perceive", "hwnd"|"title"|"exe"|"from":"<name>", "ocr","uia","yolo","focus", "as":"main"}
           {"op":"act", "stamp_ref":"main"|"stamp":"...", <flat act fields> | "steps":[{...}], "focus","ime",
            "method","check_change"}   same fields and guards as act; no stamp = the plan's latest perceive.
-           A step may target OCR text: "ocr_text":"Save" (one match on that stamp, else ambiguous_target).
+           A step may target OCR text: "ocr_text":"Save" (exact beats substring, case-insensitive; one match
+           or it fails closed: target_not_found with similar[] closest texts, ambiguous_target with
+           candidates[]; both carry stamp, match_count, ocr_items). "confirm_frames":2 (1..3, default 1 = off)
+           re-perceives the window and acts only if each ocr_text match keeps its text and stays within 20
+           (0-1000) on the next frame; the act then runs on that newer stamp (else unstable_target, frames[]).
           {"op":"wait", "sec":0.5}
           {"op":"wait_for", "cond":{...}, "timeout_ms":5000, "interval_ms":300}
           {"op":"assert", "cond":{...}, "message":"..."}
@@ -769,13 +774,19 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
           {"op":"repeat", "times":5, "until":{...}, "steps":[ops]}   until is checked before each round
           {"op":"launch", "app"|"exe", "args":[...], "user_data_dir"}  {"op":"stop", "ok":true, "message":"..."}
         Any op may carry "on_fail":"continue" (default "stop") and "note". Conditions (read-only, exactly one kind each):
-          {"window":{"title","exe","minimized"}}  a matching top-level window exists
+          {"window":{"title","exe","class","minimized","match"}}  a matching top-level window exists. match:
+            "contains" (default, substring, as before) | "exact" (whole title / class) | "regex" (re.search,
+            case-insensitive) applies to title and class; exe stays a substring. match may also sit beside
+            the body: {"window":{...},"match":"exact"}. Only exact/regex can say "left this page":
+            {"not":{"window":{"title":"Hacker News","match":"exact"}}} (contains also matches "... | Hacker News").
           {"foreground":{"title"|"hwnd"|"stamp_ref"}}
-          {"text":"Done", "stamp_ref":"main", "source":"any|ocr|uia", "match":"contains|exact", "fresh":true}
+          {"text":"Done", "stamp_ref":"main", "source":"any|ocr|uia", "match":"contains|exact", "fresh":true,
+           "confirm_frames":2}  confirm_frames (1..3, default 1): met only if the next frame(s) match too
           {"uia":{"name","control_type","value"}, "stamp_ref", "match", "fresh"}
           {"challenge":true, "stamp_ref", "fresh"}  a human-verification / interstitial page is on screen
           {"last":{"ok":false}}  fields of the previous op's result (dotted keys ok: "evidence.steps_sent")
-          {"all":[...]}  {"any":[...]}  {"not":{...}}
+          {"all":[...]}  {"any":[...]}  {"not":{...}}  a not row reads {"met": M, "not": {"inner_met": !M,
+            "met": M, ...inner evidence}}: not.met is the negated result (it used to be the inner one)
         Ops: perceive (hwnd/title/exe/from, ocr uia yolo focus capture, roi or roi_norm), act (flat fields or
         steps), wait, wait_for, wait_until_stable (pixels hold still for stable_ms), assert, if, repeat, launch, stop.
         plan.stop_on_challenge (default true) stops a perceive or an act that sees a human-verification page
@@ -789,9 +800,11 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         screen): they are marked and a failing one does not stop the dry run (see would_fail); an if then
         plans both branches (branch "both", branch_now = what the screen says now) and a stop inside one
         ends that branch only (branch_stopped, would_stop; listed in the run's would_stop).
-        Limits: 64 ops per run, nesting 4, repeat 20, wait 30 s, wait_for 60 s, interval_ms 100..1000,
-        timeout_ms up to 600000. The 64-op cap is checked between ops, so the op that reaches it runs to its
-        end; abort and the plan deadline are also read inside a running wait / wait_for (at least every
+        Limits: 64 ops per call, nesting 4, repeat 20, wait 30 s, wait_for 60 s, interval_ms 100..1000,
+        timeout_ms up to 600000. Validation counts ops statically (static_ops least / most, if every op
+        succeeds; an if or repeat is one op plus what runs inside): least > 64 is refused as bad_plan
+        (over_cap) before anything runs unless "resumable": true; most > 64 validates with a warning. The
+        64-op cap is also checked between ops at run time, so the op that reaches it runs to its end; abort and the plan deadline are also read inside a running wait / wait_for (at least every
         250 ms), which then report interrupted ("aborted" | "deadline") and stop with that reason, while a
         wait_for that spends its own timeout_ms stops with wait_timeout. Result: ok, results[] (one row per
         op with path such as "3.then.0"), stopped / stopped_at / stop_reason, frames, verification
@@ -799,13 +812,18 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         a dry run adds planned_acts (planned_acts_at_most when a branch is unsure), would_fail and would_stop
         (a stop inside a planned branch only ends that branch, so it is listed here instead of stopping the
         run).
-        validate_only=true checks the plan and runs nothing."""
+        Continuation: a run that stops at the cap (max_ops) or its deadline (timeout) returns continuation =
+        {"resume_from": "<path of the op that did not run>", "stamps": {every named frame and "latest"},
+        "resumable": true}. Merge it into the same plan and call again: it runs from that op (inside an if
+        it keeps the branch, inside a repeat it finishes that round and goes on), with frames.latest and the
+        named stamps carried; the rows of containers on the way carry resumed: true, the result has
+        resumed_from, and a last condition starts empty. An aborted run has no continuation.
+        validate_only=true checks the plan and runs nothing; it returns static_ops {least, most, cap}."""
         _ = (profile, show_config)  # applied by the MCP wrapper before this body, and stamped on the result
-        from .plan import run_plan, validate_plan
+        from .plan import run_plan, validate_report
 
         if validate_only:
-            _, err = validate_plan(plan)
-            return err or {"ok": True, "plan": True, "validated": True}
+            return validate_report(plan)
         out = run_plan(plan, go=bool(go) and not dry_run)
         if go and dry_run:
             out["warnings"] = ["dry_run=true overrides go=true: this was a dry run, nothing was sent"] + (

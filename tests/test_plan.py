@@ -647,10 +647,14 @@ class TestLive(unittest.TestCase):
         out = run_plan([PERCEIVE, *pad, {"op": "wait_for", "cond": {"text": "Done"}}], go=True, deps=deps)
         self.assertTrue(out["ok"], out["results"][-1])
         self.assertEqual(out["results"][-1]["polls"], 2)
-        out = run_plan([PERCEIVE, *pad, {"op": "wait", "sec": 1}, {"op": "wait", "sec": 1, "note": "n"}],
-                       go=True, deps=FakeDeps())
+        over = [PERCEIVE, *pad, {"op": "wait", "sec": 1}, {"op": "wait", "sec": 1, "note": "n"}]
+        out = run_plan(over, go=True, deps=FakeDeps())  # 65 ops on every path: refused before it runs
+        self.assertEqual((out["reason"], out["over_cap"], out["static_ops"]["least"]),
+                         ("bad_plan", True, plan_mod.MAX_OPS + 1))
+        out = run_plan({"resumable": True, "steps": over}, go=True, deps=FakeDeps())
         self.assertEqual((out["stop_reason"], out["stopped_at"], out["results"][-1]["gated"]),
                          ("max_ops", str(plan_mod.MAX_OPS), True))
+        self.assertEqual(out["continuation"]["resume_from"], str(plan_mod.MAX_OPS))
 
     def test_wait_for_cut_by_the_plan_deadline_or_abort(self):
         out = run_plan({"timeout_ms": 1000, "steps": [
@@ -754,7 +758,9 @@ class TestLive(unittest.TestCase):
 
     def test_op_and_time_caps(self):
         body = [{"op": "act", "norm": "1,1"}] * 4
-        out = run_plan([PERCEIVE, {"op": "repeat", "times": 20, "steps": body}], go=True, deps=(deps := FakeDeps()))
+        rep = [PERCEIVE, {"op": "repeat", "times": 20, "steps": body}]
+        self.assertTrue(validate_plan(rep)[1]["over_cap"])  # 82 ops on every path
+        out = run_plan({"resumable": True, "steps": rep}, go=True, deps=(deps := FakeDeps()))
         self.assertEqual((out["ok"], out["stop_reason"], out["ops_run"]), (False, "max_ops", plan_mod.MAX_OPS))
         self.assertEqual(len(deps.acts), plan_mod.MAX_OPS - 2)
         out = run_plan({"timeout_ms": 1500, "steps": [PERCEIVE, {"op": "wait", "sec": 5}, {"op": "act", "norm": "1,1"}]},

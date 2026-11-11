@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "goal": "open the top story's comments, then wait until the front page is gone",
+  "steps": [
+    {"op": "perceive", "title": "Hacker News", "ocr": true, "as": "hn",
+     "note": "the front page title is exactly 'Hacker News'; an article page is '... | Hacker News'"},
+    {"op": "wait_until_stable", "stamp_ref": "hn", "stable_ms": 800},
+    {"op": "act", "stamp_ref": "hn", "ocr_text": "comments", "confirm_frames": 2, "focus": true,
+     "note": "OCR item sets flicker on a busy page: act only if the match holds on the next frame too"},
+    {"op": "wait_for", "timeout_ms": 15000,
+     "cond": {"not": {"window": {"title": "Hacker News", "match": "exact"}}},
+     "note": "contains would also match the comments page title, so this never became true"},
+    {"op": "perceive", "exe": "chrome", "ocr": true, "as": "page"},
+    {"op": "assert", "cond": {"text": "comments", "stamp_ref": "page", "confirm_frames": 2}}
+  ]
+}

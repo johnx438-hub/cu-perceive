@@ -316,12 +316,11 @@ def main(argv: list[str] | None = None) -> int:
         _emit(out, args, indent=2)
         return 0 if out.get("ok", True) else 1
     if args.cmd == "plan":
-        from .plan import run_plan, validate_plan
+        from .plan import run_plan, validate_report
 
         src = sys.stdin.read() if args.file == "-" else args.file
         if args.validate:
-            _, err = validate_plan(src)
-            out = err or {"ok": True, "plan": True, "validated": True}
+            out = validate_report(src)
         else:
             out = run_plan(src, go=bool(args.go))
         _emit(out, args)

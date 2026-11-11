@@ -451,7 +451,14 @@ each one: perceive, act, wait for a condition, branch, re-perceive, act again.
 Every op takes `on_fail: "continue"` (the default is `"stop"`) and `note`. An act step can
 name its target by OCR text, `"ocr_text": "Save"`, resolved on the stamp the act runs on:
 an exact match (case-insensitive) wins over a substring match, and anything but one match
-fails closed (`target_not_found`, `ambiguous_target` with `candidates`). `uia_name` works as
+fails closed: `target_not_found` carries `similar` (the closest OCR texts, so a misread such
+as `|` for `I` shows up), `ambiguous_target` carries `candidates`, and both carry `stamp`,
+`match_count` and `ocr_items`. `"confirm_frames": 2` (1..3, default 1 = off) on such a step
+re-perceives the same window with the same detectors and acts only if every `ocr_text` of
+that act keeps its text and stays within 20 (0-1000) on the next frame; the act then runs on
+that newer stamp and its ids. A match that moves or changes fails as `unstable_target`
+(with `frames`), one that vanishes as `target_not_found` with `frame: 2`. It costs one more
+OCR pass (about 3-7 s on a busy page). `uia_name` works as
 in `act`. `plan.stamps` (`{"main": "<stamp>"}`) names stamps taken before the plan.
 `plan.stop_on_challenge` (default `true`) makes a perceive or an act that sees a
 human-verification page stop the run with `reason: "challenge"`; `false` opts out.
@@ -460,13 +467,13 @@ Conditions are data, not code. Each has exactly one kind:
 
 | Condition | True when |
 |---|---|
-| `{"window": {"title", "exe", "minimized"}}` | a matching top-level window exists |
+| `{"window": {"title", "exe", "class", "minimized", "match"}}` | a matching top-level window exists. `match` is `contains` (default, a substring, as before), `exact` (the whole title / class, case-insensitive) or `regex` (`re.search`, case-insensitive); it applies to `title` and `class`, while `exe` stays a substring. It may also sit beside the body (`{"window": {...}, "match": "exact"}`). Only `exact` / `regex` can tell "left this page": `{"not": {"window": {"title": "Hacker News", "match": "exact"}}}`, because with `contains` the article's "… \| Hacker News" still matches |
 | `{"foreground": {...}}` with one of `title`, `hwnd`, `stamp_ref` | the foreground window matches |
-| `{"text": "Done", "stamp_ref", "source", "match", "fresh"}` | an OCR item or UIA name/value on that stamp has the text (`source`: `any`, `ocr`, `uia`; `match`: `contains`, `exact`) |
+| `{"text": "Done", "stamp_ref", "source", "match", "fresh", "confirm_frames"}` | an OCR item or UIA name/value on that stamp has the text (`source`: `any`, `ocr`, `uia`; `match`: `contains`, `exact`). With `confirm_frames` 2 or 3 the window is re-perceived right after a match and the next frame(s) must match too (`confirm_frames` lists the stamps; `unstable: true` when one did not) |
 | `{"uia": {"name", "control_type", "value"}, "stamp_ref", "match", "fresh"}` | a UIA node matches every given field |
 | `{"challenge": true, "stamp_ref", "fresh"}` | a human-verification / interstitial page is on screen (fixed token list: "just a moment", "performing security verification", "verify you are human", "checking your browser", "turnstile", "captcha", …); `false` inverts it, and the row's `hits` names what matched |
 | `{"last": {"ok": false, "reason": "point_covered"}}` | the previous op's result has these fields (a boolean compares truthiness; dotted keys reach into objects) |
-| `{"all": [...]}`, `{"any": [...]}`, `{"not": {...}}` | as named, evaluated left to right |
+| `{"all": [...]}`, `{"any": [...]}`, `{"not": {...}}` | as named, evaluated left to right. A `not` reads `{"met": M, "not": {"inner_met": !M, "met": M, ...inner evidence}}`: `not.met` is the negated result, the same as the outer `met` (before this, `not.met` was the inner result) |
 
 `text` and `uia` read a stamp, so that stamp needs OCR or UIA. In `wait_for` and
 `repeat.until` they re-perceive the window on every check and the stamp's name then points
@@ -522,7 +529,7 @@ rows are collected in `would_stop` (`[{path, stop_ok, message}]` with `would_sto
 only acts on window stamps (`no_window_stamp` otherwise).
 
 A plan is validated in full before anything runs (`reason: "bad_plan"`, `path` of the op).
-One run executes at most 64 ops, nests `if` / `repeat` 4 deep, and stops at `timeout_ms`
+One call executes at most 64 ops (an `if` or `repeat` is one op plus what runs inside it), nests `if` / `repeat` 4 deep, and stops at `timeout_ms`
 (default 120000, at most 600000). The operator `abort` switch is checked before every op; an
 op the gate refuses is still recorded, as a row with `gated: true` and `ran: false`, so
 `stopped_at` always names an entry in `results` (`path` such as `3.then.0`). A live `wait`
@@ -532,10 +539,23 @@ or `deadline`) instead of claiming the full `sec`; abort and the deadline are re
 running `wait` / `wait_for` at least every 250 ms, however long `interval_ms` (100..1000) is,
 and a `wait_for` cut short that way reports `interrupted` and stops with `aborted` / `timeout`,
 while `wait_timeout` only means its own `timeout_ms` ran out. The op budget is checked between
-ops, so the 64th op runs in full. The result also
+ops, so the 64th op runs in full. Validation also counts ops statically (`static_ops`:
+`least` if every op succeeds, every `until` holds at its first check and every `if` takes its
+shorter branch; `most` otherwise): a plan whose `least` is over 64 is refused before anything
+runs (`bad_plan`, `over_cap: true`, and `validate_only` says the same) unless it sets
+`"resumable": true`, and one whose `most` is over 64 validates with a warning.
+
+A run that stops at the cap (`max_ops`) or at its deadline (`timeout`) returns a
+`continuation`: `{"resume_from": "<path of the op that did not run>", "stamps": {every named
+frame and "latest"}, "resumable": true}`. Merge it into the same plan and call again: the run
+goes on at that op (inside an `if` it keeps the branch chosen before, inside a `repeat` it
+finishes that round and goes on, checking `until` as usual) with `frames.latest` and the named
+stamps carried across. The containers on the way get rows with `resumed: true`, the result
+has `resumed_from`, and a `last` condition starts empty. An aborted run has no continuation. The result also
 carries `stopped`, `frames`, and the same `verification` / `evidence.steps_sent` as `act`,
 plus `no_input` for a live plan that sent nothing. Ops are not undone when a later one fails.
-Examples: `docs/examples/plan-wait-and-branch.json`, `plan-scroll-until.json`.
+Examples: `docs/examples/plan-wait-and-branch.json`, `plan-scroll-until.json`,
+`plan-left-page-confirm.json` (`match: exact` to wait until a page is gone, `confirm_frames`).
 
 CLI output is always UTF-8 (window titles can contain any script), whatever the
 console code page is. Decode it as UTF-8. PowerShell decodes captured output

@@ -25,9 +25,15 @@ whichever branch the live run takes; when a branch is unsure, ``planned_acts_at_
 gives the total planned. A ``repeat`` cut by such a stop reports ``would_stop`` and
 the rounds it planned.
 
-Bounds: MAX_OPS executed ops, MAX_DEPTH nesting, MAX_REPEAT iterations, a wall
+Bounds: MAX_OPS executed ops per call, MAX_DEPTH nesting, MAX_REPEAT iterations, a wall
 clock ``timeout_ms`` and the operator abort switch. The op budget is checked
-between ops, so the op that reaches the cap still runs to its end. Abort and the
+between ops, so the op that reaches the cap still runs to its end. Validation also
+counts ops statically (``static_ops``: at least / at most, if every op succeeds): a
+plan that runs more than MAX_OPS ops even on its shortest path is refused before
+anything runs, unless it says ``resumable: true``. A run that stops at the cap or at
+its deadline returns a ``continuation`` (``resume_from`` = the op that did not run,
+``stamps`` = every named frame plus ``latest``); passing those two fields back with
+the same steps resumes there, so ``frames.latest`` and named stamps carry across calls. Abort and the
 deadline are also read inside a running ``wait`` / ``wait_for`` at least every
 ``INTERRUPT_POLL_S``, which then report ``interrupted`` (``aborted`` or
 ``deadline``) instead of the full sleep; a ``wait_for`` that spends its own
@@ -52,8 +58,10 @@ a challenge page.
 """
 from __future__ import annotations
 
+import difflib
 import hashlib
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -61,7 +69,7 @@ from typing import Any
 from .chain import STEP_FIELDS, validate_steps
 
 PLAN_VERSION = 1
-MAX_OPS = 64
+MAX_OPS = 64  # per call; a longer plan resumes with the continuation of the previous call
 MAX_DEPTH = 4
 MAX_REPEAT = 20
 MAX_WAIT_S = 30.0
@@ -94,13 +102,20 @@ CHALLENGE_TOKENS = (
 )
 DEFAULT_TIMEOUT_MS = 120_000
 MAX_TIMEOUT_MS = 600_000
+MAX_CONFIRM_FRAMES = 3  # confirm_frames: how many consecutive frames must agree on an OCR match
+CONFIRM_TOLERANCE_NORM = 20  # how far (0-1000) a confirmed ocr_text match may move between frames
+WINDOW_MATCH = ("contains", "exact", "regex")
+MAX_PATTERN_LEN = 256
+RESUME_REASONS = ("max_ops", "timeout")  # stops a continuation can pick up from
 
-PLAN_FIELDS = frozenset({"version", "goal", "stamps", "timeout_ms", "stop_on_challenge", "steps"})
+PLAN_FIELDS = frozenset({"version", "goal", "stamps", "timeout_ms", "stop_on_challenge", "steps", "resumable",
+                         "resume_from"})
 COMMON_FIELDS = frozenset({"op", "on_fail", "note"})
 PERCEIVE_FLAGS = ("ocr", "uia", "yolo", "focus")
 ACT_CALL_FIELDS = frozenset({"focus", "ime", "method", "hold_key", "max_age_sec", "strict_stamp",
                              "new_window_wait_ms", "check_change", "change_min_ratio"})
-ACT_STEP_FIELDS = STEP_FIELDS | {"ocr_text"}
+ACT_STEP_FIELDS = STEP_FIELDS | {"ocr_text", "confirm_frames"}
+PLAN_STEP_FIELDS = frozenset({"ocr_text", "confirm_frames"})  # resolved by the plan, never passed to act
 OP_FIELDS: dict[str, frozenset] = {
     "perceive": frozenset({"hwnd", "title", "exe", "from", "as", "capture", "roi", "roi_norm",
                            *PERCEIVE_FLAGS}),
@@ -118,9 +133,9 @@ OP_FIELDS: dict[str, frozenset] = {
 # Ops whose result a later {"last": {...}} condition reads.
 LEAF_OPS = frozenset({"perceive", "act", "wait", "wait_for", "wait_until_stable", "assert", "launch"})
 COND_FIELDS: dict[str, frozenset] = {
-    "window": frozenset(),
+    "window": frozenset({"match"}),
     "foreground": frozenset(),
-    "text": frozenset({"stamp_ref", "source", "match", "fresh"}),
+    "text": frozenset({"stamp_ref", "source", "match", "fresh", "confirm_frames"}),
     "uia": frozenset({"stamp_ref", "match", "fresh"}),
     "challenge": frozenset({"stamp_ref", "fresh"}),
     "last": frozenset(),
@@ -134,6 +149,9 @@ ACT_KEEP = ("ok", "reason", "error", "hint", "dry_run", "step_count", "completed
             "screen_changed", "changed_ratio", "changed_bbox_norm", "layout_reflow_suspected", "expected_change",
             "expect_change_unmet", "blocking_window", "suggested_hwnd", "warnings", "stamp_stale", "aborted",
             "planned_steps", "foreground_click_count")
+CONTINUE_HINT = ("merge continuation (resume_from, stamps, resumable) into the same plan and call plan again; "
+                 "it goes on at the op that did not run, with the same named stamps and latest frame. A last "
+                 "condition starts empty there, and the ops already run are not repeated")
 STOP_HINT = ("read results[] up to stopped_at; ops after it were not run. Perceive the window again and plan "
              "the rest from what is on screen now")
 
@@ -231,6 +249,24 @@ def _check_ref(name, names: set, path: str) -> None:
                         f"{', '.join(sorted(names)) or 'none'}")
 
 
+def _check_confirm(v, path: str) -> None:
+    if not isinstance(v, int) or isinstance(v, bool) or not 1 <= v <= MAX_CONFIRM_FRAMES:
+        raise PlanError(path, f"confirm_frames must be an integer in 1..{MAX_CONFIRM_FRAMES}",
+                        "2 = the match must hold on this frame and on one re-perceived right after it (1 = off)")
+
+
+def _window_mode(cond: dict, path: str) -> str:
+    body = cond.get("window") if isinstance(cond.get("window"), dict) else {}
+    if "match" in body and "match" in cond and body["match"] != cond["match"]:
+        raise PlanError(path, "window match given twice with different values")
+    mode = body.get("match", cond.get("match", "contains"))
+    if mode not in WINDOW_MATCH:
+        raise PlanError(path, "window match is contains, exact or regex",
+                        "contains (default) is a substring; exact is the whole title; regex is re.search, "
+                        "case-insensitive")
+    return mode
+
+
 def _validate_cond(cond, path: str, names: set) -> None:
     if not isinstance(cond, dict):
         raise PlanError(path, "a condition is an object", f"kinds: {', '.join(COND_FIELDS)}")
@@ -252,9 +288,23 @@ def _validate_cond(cond, path: str, names: set) -> None:
             raise PlanError(path, "challenge takes true or false",
                             "true: a human-verification page is on screen; false: it is not")
     elif kind == "window":
-        if not isinstance(body, dict) or not (body.get("title") or body.get("exe")):
-            raise PlanError(path, "window needs title and/or exe")
-        _check_fields(body, {"title", "exe", "minimized"}, path, "window")
+        if not isinstance(body, dict) or not (body.get("title") or body.get("exe") or body.get("class")):
+            raise PlanError(path, "window needs title, exe and/or class")
+        _check_fields(body, {"title", "exe", "class", "minimized", "match"}, path, "window")
+        for k in ("title", "exe", "class"):
+            if k in body and not isinstance(body[k], str):
+                raise PlanError(path, f"window {k} must be a string")
+        if "minimized" in body and not isinstance(body["minimized"], bool):
+            raise PlanError(path, "window minimized must be true or false")
+        if _window_mode(cond, path) == "regex":
+            for k in ("title", "class"):
+                if body.get(k):
+                    if len(body[k]) > MAX_PATTERN_LEN:
+                        raise PlanError(path, f"window {k} pattern is longer than {MAX_PATTERN_LEN}")
+                    try:
+                        re.compile(body[k], re.IGNORECASE)
+                    except re.error as e:
+                        raise PlanError(path, f"window {k} is not a valid regex: {e}") from e
     elif kind == "foreground":
         if not isinstance(body, dict) or len([k for k in ("title", "hwnd", "stamp_ref") if body.get(k)]) != 1:
             raise PlanError(path, "foreground needs exactly one of title, hwnd, stamp_ref")
@@ -266,6 +316,8 @@ def _validate_cond(cond, path: str, names: set) -> None:
             raise PlanError(path, "text must be a non-empty string")
         if cond.get("source", "any") not in ("any", "ocr", "uia"):
             raise PlanError(path, "source is any, ocr or uia")
+        if "confirm_frames" in cond:
+            _check_confirm(cond["confirm_frames"], path)
     elif kind == "uia":
         if not isinstance(body, dict) or not any(body.get(k) for k in ("name", "control_type", "value")):
             raise PlanError(path, "uia needs name, control_type and/or value")
@@ -305,13 +357,18 @@ def _validate_act(op: dict, path: str, names: set) -> None:
     steps, _ = _split_act(op)
     probe = []
     for i, s in enumerate(steps):
+        if isinstance(s, dict) and "confirm_frames" in s:
+            if "ocr_text" not in s:
+                raise PlanError(f"{path}.steps.{i}", "confirm_frames goes with ocr_text",
+                                "it re-reads the window and checks the OCR match holds on the next frame too")
+            _check_confirm(s["confirm_frames"], f"{path}.steps.{i}")
         if isinstance(s, dict) and "ocr_text" in s:
             if not isinstance(s["ocr_text"], str) or not s["ocr_text"].strip():
                 raise PlanError(f"{path}.steps.{i}", "ocr_text must be a non-empty string")
             clash = sorted(k for k in ("ids", "norm", "xy", "uia_name") if s.get(k))
             if clash:
                 raise PlanError(f"{path}.steps.{i}", f"ocr_text cannot be combined with {', '.join(clash)}")
-            s = {k: v for k, v in s.items() if k != "ocr_text"} | {"ids": "1"}
+            s = {k: v for k, v in s.items() if k not in PLAN_STEP_FIELDS} | {"ids": "1"}
         probe.append(s)
     _, err = validate_steps(probe)
     if err:
@@ -427,6 +484,107 @@ def _collect_names(ops, names: set) -> None:
                 _collect_names(op.get(k), names)
 
 
+# Static op count. (least, most, always_stops, may_stop) for one op or a sequence, counted the way
+# the runner counts (an if / repeat is one op, plus what runs inside it). "least" assumes every op
+# succeeds, every until is met at its first check and every if takes its shorter branch; a stop that
+# may fire ends the count of "least", a stop that always fires ends "most" too.
+def _count_seq(ops) -> tuple[int, int, bool, bool]:
+    acc = (0, 0, False, False)
+    for op in ops if isinstance(ops, list) else []:
+        acc = _then(acc, _count_op(op))
+        if acc[2]:
+            break
+    return acc
+
+
+def _then(a, b):
+    return (a[0] + (0 if a[3] else b[0]), a[1] + (0 if a[2] else b[1]), a[2] or b[2], a[3] or b[3])
+
+
+def _count_op(op) -> tuple[int, int, bool, bool]:
+    kind = op.get("op") if isinstance(op, dict) else None
+    if kind == "stop":
+        return 1, 1, True, True
+    if kind == "if":
+        t = _count_seq(op.get("then") or [])
+        e = _count_seq(op.get("else") or [])
+        return 1 + min(t[0], e[0]), 1 + max(t[1], e[1]), t[2] and e[2], t[3] or e[3]
+    if kind == "repeat":
+        return _count_rounds(op, _count_seq(op.get("steps")), int(op.get("times") or 0))
+    return 1, 1, False, False
+
+
+def _count_rounds(op, body, rounds: int, first=None) -> tuple[int, int, bool, bool]:
+    """A repeat op (1), then ``first`` (the rest of a resumed round, if any), then up to ``rounds``
+    rounds of ``body``. Without until, every round runs; with until, none has to."""
+    least, most, always, may = 1, 1, False, False
+    if first is not None:
+        least, most, always, may = 1 + first[0], 1 + first[1], first[2], first[3]
+        if always:
+            return least, most, True, True
+    if rounds <= 0:
+        return least, most, always, may
+    until = op.get("until") is not None
+    if body[2]:  # the body always stops: at most one more round runs, and it ends the plan
+        return (least + (0 if may or until else body[0]), most + body[1], not until, True)
+    if not (may or until):
+        least += body[0] if body[3] else rounds * body[0]
+    return least, most + rounds * body[1], False, may or body[3]
+
+
+def _resume_parts(plan: dict) -> list[str] | None:
+    rf = plan.get("resume_from")
+    return None if rf is None else str(rf).split(".")
+
+
+def _count_from(ops, parts: list[str]) -> tuple[int, int, bool, bool]:
+    """Static count of what a run resumed at ``parts`` executes."""
+    i = int(parts[0])
+    if len(parts) == 1:
+        return _count_seq(ops[i:])
+    op = ops[i]
+    if op["op"] == "if":
+        head = _count_from(op[parts[1]], parts[2:])
+        head = (1 + head[0], 1 + head[1], head[2], head[3])
+    else:
+        r = int(parts[1])
+        head = _count_rounds(op, _count_seq(op["steps"]), int(op["times"]) - r - 1,
+                             first=_count_from(op["steps"], parts[2:]))
+    return _then(head, _count_seq(ops[i + 1:]))
+
+
+def static_ops(plan: dict) -> dict:
+    """{"least", "most", "cap"}: ops this plan (or its resumed part) runs if every op succeeds."""
+    parts = _resume_parts(plan)
+    least, most, _, _ = _count_from(plan["steps"], parts) if parts else _count_seq(plan["steps"])
+    return {"least": least, "most": most, "cap": MAX_OPS}
+
+
+def _validate_resume(plan: dict) -> None:
+    rf = plan["resume_from"]
+    if not isinstance(rf, str) or not rf:
+        raise PlanError("resume_from", "resume_from is an op path such as \"12\" or \"3.then.0\"",
+                        "copy it from the continuation of the previous run")
+    parts = rf.split(".")
+    ops, where = plan["steps"], ""
+    while True:
+        head = parts.pop(0)
+        if not head.isdigit() or int(head) >= len(ops):
+            raise PlanError("resume_from", f"resume_from {rf!r}: no op {where}{head}")
+        op, where = ops[int(head)], f"{where}{head}."
+        if not parts:
+            return
+        if op["op"] == "if" and parts[0] in ("then", "else") and op.get(parts[0]):
+            ops, where = op[parts[0]], f"{where}{parts.pop(0)}."
+        elif op["op"] == "repeat" and parts[0].isdigit() and int(parts[0]) < int(op["times"]):
+            ops, where = op["steps"], f"{where}{parts.pop(0)}."
+        else:
+            raise PlanError("resume_from", f"resume_from {rf!r}: {where.rstrip('.')} has no {parts[0]!r}",
+                            "an if takes then / else, a repeat takes a round number below times")
+        if not parts:
+            raise PlanError("resume_from", f"resume_from {rf!r} names a branch, not an op")
+
+
 def validate_plan(src: Any) -> tuple[dict | None, dict | None]:
     """(plan, None) or (None, bad_plan payload). Nothing is perceived or sent."""
     try:
@@ -443,8 +601,11 @@ def validate_plan(src: Any) -> tuple[dict | None, dict | None]:
             raise PlanError("", f"unsupported version {plan.get('version')!r}; this build runs version {PLAN_VERSION}")
         stamps = plan.get("stamps") or {}
         if not isinstance(stamps, dict) or not all(
-                isinstance(k, str) and k and k != LATEST and isinstance(v, str) and v for k, v in stamps.items()):
-            raise PlanError("stamps", "stamps maps a name to a stamp name or json path")
+                isinstance(k, str) and k and isinstance(v, str) and v for k, v in stamps.items()):
+            raise PlanError("stamps", "stamps maps a name to a stamp name or json path",
+                            f"{LATEST!r} seeds the latest frame (a continuation carries it)")
+        if "resumable" in plan and not isinstance(plan["resumable"], bool):
+            raise PlanError("resumable", "resumable must be true or false")
         t = plan.get("timeout_ms", DEFAULT_TIMEOUT_MS)
         if not _is_num(t) or not 0 < t <= MAX_TIMEOUT_MS:
             raise PlanError("timeout_ms", f"timeout_ms must be in (0, {MAX_TIMEOUT_MS}]")
@@ -454,9 +615,33 @@ def validate_plan(src: Any) -> tuple[dict | None, dict | None]:
         names = set(stamps)
         _collect_names(plan.get("steps"), names)
         _validate_ops(plan.get("steps"), "", 1, names)
+        if "resume_from" in plan:
+            _validate_resume(plan)
+        count = static_ops(plan)
+        if count["least"] > MAX_OPS and not plan.get("resumable"):
+            err = PlanError("steps", f"the plan runs at least {count['least']} ops; one call runs at most {MAX_OPS}",
+                            "split it, or set resumable: true and call again with the continuation the run "
+                            "returns at the cap").payload()
+            err.update(over_cap=True, static_ops=count)
+            return None, err
         return plan, None
     except PlanError as e:
         return None, e.payload()
+
+
+def validate_report(src: Any) -> dict:
+    """What validate_only / --validate return: bad_plan, or validated with the static op count."""
+    plan, err = validate_plan(src)
+    if err:
+        return err
+    count = static_ops(plan)
+    out = {"ok": True, "plan": True, "validated": True, "static_ops": count}
+    if count["most"] > MAX_OPS:
+        out["warnings"] = [f"up to {count['most']} ops (cap {MAX_OPS} per call): a run that reaches the cap "
+                           "stops with a continuation; call again with its resume_from and stamps"]
+    if plan.get("resume_from"):
+        out["resume_from"] = plan["resume_from"]
+    return out
 
 
 # ----------------------------------------------------------------- execution
@@ -521,6 +706,12 @@ class Deps:
 
         return [w for w in find_windows(title=title, exe=exe) if w]
 
+    def top_windows(self) -> list[dict]:
+        """Every top-level window (title, class, exe, minimized); the window condition filters them."""
+        from .windows import list_windows
+
+        return [w for w in list_windows(include_minimized=True) if w]
+
     def foreground(self) -> dict | None:
         from .windows import foreground_brief
 
@@ -579,7 +770,20 @@ def _challenge_hits(frame: dict) -> list[dict]:
 def _matches(hay, needle: str, mode: str) -> bool:
     if hay is None:
         return False
+    if mode == "regex":
+        return re.search(needle, str(hay), re.IGNORECASE) is not None
     return _cf(hay) == _cf(needle) if mode == "exact" else _cf(needle) in _cf(hay)
+
+
+def _near(a, b) -> bool:
+    ca, cb = _center(a.get("norm")), _center(b.get("norm"))
+    if ca is None or cb is None:
+        return ca == cb
+    return max(abs(ca[0] - cb[0]), abs(ca[1] - cb[1])) <= CONFIRM_TOLERANCE_NORM
+
+
+def _brief_item(it: dict) -> dict:
+    return {"id": it.get("id"), "text": it.get("text"), "center_norm": _center(it.get("norm"))}
 
 
 def _dig(obj, dotted: str):
@@ -595,7 +799,13 @@ def _center(box):
 class _Run:
     def __init__(self, plan: dict, send: bool, deps: Deps):
         self.plan, self.send, self.deps = plan, send, deps
-        self.frames: dict[str, dict] = {n: {"json": s, "data": None} for n, s in (plan.get("stamps") or {}).items()}
+        self.frames: dict[str, dict] = {}
+        by_json: dict[str, dict] = {}
+        for n, s in (plan.get("stamps") or {}).items():
+            # names that carried the same stamp (a continuation's "latest" and "main") stay one frame, so a
+            # refresh through either name moves both, as it did before the cut
+            self.frames[n] = by_json.setdefault(s, {"json": s, "data": None})
+        self.resume: dict[str, list[str]] = {}  # container path -> where inside it a resumed run starts
         self.results: list[dict] = []
         self.last: dict = {}
         self.ops_run = 0
@@ -744,15 +954,27 @@ class _Run:
                     break  # short-circuit, left to right
             return {"met": (all if kind == "all" else any)(p["met"] for p in parts), kind: parts}
         if kind == "not":
+            # "not" holds the inner evidence with inner_met = the inner condition and met = the negation,
+            # so not.met always agrees with the outer met (it used to be the inner one).
             inner = self.eval(body, fresh)
-            return {"met": not inner["met"], "not": inner}
+            met = not inner["met"]
+            return {"met": met, "not": {"inner_met": inner["met"], "met": met,
+                                        **{k: v for k, v in inner.items() if k != "met"}}}
         if kind == "window":
-            rows = self.deps.find_windows(title=body.get("title") or "", exe=body.get("exe") or "")
+            mode = body.get("match", cond.get("match", "contains"))
+            title, exe, cls = body.get("title") or "", body.get("exe") or "", body.get("class") or ""
+            if mode == "contains" and not cls:
+                rows = self.deps.find_windows(title=title, exe=exe)  # unchanged: substring, like windows(title=)
+            else:
+                rows = [w for w in self.deps.top_windows()
+                        if (not title or _matches(w.get("title") or "", title, mode))
+                        and (not cls or _matches(w.get("class") or "", cls, mode))
+                        and (not exe or _cf(exe) in _cf(f"{w.get('exe') or ''} {w.get('exe_path') or ''}"))]
             if "minimized" in body:
                 rows = [w for w in rows if bool(w.get("minimized")) == bool(body["minimized"])]
-            out = {"met": bool(rows), "window": body, "count": len(rows)}
+            out = {"met": bool(rows), "window": body, "match": mode, "count": len(rows)}
             if rows:
-                out["first"] = {k: rows[0].get(k) for k in ("hwnd", "title", "exe")}
+                out["first"] = {k: rows[0].get(k) for k in ("hwnd", "title", "exe", "class") if k in rows[0]}
             return out
         if kind == "foreground":
             fg = self.deps.foreground()
@@ -785,7 +1007,20 @@ class _Run:
                 hits += [{"source": "uia", "id": n.get("id"), "text": n.get(k)}
                          for n in frame.get("uia_nodes") or [] for k in ("name", "value")
                          if _matches(n.get(k), body, mode)]
-            return {"met": bool(hits), "text": body, "stamp": frame.get("stamp"), "count": len(hits), "hits": hits[:5]}
+            out = {"met": bool(hits), "text": body, "stamp": frame.get("stamp"), "count": len(hits), "hits": hits[:5]}
+            need = int(cond.get("confirm_frames") or 1)
+            if need > 1 and hits:
+                # OCR item sets flicker between frames: a match only counts when the next frame(s) agree.
+                seen = [{"stamp": frame.get("stamp"), "count": len(hits)}]
+                for _ in range(need - 1):
+                    self.refresh(cond.get("stamp_ref"))
+                    again = self.eval({k: v for k, v in cond.items() if k not in ("confirm_frames", "fresh")})
+                    seen.append({"stamp": again["stamp"], "count": again["count"]})
+                    if not again["met"]:
+                        out.update(met=False, unstable=True)
+                        break
+                out["confirm_frames"] = seen
+            return out
         _, frame = self.rows(cond, fresh, want_uia=True)
         hits = [n for n in frame.get("uia_nodes") or []
                 if all(_matches(n.get(k), body[k], mode) for k in ("name", "value") if body.get(k))
@@ -802,27 +1037,77 @@ class _Run:
         return ev
 
     # -- act targets
-    def resolve(self, step: dict, entry: dict) -> dict:
+    def find_text(self, want: str, entry: dict, frame_no: int = 1) -> dict:
+        """The one OCR item ``want`` names on that stamp: exact (case-insensitive) beats substring.
+        Zero matches is target_not_found (with the closest texts as ``similar``), more than one is
+        ambiguous_target (with ``candidates``); both fail closed."""
+        frame = self.data(entry)
+        items = [it for it in frame.get("items") or [] if it.get("text")]
+        by = "exact"
+        hits = [it for it in items if _matches(it["text"], want, "exact")]
+        if not hits:
+            by, hits = "contains", [it for it in items if _matches(it["text"], want, "contains")]
+        if len(hits) == 1:
+            return hits[0]
+        extra = {"stamp": frame.get("stamp"), "ocr_text": want, "match_count": len(hits), "matched_by": by,
+                 "ocr_items": len(items),
+                 "candidates": [_brief_item(it) for it in hits[:8]]}
+        if frame_no > 1:
+            extra["frame"] = frame_no
+        if not hits:
+            ranked = sorted(((difflib.SequenceMatcher(None, _cf(want), _cf(it["text"])).ratio(), it) for it in items),
+                            key=lambda p: -p[0])
+            extra["similar"] = [_brief_item(it) | {"score": round(r, 2)} for r, it in ranked[:5] if r >= 0.5]
+            raise OpError("target_not_found",
+                          f"ocr_text {want!r} matches 0 items on stamp {frame.get('stamp')}",
+                          hint=("OCR may have read it differently: see similar[]; or perceive with ocr=true "
+                                "and wait for the page to settle"), **extra)
+        raise OpError("ambiguous_target",
+                      f"ocr_text {want!r} matches {len(hits)} items on stamp {frame.get('stamp')}",
+                      hint="use a longer ocr_text, or ids / norm from the map; candidates[] lists them", **extra)
+
+    def resolve(self, step: dict, entry: dict, hit: dict | None = None) -> dict:
         """ocr_text -> ids, from the stamp the act runs on. One match or it fails closed."""
         if "ocr_text" not in step:
             return step
-        want = step["ocr_text"]
-        items = [it for it in self.data(entry).get("items") or [] if it.get("text")]
-        hits = [it for it in items if _matches(it["text"], want, "exact")] or [
-            it for it in items if _matches(it["text"], want, "contains")]
-        if len(hits) != 1:
-            raise OpError(
-                "target_not_found" if not hits else "ambiguous_target",
-                f"ocr_text {want!r} matches {len(hits)} items on stamp {self.data(entry).get('stamp')}",
-                hint=("perceive with ocr=true and check the text" if not hits else
-                      "use a longer ocr_text, or ids / norm from the map"),
-                candidates=[{"id": it.get("id"), "text": it.get("text"), "center_norm": _center(it.get("norm"))}
-                            for it in hits[:8]])
-        return {k: v for k, v in step.items() if k != "ocr_text"} | {"ids": str(hits[0]["id"])}
+        hit = hit or self.find_text(step["ocr_text"], entry)
+        return {k: v for k, v in step.items() if k not in PLAN_STEP_FIELDS} | {"ids": str(hit["id"])}
+
+    def confirm_targets(self, steps: list[dict], entry: dict, res: dict) -> tuple[dict, dict]:
+        """confirm_frames: resolve every ocr_text step, re-perceive, resolve again; each step's match must
+        keep its text and stay within CONFIRM_TOLERANCE_NORM between consecutive frames. Returns the
+        last frame's entry and {step index: item}. Re-perceiving only reads, so a dry run does it too."""
+        need = max(int(s.get("confirm_frames") or 1) for s in steps if isinstance(s, dict))
+        want = {i: s["ocr_text"] for i, s in enumerate(steps) if isinstance(s, dict) and "ocr_text" in s}
+        prev = {i: self.find_text(t, entry) for i, t in want.items()}
+        seen = [{"stamp": self.data(entry).get("stamp"), "ids": {str(i): it.get("id") for i, it in prev.items()}}]
+        for n in range(2, need + 1):
+            entry = self.refresh_entry(entry)
+            cur = {i: self.find_text(t, entry, frame_no=n) for i, t in want.items()}
+            seen.append({"stamp": self.data(entry).get("stamp"), "ids": {str(i): it.get("id") for i, it in cur.items()}})
+            moved = [i for i in want if _cf(cur[i]["text"]) != _cf(prev[i]["text"]) or not _near(cur[i], prev[i])]
+            if moved:
+                i = moved[0]
+                raise OpError("unstable_target",
+                              f"ocr_text {want[i]!r} did not hold between frames {n - 1} and {n}",
+                              hint="the page is still changing: wait_until_stable first, or target by ids / norm",
+                              step=i, frames=[{"stamp": seen[-2]["stamp"], **_brief_item(prev[i])},
+                                              {"stamp": seen[-1]["stamp"], **_brief_item(cur[i])}])
+            prev = cur
+        res["confirm_frames"] = seen
+        return entry, prev
 
     # -- ops
     def run_ops(self, ops: list[dict], path: str) -> bool:
         return all(self.run_op(op, f"{path}{i}") for i, op in enumerate(ops))
+
+    def run_from(self, ops: list[dict], path: str, parts: list[str]) -> bool:
+        """Run ``ops`` from the op ``parts`` names (a continuation's resume_from, split on dots): the
+        containers on the way get a row with ``resumed`` and run only what is left inside them."""
+        i = int(parts[0])
+        if len(parts) > 1:
+            self.resume[f"{path}{i}"] = parts[1:]
+        return all(self.run_op(ops[j], f"{path}{j}") for j in range(i, len(ops)))
 
     def run_op(self, op: dict, path: str) -> bool:
         kind = op.get("op")
@@ -909,7 +1194,14 @@ class _Run:
             # act allows an explicit screen stamp; an unattended script does not get to click the bare desktop
             raise OpError("no_window_stamp", "a live plan acts only on window stamps (this one has no hwnd)",
                           hint="perceive the target window in the plan and act on that stamp")
-        steps = [self.resolve(s, entry) for s in steps]
+        hits: dict = {}
+        if any(isinstance(s, dict) and int(s.get("confirm_frames") or 1) > 1 for s in steps):
+            entry, hits = self.confirm_targets(steps, entry, res)  # the act runs on the frame that confirmed
+            frame = self.data(entry)
+            if self.plan.get("stop_on_challenge", True) and (ch := _challenge_hits(frame)):
+                raise OpError("challenge", "refusing to act: the confirming frame shows a human-verification page",
+                              hint="a human has to pass it; nothing was sent", hits=ch[:5], token=ch[0]["token"])
+        steps = [self.resolve(s, entry, hits.get(i)) for i, s in enumerate(steps)]
         out = self.deps.act(steps, {**call, "stamp": entry["json"], "go": self.send}) or {}
         res.update({k: out[k] for k in ACT_KEEP if k in out})
         res.setdefault("ok", bool(out.get("ok")))
@@ -1042,6 +1334,12 @@ class _Run:
             res.update(ok=False, reason="assert_failed", error=op.get("message") or "assert: condition not met")
 
     def op_if(self, op, path, res):
+        rest = self.resume.pop(path, None)
+        if rest:
+            # resumed inside this if: the branch was chosen in the previous call; do not re-evaluate
+            res.update(ok=True, branch=rest[0], resumed=True)
+            self.run_from(op[rest[0]], f"{path}.{rest[0]}.", rest[1:])
+            return
         ev = self.checked(op["cond"])
         branch = "then" if ev["met"] else "else"
         if not self.speculative:
@@ -1071,7 +1369,25 @@ class _Run:
         until, times = op.get("until"), int(op["times"])
         met, n = False, 0
         res.update(ok=True, iterations=0)
-        while n < times:
+        rest = self.resume.pop(path, None)
+        one_round = False
+        if rest:
+            # resumed inside round n: finish that round, then the rounds left (until is checked as usual)
+            n = int(rest[0])
+            res.update(resumed=True, resumed_round=n, iterations=n)
+            try:
+                done = self.run_from(op["steps"], f"{path}.{n}.", rest[1:])
+            except _BranchEnd:
+                res.update(ok=None, would_stop=True, iterations=n)
+                raise
+            if not done:
+                return
+            n += 1
+            res["iterations"] = n
+            if not self.send:
+                res["would_repeat_up_to"] = times
+                one_round = True  # a dry run plans one round
+        while n < times and not one_round:
             if until is not None:
                 ev = res["until"] = self.checked(until, fresh=True)
                 if met := ev["met"]:
@@ -1158,6 +1474,17 @@ class _Run:
         out["results"] = self.results
         out["frames"] = {n: {"stamp": (e.get("data") or {}).get("stamp"), "json": e["json"],
                              "hwnd": (e.get("data") or {}).get("hwnd")} for n, e in self.frames.items()}
+        if self.plan.get("resume_from"):
+            out["resumed_from"] = self.plan["resume_from"]
+        if info and info["stop_reason"] in RESUME_REASONS:
+            # Everything a next call needs to go on from the op that did not run (or was cut short):
+            # the same steps plus these two fields. Stamps are json paths, so they outlive this call.
+            # It holds plan fields only, so a caller merges it into the plan as it is.
+            out["continuation"] = {
+                "resume_from": info["stopped_at"],
+                "stamps": {n: e["json"] for n, e in self.frames.items() if e.get("json")},
+                "resumable": True,
+            }
         out["elapsed_ms"] = round((self.deps.clock() - self.t0) * 1000)
         out.update(self.deps.abort_state())
         aborted = bool(info and info["stop_reason"] == "aborted")
@@ -1165,6 +1492,9 @@ class _Run:
             from .act import ABORT_HINT
 
             out["hint"] = ABORT_HINT if aborted else STOP_HINT
+            if info and info["stop_reason"] in RESUME_REASONS:
+                out["hint"] = (CONTINUE_HINT + ("; this was a dry run, and a dry run's continuation is a dry run "
+                                                "too" if not self.send else ""))
             if aborted:
                 out.update(aborted=True, reason="aborted")
         if not self.send:
@@ -1224,11 +1554,19 @@ def run_plan(src: Any, *, go: bool = False, deps: Deps | None = None) -> dict:
         err["dry_run"] = not go
         return err
     run = _Run(plan, bool(go), deps or Deps())
+    parts = _resume_parts(plan)
+
+    def body() -> None:
+        if parts:
+            run.run_from(plan["steps"], "", parts)
+        else:
+            run.run_ops(plan["steps"], "")
+
     if not go:
-        run.run_ops(plan["steps"], "")
+        body()
         return run.finish()
     from .act import abort_epoch
 
     with abort_epoch():  # a stop that is on when the plan starts holds for the whole plan
-        run.run_ops(plan["steps"], "")
+        body()
         return run.finish()
