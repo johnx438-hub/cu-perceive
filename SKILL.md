@@ -25,13 +25,18 @@ description: >-
 | `browser_session` | `list` / `start` / `stop` | `list` 立刻；`start` 和 `stop` 默认执行，`dry_run=true` 只预览 |
 | `browser_observe` | `observe` 或 `snapshot`，返回 `@eN` 和 `observation_id` | 立刻（只读） |
 | `browser_tabs` | `list` / `create` / `close` / `select` / `borrow` / `return` | `list` 立刻；其余默认执行，`dry_run=true` 只预览 |
+| `browser_cooperate` | `status` / `sync` / `wait`：共享标签页的控制权（bsk `cooperate`） | `status` 立刻；`sync` / `wait` 默认执行，`dry_run=true` 只预览 |
 | `browser_act` | click / fill / press / navigate 等写操作 | 默认执行；`dry_run=true` 返回 `command`，不启动 `bsk` |
 
 `go` 可以传，但不拦这些调用（沿用桌面 `act` 的 `go=true` 也不会坏）。`CU_PERCEIVE_BSK_REQUIRE_GO=1`（也认 `true` / `yes` / `on`）把写操作改回默认 dry-run、`go=true` 才执行，并且 `dry_run=true` 仍优先。桌面 `act` 仍是默认 dry-run，不读这个开关。
 
 `dry_run=true` 返回将要执行的 `command`（完整 `bsk ... --json` argv）和 `ref`，不启动 `bsk`。`value` / `url` 写成 `--value=<v>` / `--url=<u>`；位置参数形式的 url、key、target 放在 `--` 后面，这样 `-test` 这种值不会被 bsk 当成 flag。`browser_act` 的 ref 必须来自该 session 最近一次 `browser_observe`，并带上那次的 `observation_id`；旧 ref 直接拒绝（`reason: stale_observation`），不会发给 `bsk`。`observe` 带 `cursor` 是同一份采集的下一页，但 bsk 会换掉 ref map，上一页的 `@eN` 不能再用。click / press / fill 的结果若表明页面 URL 变了，本地会清掉已存的 ref。`tab borrow` 执行时可能要用户在浏览器里确认（默认就会执行）。bsk 若返回 `input_outcome_unknown`，不要盲重试，先再 observe。
 
+**共享标签页控制（cooperate）**：人也能用的标签页上，bsk 会以 `cooperation_sync_required` 拒绝写操作，直到 agent sync；context 失效时报 `control_context_invalid`。`browser_cooperate action=sync`（默认 `settle=true`，可选 `policy=auto|target|strict`）把返回的 `context_id` 存到该 session，并把同时返回的页面记成新的 observation；之后该 session 的 `browser_act` 自动带 `--context`（也可自己传 `context=`）。仍碰到这两个 reason 时，`browser_act`（默认 `auto_sync=true`）自动 sync 一次，存新 context，返回 `ok:false` + `synced` + `observation_id` + `refs`：这次什么都没发出去，从新 refs 里重新选目标再发一次；它自己不会重发输入。`browser_session action=stop` 会清掉存的 context。
+
 `bsk` 需要 Windows 上已连接的 Chrome 或 Edge。仓库里的测试用假的可执行文件，不启动浏览器。
+
+**影子浏览器 profile**：`launch_app` 和 plan 的 `launch` 可带 `args`（字符串列表，最多 64 个），chrome.exe / msedge.exe 还可带 `user_data_dir`。浏览器绝不用主 profile：没给 user-data-dir 就用影子目录（`CU_PERCEIVE_SHADOW_PROFILE_CHROME` / `_EDGE`，默认 `~/.cu-perceive-trial-chrome-profile` / `~/.cu-perceive-trial-edge-profile`）；指向 `%LOCALAPPDATA%\Google\Chrome*\User Data`（或 Edge 的）本身或其子目录、裸 `--user-data-dir`（不带 `=`）、或两个不同目录都报 `reason: profile_refused`。自带 app `chrome-shadow`（`--no-first-run --no-default-browser-check --disable-sync --new-window about:blank`）。`launch_app(dry_run=true)` / CLI `launch --resolve-only` 只返回最终 argv 不启动。真启动返回 `pid`、`window`（新出现的顶层窗口，优先同 pid）和 `new_window`；没等到新窗口只给警告，不会把旧窗口当成它。之后用 `perceive_window` / `act` 按 hwnd 驱动；bsk 只是可选的 DOM 读取，前提是该 profile 里装了扩展。
 
 CLI 和 MCP 是同一套合同。字段名对齐，不要另编一套。唯一例外：输入文字 CLI 是 `--type` 或 `--text`，MCP 字段叫 `text`。
 
@@ -123,7 +128,7 @@ OCR / UIA / YOLO 是可选包（`[ocr]` / `[uia]` / `[yolo]`），第一次用�
 | 跨帧脚本 | `plan FILE [--go]` | `plan`（`go` 只在调用上；见下） |
 | 操作员停止 | —（只有 MCP） | `abort`（默认拉起停止；`status=true` 只读；`clear=true` 解除——那是操作员的事） |
 
-`launch` / `launch_app` 会真启动，没有 dry-run。
+`launch` / `launch_app` 默认真启动；`launch_app(dry_run=true)` 只解析 argv 和 profile 守卫（plan 里不带 go 的 launch 也只预演，并报 `would_args`）。
 
 ### act 结果怎么读（verification / abort）
 

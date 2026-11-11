@@ -88,11 +88,26 @@ class ObservationLedger:
         self._lock = threading.Lock()
         self._n = 0
         self._by_session: dict[str, Observation] = {}
+        self._context: dict[str, str] = {}
 
     def reset(self) -> None:
         with self._lock:
             self._n = 0
             self._by_session.clear()
+            self._context.clear()
+
+    # bsk cooperate: the control context from ``cooperate sync`` (passed as --context on acts).
+    def set_context(self, session: str, context_id: str) -> None:
+        with self._lock:
+            self._context[session] = context_id
+
+    def context(self, session: str) -> str | None:
+        with self._lock:
+            return self._context.get(session)
+
+    def clear_context(self, session: str) -> None:
+        with self._lock:
+            self._context.pop(session, None)
 
     def record(self, session: str, payload) -> Observation:
         refs = tuple(extract_refs(payload))

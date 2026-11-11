@@ -445,7 +445,7 @@ each one: perceive, act, wait for a condition, branch, re-perceive, act again.
 | `assert` | `cond`, `message` |
 | `if` | `cond`, `then`, `else` |
 | `repeat` | `times` (1-20), `steps`, optional `until` (checked before each round and after the last) |
-| `launch` | `app` or `exe` |
+| `launch` | `app` or `exe`; optional `args` (list of strings) and `user_data_dir` (chrome / msedge only). A dry run reports `would_args` and `profile_guard`, and a main-profile launch fails as `profile_refused` |
 | `stop` | `ok` (default true), `message` |
 
 Every op takes `on_fail: "continue"` (the default is `"stop"`) and `note`. An act step can
@@ -562,6 +562,7 @@ page.
 | `browser_session` | `list`, `start`, `stop` | `list` immediately; `start` and `stop` run unless `dry_run=true` |
 | `browser_observe` | `observe` or `snapshot`; returns `@eN` refs and an `observation_id` | Immediately |
 | `browser_tabs` | `list`, `create`, `close`, `select`, `borrow`, `return` | `list` immediately; the rest run unless `dry_run=true` |
+| `browser_cooperate` | `status`, `sync`, `wait`: shared-tab control (bsk `cooperate`) | `status` immediately; `sync` and `wait` run unless `dry_run=true` |
 | `browser_act` | click, fill, press, navigate, and the other acting verbs | Runs unless `dry_run=true` |
 
 `dry_run=true` returns `command` (the exact `bsk ... --json` argv) and `ref`,
@@ -584,8 +585,45 @@ reason is `input_outcome_unknown` means do not retry blindly; observe the
 page and decide from what it shows. A bsk usage error is `reason:
 "bad_args"` and the short clap line, not the usage dump.
 
+Shared-tab control. On a tab a person can also use, bsk refuses an act with
+`cooperation_sync_required` until the agent syncs, and with
+`control_context_invalid` once that context is gone. `browser_cooperate
+action=sync` (with `settle=true` by default, `policy=auto|target|strict`
+optional) stores the returned `context_id` for the session and records the page
+it returns as a new observation. Every later `browser_act` on that session
+passes it as `--context` (or pass `context=` yourself). When bsk still answers
+with one of those two reasons, `browser_act` (with `auto_sync=true`, the
+default) runs one sync, stores the new context, and returns `ok: false`,
+`synced`, `observation_id` and `refs`. Nothing was sent: pick the target again
+from those refs and repeat the act. It never repeats the input itself.
+`browser_session action=stop` drops the stored context.
+
 `bsk` runs on Windows with a connected Chromium-family browser. The tests here
 use a fake executable.
+
+### Shadow browser profile
+
+`launch_app` and the plan `launch` op take `args` (a list of strings; at most 64)
+and, for `chrome.exe` / `msedge.exe`, `user_data_dir`. A browser launch never
+uses the browser's main profile:
+
+- With no user-data-dir it uses the shadow profile:
+  `CU_PERCEIVE_SHADOW_PROFILE_CHROME` / `CU_PERCEIVE_SHADOW_PROFILE_EDGE`,
+  default `~/.cu-perceive-trial-chrome-profile` / `~/.cu-perceive-trial-edge-profile`.
+- A user-data-dir equal to or inside `%LOCALAPPDATA%\Google\Chrome*\User Data`
+  (or the Edge one), a bare `--user-data-dir` without `=`, or two different dirs
+  fail with `reason: "profile_refused"`.
+- The packaged `chrome-shadow` app row adds `--no-first-run
+  --no-default-browser-check --disable-sync --new-window about:blank`.
+- `launch_app(dry_run=true)` and `python -m cu_perceive launch --resolve-only`
+  return the final argv without starting anything.
+- A live launch returns `pid`, `window` (the new top-level window, matched by
+  pid where possible) and `new_window`. If no new browser window appears, it
+  warns rather than handing back an older window of the same exe.
+
+Drive the shadow window with `perceive_window` / `act` by its `hwnd`. bsk is
+optional and only reads the page there, and only if its extension is installed
+in that profile.
 
 ## Configuration
 

@@ -767,7 +767,7 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
           {"op":"assert", "cond":{...}, "message":"..."}
           {"op":"if", "cond":{...}, "then":[ops], "else":[ops]}
           {"op":"repeat", "times":5, "until":{...}, "steps":[ops]}   until is checked before each round
-          {"op":"launch", "app"|"exe"}      {"op":"stop", "ok":true, "message":"..."}
+          {"op":"launch", "app"|"exe", "args":[...], "user_data_dir"}  {"op":"stop", "ok":true, "message":"..."}
         Any op may carry "on_fail":"continue" (default "stop") and "note". Conditions (read-only, exactly one kind each):
           {"window":{"title","exe","minimized"}}  a matching top-level window exists
           {"foreground":{"title"|"hwnd"|"stamp_ref"}}
@@ -813,9 +813,36 @@ def serve(host: str = "127.0.0.1", port: int = 8771, allowed_hosts: list[str] | 
         return out
 
     @_tool
-    def launch_app(app: str = "", exe: str = ""):
-        """Start a named app from apps.json, or an exe path. Always starts; no dry-run."""
-        return launch(app=_nz_str(app), exe=_nz_str(exe))
+    def launch_app(app: str = "", exe: str = "", args: list[str] | str | None = None, user_data_dir: str = "",
+                   dry_run: bool = False):
+        """Start a named app from apps.json, or an exe path, with optional args. Starts unless dry_run=true.
+
+        args: a list of command-line arguments (or one string, split on spaces; quote paths). They follow
+        any args the apps.json row carries. Browser guard for chrome / msedge: the main profile is never
+        used. Without a user-data-dir (an args entry "--user-data-dir" + "=<dir>", or user_data_dir=) the launch goes to the shadow profile
+        (~/.cu-perceive-trial-chrome-profile, ~/.cu-perceive-trial-edge-profile; env
+        CU_PERCEIVE_SHADOW_PROFILE_CHROME / _EDGE). A user-data-dir inside the browser's own User Data
+        folder is refused (reason=profile_refused). The reply has args (the argv sent), pid, and window =
+        the NEW top-level window of that exe (new_window false plus a warning when none appeared: do not
+        drive an older window of the same exe). dry_run=true resolves the exe, args and profile and starts
+        nothing. apps lists the names; app="chrome-shadow" is a ready shadow-Chrome row.
+        """
+        from .launch import ProfileRefused, resolve
+
+        kw = {"app": _nz_str(app), "exe": _nz_str(exe), "args": args, "user_data_dir": _nz_str(user_data_dir)}
+        try:
+            if dry_run:
+                return {"ok": True, "dry_run": True, **resolve(**kw)}
+            return launch(**kw)
+        except ProfileRefused as e:
+            return {"ok": False, "reason": "profile_refused", "error": str(e),
+                    "hint": "pass a shadow --user-data-dir (or none: the shadow profile is the default)"}
+        except KeyError as e:
+            return {"ok": False, "reason": "unknown_app", "error": str(e).strip("'\""), "apps": [
+                r.get("name") for r in list_apps()]}
+        except (ValueError, FileNotFoundError) as e:
+            return {"ok": False, "reason": "bad_args" if isinstance(e, ValueError) else "exe_not_found",
+                    "error": str(e)}
 
     @_tool
     def apps():

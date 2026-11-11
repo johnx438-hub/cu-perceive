@@ -112,7 +112,7 @@ OP_FIELDS: dict[str, frozenset] = {
     "assert": frozenset({"cond", "message"}),
     "if": frozenset({"cond", "then", "else"}),
     "repeat": frozenset({"times", "until", "steps"}),
-    "launch": frozenset({"app", "exe"}),
+    "launch": frozenset({"app", "exe", "args", "user_data_dir"}),
     "stop": frozenset({"ok", "message"}),
 }
 # Ops whose result a later {"last": {...}} condition reads.
@@ -394,6 +394,17 @@ def _validate_ops(ops, path: str, depth: int, names: set) -> None:
         elif kind == "launch":
             if len([k for k in ("app", "exe") if isinstance(op.get(k), str) and op[k]]) != 1:
                 raise PlanError(p, "launch needs exactly one of app, exe")
+            if "args" in op:
+                from .launch import normalize_args
+
+                if not isinstance(op["args"], list):
+                    raise PlanError(p, "args must be a list of strings")
+                try:
+                    normalize_args(op["args"])
+                except ValueError as e:
+                    raise PlanError(p, str(e)) from e
+            if "user_data_dir" in op and not (isinstance(op["user_data_dir"], str) and op["user_data_dir"].strip()):
+                raise PlanError(p, "user_data_dir must be a non-empty string")
         elif kind == "stop":
             if "ok" in op and not isinstance(op["ok"], bool):
                 raise PlanError(p, "ok must be true or false")
@@ -509,10 +520,17 @@ class Deps:
 
         return foreground_brief()
 
-    def launch(self, app: str | None = None, exe: str | None = None) -> dict:
+    def launch(self, app: str | None = None, exe: str | None = None, args=None,
+               user_data_dir: str | None = None) -> dict:
         from .launch import launch
 
-        return launch(app=app, exe=exe)
+        return launch(app=app, exe=exe, args=args, user_data_dir=user_data_dir)
+
+    def launch_plan(self, app: str | None = None, exe: str | None = None, args=None,
+                    user_data_dir: str | None = None) -> dict:
+        from .launch import resolve
+
+        return resolve(app=app, exe=exe, args=args, user_data_dir=user_data_dir)
 
     def abort_state(self) -> dict:
         from .act import abort_state
@@ -1078,18 +1096,37 @@ class _Run:
                 res["ok"] = None
 
     def op_launch(self, op, path, res):
+        kw = {"app": op.get("app"), "exe": op.get("exe")}
+        if op.get("args"):
+            kw["args"] = list(op["args"])
+        if op.get("user_data_dir"):
+            kw["user_data_dir"] = op["user_data_dir"]
         if not self.send:
             self.unsent += 1
             self.unsure_acts += 1 if self.unsure_branches else 0
             res.update(ok=True, would_launch=op.get("app") or op.get("exe"))
+            planner = getattr(self.deps, "launch_plan", None)
+            if planner is not None:
+                try:
+                    pl = planner(**kw)
+                except KeyError as e:
+                    raise OpError("launch_failed", str(e)) from e
+                except ValueError as e:  # ProfileRefused is a ValueError: refuse in the dry run too
+                    reason = "profile_refused" if type(e).__name__ == "ProfileRefused" else "launch_failed"
+                    raise OpError(reason, str(e)) from e
+                res.update(would_args=pl.get("args"),
+                           **{k: pl[k] for k in ("browser", "user_data_dir", "profile_guard") if pl.get(k)})
             return
         try:
-            out = self.deps.launch(app=op.get("app"), exe=op.get("exe"))
+            out = self.deps.launch(**kw)
         except (KeyError, ValueError, OSError) as e:
-            raise OpError("launch_failed", str(e)) from e
+            reason = "profile_refused" if type(e).__name__ == "ProfileRefused" else "launch_failed"
+            raise OpError(reason, str(e)) from e
         win = out.get("window") or {}
         res.update(ok=bool(out.get("ok", True)), exe=out.get("exe"),
-                   window={k: win.get(k) for k in ("hwnd", "title", "exe")} if win else None)
+                   window={k: win.get(k) for k in ("hwnd", "title", "exe", "pid")} if win else None,
+                   **{k: out[k] for k in ("args", "pid", "new_window", "browser", "user_data_dir", "profile_guard",
+                                          "warnings") if k in out})
 
     def op_stop(self, op, path, res):
         ok = bool(op.get("ok", True))

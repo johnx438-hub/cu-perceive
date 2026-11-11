@@ -225,6 +225,12 @@ def main(argv: list[str] | None = None) -> int:
     L = sub.add_parser("launch", parents=[common], help="start an app from apps.json or an exe path")
     L.add_argument("--app", help="name in apps.json")
     L.add_argument("--exe", help="full exe path")
+    L.add_argument("--arg", dest="launch_args", action="append", default=None, metavar="ARG",
+                   help="one command-line argument for the app (repeatable; use --arg=--flag for dashes)")
+    L.add_argument("--user-data-dir", dest="user_data_dir", default=None,
+                   help="chrome/msedge profile dir (default: the shadow profile; the main profile is refused)")
+    L.add_argument("--resolve-only", dest="resolve_only", action="store_true",
+                   help="print the exe, argv and profile it would use; start nothing")
 
     pe = sub.add_parser(
         "path-extract",
@@ -588,9 +594,14 @@ def main(argv: list[str] | None = None) -> int:
         _emit(out, args)
         return 0 if out.get("ok", True) else 1
     if args.cmd == "launch":
-        from .launch import launch
-        _emit(launch(app=args.app, exe=args.exe), args)
-        return 0
+        from .launch import ProfileRefused, launch, resolve
+        kw = dict(app=args.app, exe=args.exe, args=args.launch_args, user_data_dir=args.user_data_dir)
+        try:
+            out = {"ok": True, "dry_run": True, **resolve(**kw)} if args.resolve_only else launch(**kw)
+        except ProfileRefused as e:
+            out = {"ok": False, "reason": "profile_refused", "error": str(e)}
+        _emit(out, args)
+        return 0 if out.get("ok") else 1
     if args.cmd == "path-extract":
         from .path_extract import path_extract_cli_result
         out, code = path_extract_cli_result(

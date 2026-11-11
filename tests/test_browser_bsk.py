@@ -105,6 +105,17 @@ elif mode == "user_plain":
     raise SystemExit(1)
 elif mode == "nav_timeout":
     emit({"tab_id": 1, "url": "https://example.com", "reached": "timeout"}, 4)
+elif mode == "coop" and args[:2] == ["cooperate", "sync"]:
+    emit({"context_id": "ctx-1", "observation_id": "bsk-obs-9",
+          "observation": {"observation_id": "bsk-obs-9", "text": '[textbox] @e33 "Search"'}}, 0)
+elif mode == "coop" and args[:2] == ["cooperate", "status"]:
+    emit({"control": "agent", "policy": "target"}, 0)
+elif mode == "coop" and "--context" not in args and ("fill" in args or "click" in args):
+    emit({"code": "permission_denied", "message": "sync first", "hint": "bsk cooperate sync",
+          "exit_code": 1, "data": {"reason": "cooperation_sync_required"}}, 1)
+elif mode == "coop" and "--context" in args and args[args.index("--context") + 1] != "ctx-1":
+    emit({"code": "permission_denied", "message": "context invalid", "hint": "sync again",
+          "exit_code": 1, "data": {"reason": "control_context_invalid"}}, 1)
 elif args[:2] == ["session", "start"]:
     emit({"session_id": "abcd", "browser_instance_id": "browser-1"}, 0)
 elif args[:2] == ["session", "list"]:
