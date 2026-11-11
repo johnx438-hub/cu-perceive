@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from cu_perceive import launch as launch_mod
-from cu_perceive.launch import ProfileRefused, guard_browser_args, normalize_args, resolve
+from cu_perceive.launch import ProfileRefused, canonical_path, guard_browser_args, normalize_args, resolve
 from cu_perceive.plan import run_plan, validate_plan
 from cu_perceive.browser.ledger import LEDGER
 from cu_perceive.browser.tools import browser_act, browser_cooperate, browser_session
@@ -56,19 +56,19 @@ class TestNormalizeArgs(unittest.TestCase):
 class TestBrowserGuard(GuardCase):
     def test_defaults_to_shadow_profile(self):
         tail, info = guard_browser_args(self.chrome, ["--new-window"])
-        self.assertEqual(tail, [f"--user-data-dir={self.shadow}", "--new-window"])
+        self.assertEqual(tail, [f"--user-data-dir={canonical_path(self.shadow)}", "--new-window"])
         self.assertEqual(info["profile_guard"], "defaulted_to_shadow")
         self.assertEqual(info["browser"], "chrome")
 
     def test_edge_defaults_to_its_own_shadow(self):
         tail, info = guard_browser_args(self.edge, [])
-        self.assertEqual(tail, [f"--user-data-dir={self.eshadow}"])
+        self.assertEqual(tail, [f"--user-data-dir={canonical_path(self.eshadow)}"])
         self.assertEqual(info["browser"], "edge")
 
     def test_explicit_dir_kept_once(self):
         d = Path(self.tmp.name) / "mine"
         tail, info = guard_browser_args(self.chrome, [f"--user-data-dir={d}", "--x"], user_data_dir=str(d))
-        self.assertEqual(tail, [f"--user-data-dir={d}", "--x"])
+        self.assertEqual(tail, [f"--user-data-dir={canonical_path(d)}", "--x"])
         self.assertEqual(info["profile_guard"], "explicit")
 
     def test_main_profile_refused(self):
@@ -83,7 +83,7 @@ class TestBrowserGuard(GuardCase):
     def test_sibling_of_main_is_not_main(self):
         sib = self.local / "Google" / "Chrome" / "User Data-shadow"
         tail, _ = guard_browser_args(self.chrome, [], user_data_dir=str(sib))
-        self.assertEqual(tail, [f"--user-data-dir={sib}"])
+        self.assertEqual(tail, [f"--user-data-dir={canonical_path(sib)}"])
 
     def test_bare_conflicting_and_empty_refused(self):
         with self.assertRaises(ProfileRefused):
@@ -112,7 +112,7 @@ class TestResolveAndLaunch(GuardCase):
         rows = [{"name": "cs", "exe": self.chrome, "args": ["--no-first-run"]}]
         with self.apps(rows):
             out = resolve(app="cs", args=["about:blank"])
-        self.assertEqual(out["args"], [f"--user-data-dir={self.shadow}", "--no-first-run", "about:blank"])
+        self.assertEqual(out["args"], [f"--user-data-dir={canonical_path(self.shadow)}", "--no-first-run", "about:blank"])
         self.assertEqual(out["app"], "cs")
         self.assertEqual(out["profile_guard"], "defaulted_to_shadow")
 
@@ -135,7 +135,7 @@ class TestResolveAndLaunch(GuardCase):
                 mock.patch.object(launch_mod.time, "sleep"):
             out = launch_mod.launch(exe=str(exe), args=["--new-window"])
         argv = popen.call_args[0][0]
-        self.assertEqual(argv[1:], [f"--user-data-dir={self.shadow}", "--new-window"])
+        self.assertEqual(argv[1:], [f"--user-data-dir={canonical_path(self.shadow)}", "--new-window"])
         self.assertTrue(self.shadow.is_dir())
         self.assertEqual(out["window"]["hwnd"], 3)
         self.assertTrue(out["new_window"])

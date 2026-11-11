@@ -613,6 +613,18 @@ uses the browser's main profile:
 - A user-data-dir equal to or inside `%LOCALAPPDATA%\Google\Chrome*\User Data`
   (or the Edge one), a bare `--user-data-dir` without `=`, or two different dirs
   fail with `reason: "profile_refused"`.
+- The comparison runs on canonical paths, for the candidate and every main root
+  alike: 8.3 short names are expanded, the `\\?\` / `\\.\` / `\??\` prefixes are
+  stripped, junctions, symlinks and mount points are followed (a path that does not
+  exist yet is resolved through its nearest existing parent), `..`, forward slashes,
+  trailing dots / spaces and case are folded. UNC and network paths, volume-GUID or
+  other device namespaces, drive-relative `C:x`, alternate data streams and links
+  that do not resolve are refused. `-user-data-dir` and `/user-data-dir` count like
+  `--user-data-dir`. The argv carries the resolved path.
+- `chrome_proxy.exe` / `msedge_proxy.exe` and renamed links to the browser exe are
+  guarded too. A shell (`cmd`, `powershell`, `explorer`, ...) whose args name chrome
+  or msedge is refused, and a user-data-dir switch inside any other program's args is
+  checked the same way.
 - The packaged `chrome-shadow` app row adds `--no-first-run
   --no-default-browser-check --disable-sync --new-window about:blank`.
 - `launch_app(dry_run=true)` and `python -m cu_perceive launch --resolve-only`
