@@ -202,8 +202,11 @@ class TestCooperateContext(BrowserCase):
         obs = LEDGER.latest("abcd").id
         act = browser_act(verb="fill", session="abcd", ref="@e33", observation_id=obs, value="hi")
         self.assertTrue(act["ok"], act)
-        last = self.calls()[-1]
-        self.assertEqual(last[last.index("--context") + 1], "ctx-1")
+        # --context must precede --. The old check (flag present, next token is
+        # the id) still passed when the flag was a positional after --.
+        self.assertEqual(self.calls()[-1], [
+            "fill", "--session", "abcd", "--value=hi", "--context", "ctx-1", "--json", "--", "@e33",
+        ])
 
     def test_status_is_read_only_and_bad_args(self):
         self.assertTrue(browser_cooperate(action="status", session="abcd")["ok"])
@@ -228,6 +231,9 @@ class TestCooperateContext(BrowserCase):
         self.assertEqual(LEDGER.context("abcd"), "ctx-1")
         again = browser_act(verb="click", session="abcd", ref="@e33", observation_id=out["observation_id"])
         self.assertTrue(again["ok"], again)
+        self.assertEqual(self.calls()[-1], [
+            "click", "--session", "abcd", "--context", "ctx-1", "--json", "--", "@e33",
+        ])
 
     def test_invalid_context_cleared_and_no_auto_sync(self):
         self.observe()
@@ -243,9 +249,38 @@ class TestCooperateContext(BrowserCase):
         out = browser_act(verb="navigate", session="abcd", url="https://example.com", context="ctx-1",
                           dry_run=True)
         self.assertTrue(out["dry_run"])
-        cmd = out["command"]
-        self.assertEqual(cmd[cmd.index("--context") + 1], "ctx-1")
+        self.assertEqual(out["command"][1:], [
+            "navigate", "--session", "abcd", "--context", "ctx-1", "--json", "--", "https://example.com",
+        ])
         self.assertEqual(self.calls(), [])
+
+    def test_stored_context_stays_before_positional_separator(self):
+        synced = browser_cooperate(action="sync", session="abcd")
+        self.assertTrue(synced["ok"], synced)
+        obs = LEDGER.latest("abcd").id
+        click = browser_act(verb="click", session="abcd", ref="@e33", observation_id=obs, dry_run=True)
+        self.assertEqual(click["command"][1:], [
+            "click", "--session", "abcd", "--context", "ctx-1", "--json", "--", "@e33",
+        ])
+        self.assertEqual(click["command"][click["command"].index("--"):], ["--", "@e33"])
+        navigated = browser_act(
+            verb="navigate", session="abcd", url="https://example.com", dry_run=True,
+        )
+        self.assertEqual(navigated["command"][1:], [
+            "navigate", "--session", "abcd", "--context", "ctx-1", "--json", "--", "https://example.com",
+        ])
+        self.assertEqual(navigated["command"][navigated["command"].index("--"):], ["--", "https://example.com"])
+        # No positional separator: the flag is still an option, and --json follows it.
+        reloaded = browser_act(verb="reload", session="abcd", dry_run=True)
+        self.assertEqual(reloaded["command"][1:], [
+            "reload", "--session", "abcd", "--context", "ctx-1", "--json",
+        ])
+        live = browser_act(verb="click", session="abcd", ref="@e33", observation_id=obs)
+        self.assertTrue(live["ok"], live)
+        self.assertEqual(self.calls()[-1], click["command"][1:])
+        opened = browser_act(verb="navigate", session="abcd", url="https://example.com")
+        self.assertTrue(opened["ok"], opened)
+        self.assertEqual(self.calls()[-1], navigated["command"][1:])
 
     def test_session_stop_clears_context(self):
         LEDGER.set_context("abcd", "ctx-1")

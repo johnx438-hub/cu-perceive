@@ -47,6 +47,23 @@ class BrowserBackend(Protocol):
     def run(self, args: list[str], *, timeout: float) -> BskRun: ...
 
 
+def insert_before_positional(args: list[str], *tokens: str) -> list[str]:
+    """Insert ``tokens`` before a ``--`` positional separator.
+
+    Clap (and POSIX) treats every argument after ``--`` as a positional, so a
+    flag placed after that separator is not an option. ``command_argv`` uses
+    this for ``--json``. Cooperate ``--context`` must use it too: appending
+    the flag after ``-- <target>`` makes bsk exit ``cli_parse_error``.
+    """
+    argv = list(args)
+    if "--" in argv:
+        at = argv.index("--")
+        argv[at:at] = list(tokens)
+    else:
+        argv.extend(tokens)
+    return argv
+
+
 def command_argv(executable: str, args: list[str]) -> list[str]:
     """Exact bsk argv, including ``--json``.
 
@@ -56,10 +73,7 @@ def command_argv(executable: str, args: list[str]) -> list[str]:
     """
     argv = [executable, *args]
     if "--json" not in argv:
-        if "--" in argv:
-            argv.insert(argv.index("--"), "--json")
-        else:
-            argv.append("--json")
+        argv = insert_before_positional(argv, "--json")
     return argv
 
 

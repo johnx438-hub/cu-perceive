@@ -393,8 +393,8 @@ def _equals_opt(flag: str, value: str) -> str:
 def _append_positional(args: list[str], value: str) -> None:
     """One positional after ``--``. bsk clap accepts that for url, key, and target.
 
-    ``--json`` is inserted before this separator by the backend. Anything after
-    ``--`` is positional, so the flag must not follow the value.
+    ``--json`` and a cooperate ``--context`` are inserted before this separator.
+    Anything after ``--`` is positional, so those flags must not follow the value.
     """
     args.append("--")
     args.append(value)

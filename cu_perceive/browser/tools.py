@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 
 from . import catalog
-from .backend import command_argv, get_backend, set_backend, timeout_sec
+from .backend import command_argv, get_backend, insert_before_positional, set_backend, timeout_sec
 from .errors import interpret_run, missing_dependency
 from .ledger import LEDGER, action_changed_url, stale_refusal
 
@@ -354,11 +354,12 @@ def browser_act(
     data.reason; input_outcome_unknown means do not retry blindly — observe first.
     Desktop clicks stay on act, which still dry-runs unless go=true.
     Shared-tab control: the act carries the control context from the last browser_cooperate sync of
-    this session (or context= when given) as bsk --context. When bsk answers cooperation_sync_required
-    or control_context_invalid and auto_sync=true (default), the server runs one cooperate sync
-    (--settle), stores the new context, records the page it returns as a new observation, and replies
-    ok=false with synced, observation_id and refs: nothing was sent, so pick the ref again from those
-    refs and repeat the act (the context is then passed for you). It never repeats the input itself.
+    this session (or context= when given) as bsk --context, placed before any positional --.
+    When bsk answers cooperation_sync_required or control_context_invalid and auto_sync=true (default),
+    the server runs one cooperate sync (--settle), stores the new context, records the page it returns
+    as a new observation, and replies ok=false with synced, observation_id and refs: nothing was sent,
+    so pick the ref again from those refs and repeat the act (the context is then passed for you).
+    It never repeats the input itself.
     """
     sess = (session or "").strip()
     ctx = (context or "").strip() or (LEDGER.context(sess) if sess else None)
@@ -394,8 +395,14 @@ COOP_SYNC_REASONS = frozenset({"cooperation_sync_required", "control_context_inv
 
 
 def _with_context(plan: catalog.Plan, ctx: str | None) -> catalog.Plan:
+    """Attach ``--context`` before a positional ``--``, never after it.
+
+    ``plan_act`` already ends click, navigate, fill, and press with ``--`` plus
+    the target, url, or key. Appending the flag there is what bsk reports as
+    ``cli_parse_error`` (click: unexpected argument; navigate: subcommand).
+    """
     if ctx and not plan.read and "--context" not in plan.args:
-        plan.args = list(plan.args) + ["--context", ctx]
+        plan.args = insert_before_positional(plan.args, "--context", ctx)
         plan.notes.append("passing the stored cooperate control context (--context)")
     return plan
 
@@ -483,10 +490,11 @@ def browser_cooperate(
 
     sync takes control under the session's policy (policy=auto|target|strict; empty keeps bsk's default)
     and, with settle=true (default), retries transient read-only refusals. Its context_id is stored for
-    the session and passed to every later browser_act as --context; the page it returns is recorded as a
-    new observation (observation_id, refs) for browser_act. wait waits for a person to hand the tab back
-    (timeout_ms up to 25000). sync and wait run unless dry_run=true; go is accepted and does not gate the
-    call. browser_act already syncs once by itself on cooperation_sync_required.
+    the session and passed to every later browser_act as --context before any positional --. The page it
+    returns is recorded as a new observation (observation_id, refs) for browser_act. wait waits for a
+    person to hand the tab back (timeout_ms up to 25000). sync and wait run unless dry_run=true; go is
+    accepted and does not gate the call. browser_act already syncs once by itself on
+    cooperation_sync_required.
     """
     return _cooperate(action=action, session=session, policy=policy, settle=bool(settle),
                       timeout_ms=timeout_ms, tab_id=tab_id, dry_run=dry_run, go=bool(go))
