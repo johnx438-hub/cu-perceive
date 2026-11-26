@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from cu_perceive import mcp_server
-from cu_perceive.browser.backend import BskRun, bsk_on_path, command_argv, set_backend
+from cu_perceive.browser.backend import BskRun, SubprocessBsk, bsk_on_path, command_argv, set_backend
 from cu_perceive.browser.catalog import (
     ACT_ALIASES,
     ACT_VERBS,
@@ -23,6 +23,7 @@ from cu_perceive.browser.catalog import (
     TAB_ACTIONS,
     allowlist,
 )
+from cu_perceive.browser.errors import interpret_run
 from cu_perceive.browser.tools import (
     browser_act,
     browser_observe,
@@ -52,7 +53,24 @@ def emit(obj, code):
     raise SystemExit(code)
 
 
-if mode == "outcome_unknown":
+# Clap treats everything after -- as positional. --context after that separator
+# is the incident argv: click says unexpected argument, navigate (which has
+# subcommands and args_conflicts_with_subcommands) says the subcommand cannot
+# be used with the flags already seen. --json before -- makes bsk print this
+# as data.reason=cli_parse_error instead of a stderr usage dump.
+if "--" in args and "--context" in args and args.index("--context") > args.index("--"):
+    if args and args[0] == "navigate":
+        message = "the subcommand '--context' cannot be used with: --session <SESSION> --json [URL]"
+    else:
+        message = "unexpected argument '--context' found"
+    emit({
+        "code": "invalid_params",
+        "message": message,
+        "hint": "place --context before --; arguments after -- are positional",
+        "exit_code": 1,
+        "data": {"reason": "cli_parse_error", "details": "error: " + message},
+    }, 1)
+elif mode == "outcome_unknown":
     emit({
         "code": "not_found",
         "message": "visual target changed after the first click",
@@ -566,6 +584,54 @@ class TestErrorMapping(BrowserCase):
         self.assertEqual(invalid["reason"], "bad_args")
         self.assertEqual(invalid["error"], "invalid value 'nope' for '--timeout <TIMEOUT>'")
         self.assertNotIn("For more information", json.dumps(invalid))
+
+    def test_context_after_separator_is_cli_parse_error(self):
+        """The fake bsk matches bsk 0.5: --context after -- is a parse error.
+
+        command_argv only moves --json, so a plan that already put --context
+        after -- reaches the binary in the incident order. Click and navigate
+        report the two clap summaries, both as data.reason=cli_parse_error.
+        The same flag before -- is accepted.
+        """
+        backend = SubprocessBsk()
+        click = backend.run(
+            ["click", "--session", "abcd", "--", "@e3", "--context", "ctx-1"],
+            timeout=10,
+        )
+        parsed = interpret_run(click)
+        self.assertEqual(click.argv[1:], [
+            "click", "--session", "abcd", "--json", "--", "@e3", "--context", "ctx-1",
+        ])
+        self.assertEqual(click.exit_code, 1)
+        self.assertFalse(parsed["ok"])
+        self.assertEqual(parsed["reason"], "cli_parse_error")
+        self.assertEqual(parsed["error"], "unexpected argument '--context' found")
+        self.assertEqual(parsed["bsk_code"], "invalid_params")
+
+        nav = backend.run(
+            ["navigate", "--session", "abcd", "--", "https://example.com", "--context", "ctx-1"],
+            timeout=10,
+        )
+        parsed = interpret_run(nav)
+        self.assertEqual(nav.argv[1:], [
+            "navigate", "--session", "abcd", "--json", "--", "https://example.com", "--context", "ctx-1",
+        ])
+        self.assertEqual(parsed["reason"], "cli_parse_error")
+        self.assertEqual(
+            parsed["error"],
+            "the subcommand '--context' cannot be used with: --session <SESSION> --json [URL]",
+        )
+
+        good = backend.run(
+            ["click", "--session", "abcd", "--context", "ctx-1", "--", "@e3"],
+            timeout=10,
+        )
+        accepted = interpret_run(good)
+        self.assertEqual(good.exit_code, 0)
+        self.assertEqual(good.argv[1:], [
+            "click", "--session", "abcd", "--context", "ctx-1", "--json", "--", "@e3",
+        ])
+        self.assertTrue(accepted["ok"], accepted)
 
     def test_input_outcome_unknown_says_not_to_retry_blindly(self):
         obs = self.observe()

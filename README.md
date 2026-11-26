@@ -607,7 +607,8 @@ own dry-run default and ignores that switch. `browser_act` refuses a ref that
 is not from the latest `browser_observe` for that session
 (`reason: "stale_observation"`). `value` and `url` are passed as
 `--value=<v>` and `--url=<u>`. A positional url, key, or target goes after
-`--`, so a value such as `-test` is not parsed as a flag. `browser_observe`
+`--`, so a value such as `-test` is not parsed as a flag. Other flags,
+including a cooperate `--context`, stay before that `--`. `browser_observe`
 with `cursor` reads the next page of the same capture. bsk replaces the ref
 map on that page, so refs from earlier pages are not reused. A click, press,
 or fill whose result reports a different page URL clears the stored refs.
@@ -624,7 +625,8 @@ Shared-tab control. On a tab a person can also use, bsk refuses an act with
 action=sync` (with `settle=true` by default, `policy=auto|target|strict`
 optional) stores the returned `context_id` for the session and records the page
 it returns as a new observation. Every later `browser_act` on that session
-passes it as `--context` (or pass `context=` yourself). When bsk still answers
+passes it as `--context` before any positional `--` (or pass `context=`
+yourself). When bsk still answers
 with one of those two reasons, `browser_act` (with `auto_sync=true`, the
 default) runs one sync, stores the new context, and returns `ok: false`,
 `synced`, `observation_id` and `refs`. Nothing was sent: pick the target again
